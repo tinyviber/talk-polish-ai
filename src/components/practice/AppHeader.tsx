@@ -22,10 +22,12 @@ export function AppHeader() {
           <span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-tactile">
             <Mic className="size-4" aria-hidden />
           </span>
-          <span className="font-display text-lg font-semibold tracking-tight">Kotoba Loop</span>
+          <span className="hidden font-display text-lg font-semibold tracking-tight xs:inline sm:inline">
+            Kotoba Loop
+          </span>
         </Link>
 
-        <nav aria-label="Main" className="ml-auto flex items-center gap-1">
+        <nav aria-label="Main" className="ml-auto flex items-center gap-0.5 sm:gap-1">
           {NAV.map((item) => {
             const active = item.to === "/" ? pathname === "/" : pathname.startsWith(item.to);
             return (
@@ -34,7 +36,7 @@ export function AppHeader() {
                 to={item.to}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
+                  "rounded-full px-2.5 py-1.5 text-sm font-medium transition-colors sm:px-3",
                   active
                     ? "bg-secondary text-secondary-foreground"
                     : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",

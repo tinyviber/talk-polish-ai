@@ -59,7 +59,10 @@ export function useRecorder() {
       t += 1;
       setState((s) =>
         s.status === "recording"
-          ? { ...s, level: 0.35 + 0.3 * Math.abs(Math.sin(t / 9)) + 0.15 * Math.abs(Math.sin(t / 3)) }
+          ? {
+              ...s,
+              level: 0.35 + 0.3 * Math.abs(Math.sin(t / 9)) + 0.15 * Math.abs(Math.sin(t / 3)),
+            }
           : s,
       );
       rafRef.current = requestAnimationFrame(tick);
@@ -68,7 +71,14 @@ export function useRecorder() {
   }, []);
 
   const start = useCallback(async () => {
-    setState({ status: "requesting", seconds: 0, level: 0, audioUrl: null, mocked: false, error: null });
+    setState({
+      status: "requesting",
+      seconds: 0,
+      level: 0,
+      audioUrl: null,
+      mocked: false,
+      error: null,
+    });
     const supported =
       typeof window !== "undefined" &&
       typeof navigator !== "undefined" &&
@@ -101,7 +111,8 @@ export function useRecorder() {
       recorder.start();
 
       const AudioCtor: typeof AudioContext | undefined =
-        window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (AudioCtor) {
         const ctx = new AudioCtor();
         ctxRef.current = ctx;
@@ -121,7 +132,14 @@ export function useRecorder() {
         rafRef.current = requestAnimationFrame(tick);
       }
 
-      setState({ status: "recording", seconds: 0, level: 0, audioUrl: null, mocked: false, error: null });
+      setState({
+        status: "recording",
+        seconds: 0,
+        level: 0,
+        audioUrl: null,
+        mocked: false,
+        error: null,
+      });
       startTimer();
     } catch {
       cleanup();
@@ -166,7 +184,13 @@ export function useRecorder() {
       const url = blob.size > 0 ? URL.createObjectURL(blob) : null;
       recorderRef.current = null;
       cleanup();
-      setState((s) => ({ ...s, status: "recorded", level: 0, audioUrl: url, mocked: url === null }));
+      setState((s) => ({
+        ...s,
+        status: "recorded",
+        level: 0,
+        audioUrl: url,
+        mocked: url === null,
+      }));
       return;
     }
     cleanup();

@@ -65,7 +65,11 @@ function Onboarding() {
               {lang === "en" ? "Work, travel & everyday conversation" : "仕事・旅行・日常会話"}
             </span>
             <span className="mt-4 flex items-center gap-1 text-sm font-semibold text-primary">
-              Start <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden />
+              Start{" "}
+              <ArrowRight
+                className="size-4 transition-transform group-hover:translate-x-0.5"
+                aria-hidden
+              />
             </span>
           </button>
         ))}
@@ -124,7 +128,9 @@ function Home() {
                 aria-pressed={lang === l}
                 className={cn(
                   "rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
-                  lang === l ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                  lang === l
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
                 {LANG_LABEL[l]}
@@ -150,7 +156,11 @@ function Home() {
         </section>
 
         <section className="mt-10 grid gap-4 sm:grid-cols-3" aria-label="Your progress at a glance">
-          <Stat icon={<Flame className="size-4" aria-hidden />} label="Day streak" value={String(streak)} />
+          <Stat
+            icon={<Flame className="size-4" aria-hidden />}
+            label="Day streak"
+            value={String(streak)}
+          />
           <Stat label="Sessions" value={String(state.sessions.length)} />
           <Stat
             label="Avg. gain on 2nd try"
@@ -164,7 +174,10 @@ function Home() {
             <h2 id="recent-saved" className="font-display text-xl">
               Recently saved
             </h2>
-            <Link to="/saved" className="text-sm font-semibold text-primary underline-offset-4 hover:underline">
+            <Link
+              to="/saved"
+              className="text-sm font-semibold text-primary underline-offset-4 hover:underline"
+            >
               All saved
             </Link>
           </div>
@@ -177,8 +190,12 @@ function Home() {
             <ul className="mt-3 grid gap-2 sm:grid-cols-3">
               {recent.map((e) => (
                 <li key={e.id} className="rounded-2xl border border-border bg-card px-4 py-3">
-                  <p className={cn("font-medium text-balance-wrap", e.lang === "ja" && "font-jp")}>{e.text}</p>
-                  <p className="mt-0.5 text-sm text-muted-foreground text-balance-wrap">{e.meaning}</p>
+                  <p className={cn("font-medium text-balance-wrap", e.lang === "ja" && "font-jp")}>
+                    {e.text}
+                  </p>
+                  <p className="mt-0.5 text-sm text-muted-foreground text-balance-wrap">
+                    {e.meaning}
+                  </p>
                 </li>
               ))}
             </ul>

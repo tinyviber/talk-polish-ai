@@ -12,12 +12,7 @@ export type Prompt = {
 };
 
 export type ScoreKey =
-  | "fluency"
-  | "pauses"
-  | "grammar"
-  | "vocabulary"
-  | "naturalness"
-  | "pronunciation";
+  "fluency" | "pauses" | "grammar" | "vocabulary" | "naturalness" | "pronunciation";
 
 export type Scores = Record<ScoreKey, number>;
 

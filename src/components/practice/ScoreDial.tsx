@@ -17,7 +17,12 @@ export function ScoreDial({
   return (
     <div className="flex items-center gap-3">
       <div className="relative" style={{ width: size, height: size }}>
-        <svg viewBox="0 0 100 100" className="size-full -rotate-90" role="img" aria-label={`Score ${value} out of 100`}>
+        <svg
+          viewBox="0 0 100 100"
+          className="size-full -rotate-90"
+          role="img"
+          aria-label={`Score ${value} out of 100`}
+        >
           <circle cx="50" cy="50" r={r} fill="none" stroke="var(--border)" strokeWidth="8" />
           <circle
             cx="50"
@@ -40,10 +45,7 @@ export function ScoreDial({
         {label ? <p className="text-sm font-medium">{label}</p> : null}
         {typeof delta === "number" && delta !== 0 ? (
           <p
-            className={cn(
-              "text-sm font-semibold",
-              delta > 0 ? "text-success" : "text-destructive",
-            )}
+            className={cn("text-sm font-semibold", delta > 0 ? "text-success" : "text-destructive")}
           >
             {delta > 0 ? "+" : ""}
             {delta} vs. first attempt
@@ -54,7 +56,15 @@ export function ScoreDial({
   );
 }
 
-export function ScoreBar({ label, value, previous }: { label: string; value: number; previous?: number | undefined }) {
+export function ScoreBar({
+  label,
+  value,
+  previous,
+}: {
+  label: string;
+  value: number;
+  previous?: number | undefined;
+}) {
   const delta = typeof previous === "number" ? value - previous : null;
   return (
     <div>
@@ -63,7 +73,9 @@ export function ScoreBar({ label, value, previous }: { label: string; value: num
         <span className="tabular-nums text-muted-foreground">
           {value}
           {delta ? (
-            <span className={cn("ml-1 font-semibold", delta > 0 ? "text-success" : "text-destructive")}>
+            <span
+              className={cn("ml-1 font-semibold", delta > 0 ? "text-success" : "text-destructive")}
+            >
               ({delta > 0 ? "+" : ""}
               {delta})
             </span>
@@ -72,7 +84,10 @@ export function ScoreBar({ label, value, previous }: { label: string; value: num
       </div>
       <div className="mt-1 h-2 overflow-hidden rounded-full bg-border">
         <div
-          className={cn("h-full rounded-full transition-[width] duration-700", value >= 75 ? "bg-success" : "bg-primary")}
+          className={cn(
+            "h-full rounded-full transition-[width] duration-700",
+            value >= 75 ? "bg-success" : "bg-primary",
+          )}
           style={{ width: `${value}%` }}
         />
       </div>

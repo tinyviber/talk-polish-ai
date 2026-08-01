@@ -117,7 +117,9 @@ export function RecordControls({
               <p className="max-w-sm text-center text-xs text-muted-foreground">{error}</p>
             ) : null}
             {mocked && status === "recording" ? (
-              <p className="text-xs text-muted-foreground">Demo mode — sample audio will be used.</p>
+              <p className="text-xs text-muted-foreground">
+                Demo mode — sample audio will be used.
+              </p>
             ) : null}
           </div>
         </>
@@ -165,11 +167,18 @@ export function AudioPreview({ url, seconds }: { url: string | null; seconds: nu
         onClick={toggle}
         aria-label={playing ? "Pause your recording" : "Play your recording"}
       >
-        {playing ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
+        {playing ? (
+          <Pause className="size-4" aria-hidden />
+        ) : (
+          <Play className="size-4" aria-hidden />
+        )}
       </Button>
       <div className="flex-1">
         <div className="h-2 overflow-hidden rounded-full bg-border">
-          <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
+          <div
+            className="h-full rounded-full bg-primary transition-[width]"
+            style={{ width: `${pct}%` }}
+          />
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
           {url ? "Your recording" : "Simulated playback (no audio captured)"}

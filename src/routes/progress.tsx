@@ -58,7 +58,10 @@ function Progress() {
         <section className="mt-6 grid gap-3 sm:grid-cols-2">
           <div className="rounded-3xl border border-border bg-card p-5 shadow-lift">
             <p className="text-sm text-muted-foreground">Current streak</p>
-            <p className="font-display text-4xl">{streak}<span className="ml-1 text-base text-muted-foreground">days</span></p>
+            <p className="font-display text-4xl">
+              {streak}
+              <span className="ml-1 text-base text-muted-foreground">days</span>
+            </p>
             <div className="mt-4 flex gap-1.5" aria-label="Last 14 days of practice">
               {days.map((d) => (
                 <span
@@ -97,7 +100,9 @@ function Progress() {
           ) : sessions.length === 0 ? (
             <div className="mt-3 rounded-3xl border border-dashed border-border p-8 text-center">
               <p className="font-display text-lg">No sessions yet</p>
-              <p className="mt-1 text-sm text-muted-foreground">Your first round takes about 3 minutes.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Your first round takes about 3 minutes.
+              </p>
               <Button asChild className="mt-4 rounded-full shadow-tactile">
                 <Link to="/practice">Start practising</Link>
               </Button>
@@ -113,7 +118,12 @@ function Progress() {
                     className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-2xl border border-border bg-card px-4 py-3"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className={cn("font-medium text-balance-wrap", s.lang === "ja" && "font-jp")}>
+                      <p
+                        className={cn(
+                          "font-medium text-balance-wrap",
+                          s.lang === "ja" && "font-jp",
+                        )}
+                      >
                         {p.scenario}
                       </p>
                       <p className="text-xs text-muted-foreground">
@@ -128,7 +138,9 @@ function Progress() {
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-xs font-semibold",
-                          gain > 0 ? "bg-success/15 text-success" : "bg-secondary text-muted-foreground",
+                          gain > 0
+                            ? "bg-success/15 text-success"
+                            : "bg-secondary text-muted-foreground",
                         )}
                       >
                         {gain > 0 ? `+${gain}` : gain}

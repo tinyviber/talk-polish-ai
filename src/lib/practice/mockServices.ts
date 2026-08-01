@@ -42,7 +42,11 @@ const BANK: Record<string, Bank> = {
         { text: "with a friend on Saturday", kind: "ok" },
         { text: "and we grabbed lunch outside.", kind: "ok", note: "Natural collocation" },
         { text: "Nothing dramatic, but exactly what I needed.", kind: "ok" },
-        { text: "How about you — did you get up to anything?", kind: "ok", note: "Great: you returned the question" },
+        {
+          text: "How about you — did you get up to anything?",
+          kind: "ok",
+          note: "Great: you returned the question",
+        },
       ],
     },
     feedback: [
@@ -66,9 +70,24 @@ const BANK: Record<string, Bank> = {
       },
     ],
     expressions: [
-      { id: "ex-grab-lunch", lang: "en", text: "grab lunch", meaning: "casual way to say “eat lunch”" },
-      { id: "ex-nothing-dramatic", lang: "en", text: "nothing dramatic", meaning: "a modest, low-key way to describe plans" },
-      { id: "ex-get-up-to", lang: "en", text: "did you get up to anything?", meaning: "friendly way to ask about someone's plans" },
+      {
+        id: "ex-grab-lunch",
+        lang: "en",
+        text: "grab lunch",
+        meaning: "casual way to say “eat lunch”",
+      },
+      {
+        id: "ex-nothing-dramatic",
+        lang: "en",
+        text: "nothing dramatic",
+        meaning: "a modest, low-key way to describe plans",
+      },
+      {
+        id: "ex-get-up-to",
+        lang: "en",
+        text: "did you get up to anything?",
+        meaning: "friendly way to ask about someone's plans",
+      },
     ],
     headline: ["Clear ideas, but the tenses slip", "Much smoother — you sound like yourself"],
   },
@@ -118,9 +137,26 @@ const BANK: Record<string, Bank> = {
       },
     ],
     expressions: [
-      { id: "ex-nonbiri", lang: "ja", text: "のんびりできました", reading: "のんびりできました", meaning: "I was able to take it easy / relax" },
-      { id: "ex-tenki", lang: "ja", text: "天気がよかったので", reading: "てんきがよかったので", meaning: "because the weather was nice (giving a reason)" },
-      { id: "ex-dou", lang: "ja", text: "〜さんはどうでしたか？", meaning: "How about you? (returning the question)" },
+      {
+        id: "ex-nonbiri",
+        lang: "ja",
+        text: "のんびりできました",
+        reading: "のんびりできました",
+        meaning: "I was able to take it easy / relax",
+      },
+      {
+        id: "ex-tenki",
+        lang: "ja",
+        text: "天気がよかったので",
+        reading: "てんきがよかったので",
+        meaning: "because the weather was nice (giving a reason)",
+      },
+      {
+        id: "ex-dou",
+        lang: "ja",
+        text: "〜さんはどうでしたか？",
+        meaning: "How about you? (returning the question)",
+      },
     ],
     headline: ["内容はいいので、あとは形だけ", "とても自然になりました"],
   },
@@ -133,18 +169,34 @@ const GENERIC_EN: Bank = {
     annotations: [
       { text: "Uh, so, I think...", kind: "filler", note: "2.4s pause before the point" },
       { text: "the main reason is, we don't have enough time.", kind: "ok" },
-      { text: "And also the, um, the design is not finish yet.", kind: "grammar", note: "“wasn't finished yet”" },
+      {
+        text: "And also the, um, the design is not finish yet.",
+        kind: "grammar",
+        note: "“wasn't finished yet”",
+      },
       { text: "So I decide to move it.", kind: "grammar", note: "Past tense: “I decided”" },
-      { text: "I think it is better like this, maybe.", kind: "word", note: "Hedging twice weakens it" },
+      {
+        text: "I think it is better like this, maybe.",
+        kind: "word",
+        note: "Hedging twice weakens it",
+      },
     ],
   },
   second: {
     transcript:
       "I pushed the launch back by a week for two reasons. First, the design wasn't finished, and shipping it half-done would have cost us more time later. Second, it gave QA a proper run-through. We launched on the new date with no rollbacks.",
     annotations: [
-      { text: "I pushed the launch back by a week for two reasons.", kind: "ok", note: "Decision first — strong opening" },
+      {
+        text: "I pushed the launch back by a week for two reasons.",
+        kind: "ok",
+        note: "Decision first — strong opening",
+      },
       { text: "First, the design wasn't finished,", kind: "ok" },
-      { text: "and shipping it half-done would have cost us more time later.", kind: "ok", note: "Nice conditional" },
+      {
+        text: "and shipping it half-done would have cost us more time later.",
+        kind: "ok",
+        note: "Nice conditional",
+      },
       { text: "Second, it gave QA a proper run-through.", kind: "ok" },
       { text: "We launched on the new date with no rollbacks.", kind: "ok", note: "Clear outcome" },
     ],
@@ -170,9 +222,24 @@ const GENERIC_EN: Bank = {
     },
   ],
   expressions: [
-    { id: "ex-push-back", lang: "en", text: "push something back", meaning: "to delay to a later date" },
-    { id: "ex-half-done", lang: "en", text: "ship it half-done", meaning: "release something before it's ready" },
-    { id: "ex-right-call", lang: "en", text: "it was the right call", meaning: "confident way to stand by a decision" },
+    {
+      id: "ex-push-back",
+      lang: "en",
+      text: "push something back",
+      meaning: "to delay to a later date",
+    },
+    {
+      id: "ex-half-done",
+      lang: "en",
+      text: "ship it half-done",
+      meaning: "release something before it's ready",
+    },
+    {
+      id: "ex-right-call",
+      lang: "en",
+      text: "it was the right call",
+      meaning: "confident way to stand by a decision",
+    },
   ],
   headline: ["Good reasoning, buried under hesitation", "Direct, structured and confident"],
 };
@@ -184,7 +251,11 @@ const GENERIC_JA: Bank = {
     annotations: [
       { text: "えっと……すみません、", kind: "filler", note: "出だしに間があります" },
       { text: "ちょっと問題があります。", kind: "ok" },
-      { text: "私は予約しました、でも、ないと言いました。", kind: "grammar", note: "主語が混ざっています" },
+      {
+        text: "私は予約しました、でも、ないと言いました。",
+        kind: "grammar",
+        note: "主語が混ざっています",
+      },
       { text: "どうすればいいですか。", kind: "ok" },
       { text: "困ります。", kind: "word", note: "「困っています」の方が自然" },
     ],
@@ -195,7 +266,11 @@ const GENERIC_JA: Bank = {
     annotations: [
       { text: "すみません、先月オンラインで予約しまして、", kind: "ok", note: "状況説明が明確" },
       { text: "確認メールも持っています。", kind: "ok", note: "証拠を先に出せています" },
-      { text: "番号をお伝えしますので、もう一度お調べいただけますか。", kind: "ok", note: "丁寧な依頼形◎" },
+      {
+        text: "番号をお伝えしますので、もう一度お調べいただけますか。",
+        kind: "ok",
+        note: "丁寧な依頼形◎",
+      },
       { text: "同じ条件のお部屋はありますでしょうか。", kind: "ok", note: "次の選択肢を提案" },
     ],
   },
@@ -220,9 +295,27 @@ const GENERIC_JA: Bank = {
     },
   ],
   expressions: [
-    { id: "ex-shirabete", lang: "ja", text: "お調べいただけますか", reading: "おしらべいただけますか", meaning: "Could you check for me? (polite request)" },
-    { id: "ex-kakunin", lang: "ja", text: "確認メール", reading: "かくにんメール", meaning: "confirmation email" },
-    { id: "ex-onaji", lang: "ja", text: "同じ条件のお部屋", reading: "おなじじょうけんのおへや", meaning: "a room with the same conditions" },
+    {
+      id: "ex-shirabete",
+      lang: "ja",
+      text: "お調べいただけますか",
+      reading: "おしらべいただけますか",
+      meaning: "Could you check for me? (polite request)",
+    },
+    {
+      id: "ex-kakunin",
+      lang: "ja",
+      text: "確認メール",
+      reading: "かくにんメール",
+      meaning: "confirmation email",
+    },
+    {
+      id: "ex-onaji",
+      lang: "ja",
+      text: "同じ条件のお部屋",
+      reading: "おなじじょうけんのおへや",
+      meaning: "a room with the same conditions",
+    },
   ],
   headline: ["言いたいことは伝わっています", "落ち着いた、頼れる話し方に"],
 };
@@ -279,7 +372,9 @@ export async function analyzeAttempt(
 }
 
 /** Mock TTS — returns a short beep-free silent duration for a believable player. */
-export async function synthesizeModelAnswer(text: string): Promise<{ seconds: number; text: string }> {
+export async function synthesizeModelAnswer(
+  text: string,
+): Promise<{ seconds: number; text: string }> {
   await wait(600);
   return { seconds: Math.max(4, Math.round(text.length / 14)), text };
 }

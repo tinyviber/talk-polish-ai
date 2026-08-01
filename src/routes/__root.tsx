@@ -82,14 +82,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { title: "Kotoba Loop — speaking practice" },
       {
         name: "description",
-        content:
-          "Practice speaking English and Japanese out loud with instant, focused coaching.",
+        content: "Practice speaking English and Japanese out loud with instant, focused coaching.",
       },
       { property: "og:title", content: "Kotoba Loop — speaking practice" },
       {
         property: "og:description",
-        content:
-          "Practice speaking English and Japanese out loud with instant, focused coaching.",
+        content: "Practice speaking English and Japanese out loud with instant, focused coaching.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

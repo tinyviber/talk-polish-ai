@@ -14,9 +14,7 @@ export function PromptCard({ prompt, compact }: { prompt: Prompt; compact?: bool
         <span className="rounded-full bg-secondary px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-secondary-foreground">
           {prompt.scenario}
         </span>
-        <span className="text-xs font-medium text-muted-foreground">
-          ~{prompt.seconds}s answer
-        </span>
+        <span className="text-xs font-medium text-muted-foreground">~{prompt.seconds}s answer</span>
       </div>
 
       <p className={cn("mt-3 text-sm text-muted-foreground text-balance-wrap", jp && "font-jp")}>

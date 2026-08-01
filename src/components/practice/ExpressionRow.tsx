@@ -22,7 +22,9 @@ export function ExpressionRow({
             {expression.reading}
           </p>
         ) : null}
-        <p className="mt-0.5 text-sm text-muted-foreground text-balance-wrap">{expression.meaning}</p>
+        <p className="mt-0.5 text-sm text-muted-foreground text-balance-wrap">
+          {expression.meaning}
+        </p>
       </div>
       <Button
         variant={saved ? "secondary" : "outline"}

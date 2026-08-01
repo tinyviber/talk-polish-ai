@@ -42,7 +42,11 @@ export function AppHeader() {
               >
                 <span className="hidden sm:inline">{item.label}</span>
                 <span className="sm:hidden">
-                  {item.label === "Saved" ? <Bookmark className="size-4" aria-hidden /> : item.label}
+                  {item.label === "Saved" ? (
+                    <Bookmark className="size-4" aria-hidden />
+                  ) : (
+                    item.label
+                  )}
                 </span>
               </Link>
             );

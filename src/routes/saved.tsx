@@ -50,7 +50,9 @@ function Saved() {
               aria-pressed={filter === f}
               className={cn(
                 "rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
-                filter === f ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                filter === f
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               {f === "all" ? "All" : f === "en" ? "English" : "日本語"}

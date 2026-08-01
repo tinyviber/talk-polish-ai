@@ -98,7 +98,9 @@ function Processing({ label }: { label: string }) {
       <p className="mt-4 font-display text-lg" aria-live="polite">
         {label}
       </p>
-      <p className="mt-1 text-sm text-muted-foreground">Transcribing · scoring · picking your top fixes</p>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Transcribing · scoring · picking your top fixes
+      </p>
     </div>
   );
 }
@@ -330,7 +332,10 @@ function FeedbackView({
         </ul>
       </section>
 
-      <section className="rounded-3xl border border-border bg-card p-5 shadow-lift sm:p-6" aria-labelledby="transcript">
+      <section
+        className="rounded-3xl border border-border bg-card p-5 shadow-lift sm:p-6"
+        aria-labelledby="transcript"
+      >
         <h2 id="transcript" className="font-display text-xl">
           What we heard
         </h2>
@@ -358,7 +363,11 @@ function FeedbackView({
         </ul>
       </section>
 
-      <Accordion type="single" collapsible className="rounded-3xl border border-border bg-card px-5">
+      <Accordion
+        type="single"
+        collapsible
+        className="rounded-3xl border border-border bg-card px-5"
+      >
         <AccordionItem value="detail" className="border-none">
           <AccordionTrigger className="font-display text-lg">Detailed breakdown</AccordionTrigger>
           <AccordionContent className="space-y-4 pb-6">

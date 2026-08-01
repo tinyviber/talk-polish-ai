@@ -14,13 +14,7 @@ const LEGEND: { kind: Annotation["kind"]; label: string }[] = [
   { kind: "word", label: "Word choice" },
 ];
 
-export function TranscriptView({
-  annotations,
-  jp,
-}: {
-  annotations: Annotation[];
-  jp: boolean;
-}) {
+export function TranscriptView({ annotations, jp }: { annotations: Annotation[]; jp: boolean }) {
   return (
     <div>
       <ul className="mb-3 flex flex-wrap gap-3 text-xs text-muted-foreground">
@@ -55,7 +49,13 @@ export function TranscriptView({
           .filter((a) => a.note)
           .map((a, i) => (
             <li key={i} className="flex gap-2 text-sm text-muted-foreground text-balance-wrap">
-              <span className={cn("shrink-0 rounded px-1 font-medium text-foreground", STYLE[a.kind], jp && "font-jp")}>
+              <span
+                className={cn(
+                  "shrink-0 rounded px-1 font-medium text-foreground",
+                  STYLE[a.kind],
+                  jp && "font-jp",
+                )}
+              >
                 {a.text}
               </span>
               <span className={cn(jp && "font-jp")}>{a.note}</span>

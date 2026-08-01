@@ -265,7 +265,7 @@ export async function analyzeAttempt(
   const scores = index === 1 ? FIRST_SCORES : SECOND_SCORES;
   const feedback: Feedback = {
     overall: avg(scores),
-    headline: bank.headline[index - 1],
+    headline: bank.headline[index - 1] ?? "",
     scores,
     improvements: index === 1 ? bank.feedback : bank.feedback.slice(0, 1),
     annotations: part.annotations,

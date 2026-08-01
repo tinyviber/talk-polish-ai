@@ -22,7 +22,7 @@ export function AppHeader() {
           <span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-tactile">
             <Mic className="size-4" aria-hidden />
           </span>
-          <span className="hidden font-display text-lg font-semibold tracking-tight xs:inline sm:inline">
+          <span className="hidden font-display text-lg font-semibold tracking-tight sm:inline">
             Kotoba Loop
           </span>
         </Link>

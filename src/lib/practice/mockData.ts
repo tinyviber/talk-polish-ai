@@ -84,7 +84,7 @@ export function promptsFor(lang: Lang) {
 }
 
 export function getPrompt(id: string) {
-  return PROMPTS.find((p) => p.id === id) ?? PROMPTS[0];
+  return PROMPTS.find((p) => p.id === id) ?? PROMPTS[0]!;
 }
 
 export const LANG_LABEL: Record<Lang, string> = { en: "English", ja: "日本語 Japanese" };

@@ -54,7 +54,7 @@ export function ScoreDial({
   );
 }
 
-export function ScoreBar({ label, value, previous }: { label: string; value: number; previous?: number }) {
+export function ScoreBar({ label, value, previous }: { label: string; value: number; previous?: number | undefined }) {
   const delta = typeof previous === "number" ? value - previous : null;
   return (
     <div>

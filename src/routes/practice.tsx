@@ -116,8 +116,9 @@ function Practice() {
 
   const lang = state.lang ?? "en";
   const prompts = useMemo(() => promptsFor(lang), [lang]);
-  const done = state.sessions.filter((s) => s.lang === lang).length;
-  const prompt = prompts[(done + promptOffset) % prompts.length]!;
+  // Frozen at mount so the prompt never changes mid-session when a session is recorded.
+  const [baseIndex] = useState(() => state.sessions.filter((s) => s.lang === lang).length);
+  const prompt = prompts[(baseIndex + promptOffset) % prompts.length]!;
   const jp = lang === "ja";
 
   if (!ready) {

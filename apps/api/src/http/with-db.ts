@@ -9,7 +9,14 @@ export async function withDb<T>(label: string, fn: () => Promise<T>): Promise<T>
     return await fn();
   } catch (error) {
     if (error instanceof ApiError) throw error;
+    if (isUniqueViolation(error)) {
+      throw ApiError.conflict("That resource already exists.");
+    }
     console.error(`[db] ${label} failed:`, error instanceof Error ? error.message : error);
     throw ApiError.database();
   }
+}
+
+function isUniqueViolation(error: unknown): error is { code: string } {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
 }

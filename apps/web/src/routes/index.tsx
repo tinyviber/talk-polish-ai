@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { AppHeader } from "@/components/practice/AppHeader";
 import { PromptCard } from "@/components/practice/PromptCard";
 import { computeStreak, usePracticeStore } from "@/lib/practice/store";
-import { LANG_LABEL, promptsFor } from "@/lib/practice/mockData";
 import type { Lang } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
+
+const LANG_LABEL: Record<Lang, string> = { en: "English", ja: "日本語 Japanese" };
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -29,12 +30,16 @@ export const Route = createFileRoute("/")({
 });
 
 function Onboarding() {
-  const { completeOnboarding } = usePracticeStore();
+  const { completeOnboarding, mode, error } = usePracticeStore();
   const navigate = useNavigate();
 
-  const choose = (lang: Lang) => {
-    completeOnboarding(lang);
-    void navigate({ to: "/practice" });
+  const choose = async (lang: Lang) => {
+    try {
+      await completeOnboarding(lang);
+      await navigate({ to: "/practice" });
+    } catch {
+      // The provider exposes a user-facing error below.
+    }
   };
 
   return (
@@ -75,14 +80,18 @@ function Onboarding() {
         ))}
       </div>
       <p className="mt-6 text-xs text-muted-foreground">
-        You can switch languages any time. Nothing leaves your browser.
+        You can switch languages any time.{" "}
+        {mode === "demo"
+          ? "Nothing leaves your browser."
+          : "Your recording is sent to the configured API for processing."}
       </p>
+      {error ? <p className="mt-3 text-sm text-destructive">{error}</p> : null}
     </main>
   );
 }
 
 function Home() {
-  const { ready, state, setLang } = usePracticeStore();
+  const { ready, state, setLang, prompts, mode, error } = usePracticeStore();
 
   if (!ready) {
     return (
@@ -98,9 +107,12 @@ function Home() {
   if (!state.onboarded || !state.lang) return <Onboarding />;
 
   const lang = state.lang;
-  const prompts = promptsFor(lang);
+  const languagePrompts = prompts.filter((prompt) => prompt.lang === lang);
+  if (languagePrompts.length === 0) {
+    return <div className="min-h-screen" />;
+  }
   const done = state.sessions.filter((s) => s.lang === lang).length;
-  const next = prompts[done % prompts.length]!;
+  const next = languagePrompts[done % languagePrompts.length]!;
   const streak = computeStreak(state.sessions);
   const recent = state.saved.slice(0, 3);
   const improved = state.sessions.filter((s) => s.second !== null);
@@ -113,6 +125,14 @@ function Home() {
     <div className="min-h-screen">
       <AppHeader />
       <main className="mx-auto w-full max-w-5xl px-4 py-8 sm:py-12">
+        {error ? (
+          <p className="mb-4 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+          {mode} mode
+        </p>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="text-sm font-medium text-muted-foreground">

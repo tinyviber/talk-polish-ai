@@ -19,7 +19,7 @@ import { ScoreBar, ScoreDial } from "@/components/practice/ScoreDial";
 import { usePracticeStore, todayIso } from "@/lib/practice/store";
 import { useRecorder } from "@/lib/practice/useRecorder";
 import { analyzeAttempt } from "@/lib/practice/mockServices";
-import { promptsFor } from "@/lib/practice/mockData";
+import { createAttempt, createSession, toReadyAttempt } from "@/lib/practice/api";
 import type { Attempt, ScoreKey } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
 
@@ -54,6 +54,15 @@ const STEP_INDEX: Record<Step, number> = {
 };
 
 const STEP_LABELS = ["Prompt", "Feedback", "Second take", "Result"];
+
+function errorMessage(error: unknown) {
+  return error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string"
+    ? error.message
+    : "Something went wrong. Please try again.";
+}
 
 function Stepper({ step }: { step: Step }) {
   const active = STEP_INDEX[step];
@@ -106,19 +115,37 @@ function Processing({ label }: { label: string }) {
 }
 
 function Practice() {
-  const { ready, state, toggleSaved, isSaved, recordSession } = usePracticeStore();
-  const recorder = useRecorder();
+  const {
+    ready,
+    state,
+    mode,
+    prompts,
+    error: storeError,
+    toggleSaved,
+    isSaved,
+    recordSession,
+    refresh,
+    switchToDemo,
+  } = usePracticeStore();
+  const recorder = useRecorder({ mode });
   const [step, setStep] = useState<Step>("prompt");
   const [first, setFirst] = useState<Attempt | null>(null);
   const [second, setSecond] = useState<Attempt | null>(null);
-  const [sessionId] = useState(() => `s-${Date.now()}`);
+  const [sessionId, setSessionId] = useState<string | null>(() =>
+    mode === "demo" ? `s-${Date.now()}` : null,
+  );
   const [promptOffset, setPromptOffset] = useState(0);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const lang = state.lang ?? "en";
-  const prompts = useMemo(() => promptsFor(lang), [lang]);
+  const languagePrompts = useMemo(
+    () => prompts.filter((prompt) => prompt.lang === lang),
+    [lang, prompts],
+  );
   // Frozen at mount so the prompt never changes mid-session when a session is recorded.
   const [baseIndex] = useState(() => state.sessions.filter((s) => s.lang === lang).length);
-  const prompt = prompts[(baseIndex + promptOffset) % prompts.length]!;
+  const prompt = languagePrompts[(baseIndex + promptOffset) % Math.max(1, languagePrompts.length)];
   const jp = lang === "ja";
 
   if (!ready) {
@@ -132,31 +159,105 @@ function Practice() {
     );
   }
 
+  if (!state.onboarded || !state.lang || !prompt) {
+    return (
+      <div className="min-h-screen">
+        <AppHeader />
+        <main className="mx-auto max-w-3xl px-4 py-12 text-center">
+          <h1 className="font-display text-2xl">Choose a practice language first</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Head home to finish onboarding.</p>
+          <Button asChild className="mt-5 rounded-full">
+            <Link to="/">Go home</Link>
+          </Button>
+        </main>
+      </div>
+    );
+  }
+
+  const beginSession = async () => {
+    setError(null);
+    if (!prompt) {
+      setError("No prompts are available for this language yet.");
+      return;
+    }
+    if (mode === "api") {
+      setStarting(true);
+      try {
+        const session = await createSession(prompt.id);
+        setSessionId(session.id);
+      } catch (cause) {
+        setError(errorMessage(cause));
+        setStarting(false);
+        return;
+      }
+      setStarting(false);
+    }
+    setStep("record");
+  };
+
   const submit = async (index: 1 | 2) => {
+    setError(null);
     setStep(index === 1 ? "processing" : "processing2");
-    const attempt = await analyzeAttempt(prompt, index, recorder.seconds || 32, recorder.mocked);
-    if (index === 1) {
-      setFirst(attempt);
-      setStep("feedback");
-      recordSession({
-        id: sessionId,
-        lang,
-        promptId: prompt.id,
-        date: todayIso(),
-        first: attempt.feedback.overall,
-        second: null,
-      });
-    } else {
-      setSecond(attempt);
-      setStep("result");
-      recordSession({
-        id: sessionId,
-        lang,
-        promptId: prompt.id,
-        date: todayIso(),
-        first: first?.feedback.overall ?? attempt.feedback.overall,
-        second: attempt.feedback.overall,
-      });
+    try {
+      if (!prompt) throw new Error("No prompt is selected.");
+      let attempt: Attempt;
+      if (mode === "api") {
+        if (!sessionId) throw new Error("The practice session is missing. Start again.");
+        if (!recorder.audioBlob) {
+          throw new Error("A real microphone recording is required in API mode.");
+        }
+        attempt = toReadyAttempt(
+          await createAttempt(sessionId, {
+            index,
+            durationSec: recorder.seconds || 1,
+            audio: recorder.audioBlob,
+          }),
+        );
+      } else {
+        // Demo feedback is deterministic sample data even if the browser captured a local blob.
+        attempt = await analyzeAttempt(prompt, index, recorder.seconds || 32, true);
+      }
+      const refreshAfterSuccess = () => {
+        if (mode !== "api") return;
+        void refresh().catch((cause) => {
+          setError(`Attempt saved, but progress could not refresh: ${errorMessage(cause)}`);
+        });
+      };
+      if (index === 1) {
+        setFirst(attempt);
+        setStep("feedback");
+        if (mode === "demo") {
+          recordSession({
+            id: sessionId ?? `s-${Date.now()}`,
+            lang,
+            promptId: prompt.id,
+            date: todayIso(),
+            first: attempt.feedback.overall,
+            second: null,
+          });
+        } else {
+          refreshAfterSuccess();
+        }
+      } else {
+        setSecond(attempt);
+        setStep("result");
+        if (mode === "demo") {
+          recordSession({
+            id: sessionId ?? `s-${Date.now()}`,
+            lang,
+            promptId: prompt.id,
+            date: todayIso(),
+            first: first?.feedback.overall ?? attempt.feedback.overall,
+            second: attempt.feedback.overall,
+          });
+        } else {
+          refreshAfterSuccess();
+        }
+      }
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setStep(index === 1 ? "record" : "record2");
+      return;
     }
     recorder.reset();
   };
@@ -169,6 +270,12 @@ function Practice() {
       <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:py-10">
         <Stepper step={step} />
 
+        {storeError || error ? (
+          <p className="mt-4 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {error ?? storeError}
+          </p>
+        ) : null}
+
         <div className="mt-6 space-y-6">
           {step === "prompt" ? (
             <>
@@ -177,9 +284,10 @@ function Practice() {
                 <Button
                   size="lg"
                   className="h-14 rounded-full px-7 text-base shadow-tactile"
-                  onClick={() => setStep("record")}
+                  onClick={() => void beginSession()}
+                  disabled={starting}
                 >
-                  I'm ready — record my answer
+                  {starting ? "Setting up your session…" : "I'm ready — record my answer"}
                 </Button>
                 <Button
                   variant="ghost"
@@ -211,6 +319,8 @@ function Practice() {
                 targetSeconds={prompt.seconds}
                 submitLabel={step === "record" ? "Get feedback" : "See my improvement"}
                 onSubmit={() => void submit(step === "record" ? 1 : 2)}
+                mode={mode}
+                onUseDemo={switchToDemo}
               />
             </>
           ) : null}
@@ -225,8 +335,10 @@ function Practice() {
               jp={jp}
               isSaved={isSaved}
               onToggleSave={(e) => {
-                toggleSaved(e);
-                toast.success(isSaved(e.id) ? "Removed from saved" : "Saved for review");
+                const wasSaved = isSaved(e.id);
+                void toggleSaved(e)
+                  .then(() => toast.success(wasSaved ? "Removed from saved" : "Saved for review"))
+                  .catch((cause) => toast.error(errorMessage(cause)));
               }}
             />
           ) : null}
@@ -259,6 +371,7 @@ function Practice() {
                   setFirst(null);
                   setSecond(null);
                   setPromptOffset((o) => o + 1);
+                  setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
                   recorder.reset();
                   setStep("prompt");
                 }}
@@ -342,7 +455,7 @@ function FeedbackView({
         </h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
           {attempt.mocked
-            ? "Demo transcript — a sample answer is used when no audio is captured."
+            ? "Sample transcript — demo feedback uses a deterministic answer; your audio is not analyzed."
             : "Auto-transcribed from your recording."}
         </p>
         <TranscriptView annotations={fb.annotations} jp={jp} />

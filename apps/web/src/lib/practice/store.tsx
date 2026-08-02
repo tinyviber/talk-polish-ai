@@ -7,13 +7,22 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { Expression, Lang, ProgressState, SessionRecord } from "./types";
+import { PROMPTS } from "@kotoba/contracts";
+import {
+  bootstrapLearner,
+  deleteSaved,
+  getProgress,
+  listPrompts,
+  listSaved,
+  saveExpression,
+} from "./api";
+import { configuredAppMode, type AppMode } from "./mode";
+import type { Expression, Lang, Prompt, ProgressState, SessionRecord } from "./types";
 
 const KEY = "kotoba.state.v1";
-
 const EMPTY: ProgressState = { sessions: [], saved: [], lang: null, onboarded: false };
 
-function load(): ProgressState {
+function loadDemo(): ProgressState {
   if (typeof window === "undefined") return EMPTY;
   try {
     const raw = window.localStorage.getItem(KEY);
@@ -26,75 +35,231 @@ function load(): ProgressState {
 
 type Ctx = {
   ready: boolean;
+  mode: AppMode;
+  configuredMode: AppMode;
+  error: string | null;
   state: ProgressState;
+  prompts: Prompt[];
   setLang: (lang: Lang) => void;
-  completeOnboarding: (lang: Lang) => void;
-  toggleSaved: (e: Expression) => void;
+  completeOnboarding: (lang: Lang) => Promise<void>;
+  toggleSaved: (e: Expression) => Promise<void>;
   isSaved: (id: string) => boolean;
   recordSession: (s: SessionRecord) => void;
+  refresh: () => Promise<void>;
+  switchToDemo: () => void;
   reset: () => void;
 };
 
 const StoreContext = createContext<Ctx | null>(null);
 
+function errorMessage(error: unknown) {
+  return error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string"
+    ? error.message
+    : "Something went wrong. Please try again.";
+}
+
 export function PracticeStoreProvider({ children }: { children: ReactNode }) {
+  const [mode, setMode] = useState<AppMode>(configuredAppMode);
   const [state, setState] = useState<ProgressState>(EMPTY);
+  const [prompts, setPrompts] = useState<Prompt[]>(configuredAppMode === "demo" ? PROMPTS : []);
   const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setState(load());
+    if (mode === "demo") {
+      setState(loadDemo());
+      setPrompts(PROMPTS);
+    }
     setReady(true);
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || mode !== "demo") return;
     try {
       window.localStorage.setItem(KEY, JSON.stringify(state));
     } catch {
-      /* storage unavailable — session still works in memory */
+      // Demo still works in memory when browser storage is unavailable.
     }
-  }, [state, ready]);
+  }, [mode, ready, state]);
 
-  const setLang = useCallback((lang: Lang) => setState((s) => ({ ...s, lang })), []);
+  const refreshApi = useCallback(async (lang: Lang | null, background = false) => {
+    if (!lang) return;
+    if (!background) setReady(false);
+    setError(null);
+    try {
+      const [nextPrompts, progress, saved] = await Promise.all([
+        listPrompts(),
+        getProgress(),
+        listSaved(),
+      ]);
+      setPrompts(nextPrompts);
+      setState((current) => ({
+        ...current,
+        lang,
+        onboarded: true,
+        sessions: progress.sessions,
+        saved,
+      }));
+    } catch (cause) {
+      setError(errorMessage(cause));
+      throw cause;
+    } finally {
+      if (!background) setReady(true);
+    }
+  }, []);
 
-  const completeOnboarding = useCallback(
-    (lang: Lang) => setState((s) => ({ ...s, lang, onboarded: true })),
-    [],
+  const setLang = useCallback(
+    (lang: Lang) => {
+      if (mode === "demo") {
+        setState((current) => ({ ...current, lang }));
+        return;
+      }
+      setState((current) => ({ ...current, lang, onboarded: true }));
+      void refreshApi(lang).catch(() => undefined);
+    },
+    [mode, refreshApi],
   );
 
-  const toggleSaved = useCallback((e: Expression) => {
-    setState((s) => {
-      const exists = s.saved.some((x) => x.id === e.id);
-      return {
-        ...s,
-        saved: exists
-          ? s.saved.filter((x) => x.id !== e.id)
-          : [{ ...e, savedAt: Date.now() }, ...s.saved],
-      };
-    });
+  const completeOnboarding = useCallback(
+    async (lang: Lang) => {
+      setError(null);
+      if (mode === "demo") {
+        setState((current) => ({ ...current, lang, onboarded: true }));
+        return;
+      }
+      setReady(false);
+      try {
+        await bootstrapLearner(lang);
+        const [nextPrompts, progress, saved] = await Promise.all([
+          listPrompts(),
+          getProgress(),
+          listSaved(),
+        ]);
+        setPrompts(nextPrompts);
+        setState({
+          lang,
+          onboarded: true,
+          sessions: progress.sessions,
+          saved,
+        });
+      } catch (cause) {
+        setError(errorMessage(cause));
+        throw cause;
+      } finally {
+        setReady(true);
+      }
+    },
+    [mode],
+  );
+
+  const toggleSaved = useCallback(
+    async (expression: Expression) => {
+      if (mode === "demo") {
+        setState((current) => {
+          const exists = current.saved.some((item) => item.id === expression.id);
+          return {
+            ...current,
+            saved: exists
+              ? current.saved.filter((item) => item.id !== expression.id)
+              : [{ ...expression, savedAt: Date.now() }, ...current.saved],
+          };
+        });
+        return;
+      }
+
+      setError(null);
+      try {
+        if (state.saved.some((item) => item.id === expression.id)) {
+          await deleteSaved(expression.id);
+          setState((current) => ({
+            ...current,
+            saved: current.saved.filter((item) => item.id !== expression.id),
+          }));
+        } else {
+          const saved = await saveExpression(expression);
+          setState((current) => ({
+            ...current,
+            saved: [saved, ...current.saved.filter((item) => item.id !== saved.id)],
+          }));
+        }
+      } catch (cause) {
+        setError(errorMessage(cause));
+        throw cause;
+      }
+    },
+    [mode, state.saved],
+  );
+
+  const recordSession = useCallback(
+    (record: SessionRecord) => {
+      if (mode === "api") return;
+      setState((current) => ({
+        ...current,
+        sessions: [record, ...current.sessions.filter((item) => item.id !== record.id)].slice(
+          0,
+          60,
+        ),
+      }));
+    },
+    [mode],
+  );
+
+  const refresh = useCallback(async () => {
+    if (mode === "api") await refreshApi(state.lang, true);
+  }, [mode, refreshApi, state.lang]);
+
+  const switchToDemo = useCallback(() => {
+    setError(null);
+    setMode("demo");
+    setState({ ...loadDemo(), onboarded: true });
+    setPrompts(PROMPTS);
   }, []);
 
-  const recordSession = useCallback((rec: SessionRecord) => {
-    setState((s) => {
-      const rest = s.sessions.filter((x) => x.id !== rec.id);
-      return { ...s, sessions: [rec, ...rest].slice(0, 60) };
-    });
-  }, []);
-
-  const reset = useCallback(() => setState(EMPTY), []);
+  const reset = useCallback(() => {
+    setState(EMPTY);
+    if (mode === "demo") {
+      try {
+        window.localStorage.removeItem(KEY);
+      } catch {
+        // Ignore unavailable demo storage.
+      }
+    }
+  }, [mode]);
 
   const value = useMemo<Ctx>(
     () => ({
       ready,
+      mode,
+      configuredMode: configuredAppMode,
+      error,
       state,
+      prompts,
       setLang,
       completeOnboarding,
       toggleSaved,
-      isSaved: (id: string) => state.saved.some((x) => x.id === id),
+      isSaved: (id: string) => state.saved.some((item) => item.id === id),
       recordSession,
+      refresh,
+      switchToDemo,
       reset,
     }),
-    [ready, state, setLang, completeOnboarding, toggleSaved, recordSession, reset],
+    [
+      ready,
+      mode,
+      error,
+      state,
+      prompts,
+      setLang,
+      completeOnboarding,
+      toggleSaved,
+      recordSession,
+      refresh,
+      switchToDemo,
+      reset,
+    ],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
@@ -107,21 +272,21 @@ export function usePracticeStore() {
 }
 
 /** Streak = consecutive days (ending today or yesterday) with at least one session. */
-export function computeStreak(sessions: SessionRecord[]): number {
-  const days = new Set(sessions.map((s) => s.date));
+export function computeStreak(sessions: SessionRecord[]) {
+  const days = new Set(sessions.map((session) => session.date));
   if (days.size === 0) return 0;
-  const d = new Date();
-  const iso = (x: Date) => x.toISOString().slice(0, 10);
-  if (!days.has(iso(d))) {
-    d.setDate(d.getDate() - 1);
-    if (!days.has(iso(d))) return 0;
+  const date = new Date();
+  const iso = (value: Date) => value.toISOString().slice(0, 10);
+  if (!days.has(iso(date))) {
+    date.setDate(date.getDate() - 1);
+    if (!days.has(iso(date))) return 0;
   }
-  let n = 0;
-  while (days.has(iso(d))) {
-    n += 1;
-    d.setDate(d.getDate() - 1);
+  let streak = 0;
+  while (days.has(iso(date))) {
+    streak += 1;
+    date.setDate(date.getDate() - 1);
   }
-  return n;
+  return streak;
 }
 
 export function todayIso() {

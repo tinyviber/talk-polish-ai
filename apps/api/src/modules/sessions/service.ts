@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Attempt, AttemptStatus, Feedback, Lang, PracticeSession } from "@kotoba/contracts";
 import { asc, eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { attemptResults, audioRecordings, practiceSessions, speakingAttempts } from "../../db/schema";
+import {
+  attemptResults,
+  audioRecordings,
+  practiceSessions,
+  speakingAttempts,
+} from "../../db/schema";
 import { ApiError } from "../../http/errors";
 import { withDb } from "../../http/with-db";
 import { requirePrompt } from "../prompts/service";
@@ -31,12 +36,13 @@ export async function createPracticeSession(
   };
 }
 
-export async function getPracticeSession(id: string): Promise<PracticeSession> {
+export async function getPracticeSession(id: string, learnerId: string): Promise<PracticeSession> {
   const rows = await withDb("getPracticeSession", () =>
     db().select().from(practiceSessions).where(eq(practiceSessions.id, id)),
   );
   const row = rows[0];
   if (!row) throw ApiError.notFound("Practice session");
+  if (row.learnerId !== learnerId) throw ApiError.notFound("Practice session");
   return {
     id: row.id,
     learnerId: row.learnerId,
@@ -64,7 +70,7 @@ export async function listAttempts(sessionId: string): Promise<Attempt[]> {
   return rows.map((r) => composeAttempt(r.attempt, r.result, r.audio));
 }
 
-export async function getAttempt(id: string): Promise<Attempt> {
+export async function getAttempt(id: string, learnerId?: string): Promise<Attempt> {
   const rows = await withDb("getAttempt", () =>
     db()
       .select({ attempt: speakingAttempts, result: attemptResults, audio: audioRecordings })
@@ -75,6 +81,7 @@ export async function getAttempt(id: string): Promise<Attempt> {
   );
   const row = rows[0];
   if (!row) throw ApiError.notFound("Attempt");
+  if (learnerId && row.attempt.learnerId !== learnerId) throw ApiError.notFound("Attempt");
   return composeAttempt(row.attempt, row.result, row.audio);
 }
 

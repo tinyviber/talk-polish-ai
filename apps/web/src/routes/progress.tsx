@@ -2,7 +2,6 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { AppHeader } from "@/components/practice/AppHeader";
 import { computeStreak, usePracticeStore } from "@/lib/practice/store";
-import { getPrompt } from "@/lib/practice/mockData";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/progress")({
@@ -35,7 +34,7 @@ function last14() {
 }
 
 function Progress() {
-  const { ready, state } = usePracticeStore();
+  const { ready, state, prompts, mode, error } = usePracticeStore();
   const sessions = state.sessions;
   const streak = computeStreak(sessions);
   const improved = sessions.filter((s) => s.second !== null);
@@ -50,6 +49,9 @@ function Progress() {
     <div className="min-h-screen">
       <AppHeader />
       <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:py-12">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+          {mode} mode
+        </p>
         <h1 className="font-display text-3xl sm:text-4xl">Your progress</h1>
         <p className="mt-2 text-muted-foreground">
           Speaking improves with reps, not with charts. Here are the two numbers worth watching.
@@ -95,8 +97,20 @@ function Progress() {
           <h2 id="history" className="font-display text-xl">
             Recent sessions
           </h2>
+          {error ? (
+            <p className="mt-3 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
+            </p>
+          ) : null}
           {!ready ? (
             <div className="mt-3 h-20 animate-pulse rounded-2xl bg-secondary" />
+          ) : !state.onboarded ? (
+            <div className="mt-3 rounded-3xl border border-dashed border-border p-8 text-center">
+              <p className="font-display text-lg">Choose a language first</p>
+              <Button asChild className="mt-4 rounded-full shadow-tactile">
+                <Link to="/">Go home</Link>
+              </Button>
+            </div>
           ) : sessions.length === 0 ? (
             <div className="mt-3 rounded-3xl border border-dashed border-border p-8 text-center">
               <p className="font-display text-lg">No sessions yet</p>
@@ -110,7 +124,7 @@ function Progress() {
           ) : (
             <ul className="mt-3 space-y-2">
               {sessions.map((s) => {
-                const p = getPrompt(s.promptId);
+                const p = prompts.find((prompt) => prompt.id === s.promptId);
                 const gain = s.second === null ? null : s.second - s.first;
                 return (
                   <li
@@ -124,7 +138,7 @@ function Progress() {
                           s.lang === "ja" && "font-jp",
                         )}
                       >
-                        {p.scenario}
+                        {p?.scenario ?? "Speaking practice"}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {s.date} · {s.lang === "ja" ? "日本語" : "English"}

@@ -28,7 +28,7 @@ export const Route = createFileRoute("/saved")({
 type Filter = "all" | Lang;
 
 function Saved() {
-  const { ready, state, toggleSaved } = usePracticeStore();
+  const { ready, state, mode, error, toggleSaved } = usePracticeStore();
   const [filter, setFilter] = useState<Filter>("all");
 
   const items = state.saved.filter((e) => filter === "all" || e.lang === filter);
@@ -37,6 +37,9 @@ function Saved() {
     <div className="min-h-screen">
       <AppHeader />
       <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:py-12">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+          {mode} mode
+        </p>
         <h1 className="font-display text-3xl sm:text-4xl">Saved expressions</h1>
         <p className="mt-2 text-muted-foreground">
           Phrases you kept from feedback. Say each one out loud once — that's the whole review.
@@ -60,8 +63,20 @@ function Saved() {
           ))}
         </div>
 
+        {error ? (
+          <p className="mt-4 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
         {!ready ? (
           <div className="mt-6 h-24 animate-pulse rounded-2xl bg-secondary" />
+        ) : !state.onboarded ? (
+          <div className="mt-6 rounded-3xl border border-dashed border-border p-8 text-center">
+            <p className="font-display text-lg">Choose a language first</p>
+            <Button asChild className="mt-4 rounded-full shadow-tactile">
+              <Link to="/">Go home</Link>
+            </Button>
+          </div>
         ) : items.length === 0 ? (
           <div className="mt-6 rounded-3xl border border-dashed border-border p-8 text-center">
             <p className="font-display text-lg">Nothing saved yet</p>
@@ -75,7 +90,7 @@ function Saved() {
         ) : (
           <ul className="mt-6 space-y-2">
             {items.map((e) => (
-              <ExpressionRow key={e.id} expression={e} saved onToggle={() => toggleSaved(e)} />
+              <ExpressionRow key={e.id} expression={e} saved onToggle={() => void toggleSaved(e)} />
             ))}
           </ul>
         )}

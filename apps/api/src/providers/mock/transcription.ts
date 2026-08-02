@@ -1,5 +1,9 @@
 import { fixtureTranscript } from "@kotoba/contracts";
-import type { TranscriptionInput, TranscriptionProvider, TranscriptionResult } from "../transcription";
+import type {
+  TranscriptionInput,
+  TranscriptionProvider,
+  TranscriptionResult,
+} from "../transcription";
 
 /**
  * Deterministic mock ASR. Replace this file (and the registry entry in

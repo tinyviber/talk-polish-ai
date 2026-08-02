@@ -21,6 +21,8 @@ export const responseMetaSchema = z.object({
 export const errorCodeSchema = z.enum([
   "bad_request",
   "validation_failed",
+  "unauthorized",
+  "conflict",
   "missing_audio",
   "unsupported_media_type",
   "payload_too_large",
@@ -74,12 +76,12 @@ export const scoreKeySchema = z.enum([
 export type ScoreKey = z.infer<typeof scoreKeySchema>;
 
 export const scoresSchema = z.object({
-  fluency: z.number(),
-  pauses: z.number(),
-  grammar: z.number(),
-  vocabulary: z.number(),
-  naturalness: z.number(),
-  pronunciation: z.number(),
+  fluency: z.number().min(0).max(100),
+  pauses: z.number().min(0).max(100),
+  grammar: z.number().min(0).max(100),
+  vocabulary: z.number().min(0).max(100),
+  naturalness: z.number().min(0).max(100),
+  pronunciation: z.number().min(0).max(100),
 });
 export type Scores = z.infer<typeof scoresSchema>;
 
@@ -109,7 +111,7 @@ export const expressionSchema = z.object({
 export type Expression = z.infer<typeof expressionSchema>;
 
 export const feedbackSchema = z.object({
-  overall: z.number(),
+  overall: z.number().min(0).max(100),
   headline: z.string(),
   scores: scoresSchema,
   improvements: z.array(improvementSchema),
@@ -235,16 +237,17 @@ export const listPromptsQuerySchema = z.object({
 export type ListPromptsQuery = z.infer<typeof listPromptsQuerySchema>;
 
 export const createPracticeSessionRequestSchema = z.object({
-  learnerId: z.string().min(1),
   promptId: z.string().min(1),
 });
 export type CreatePracticeSessionRequest = z.infer<typeof createPracticeSessionRequestSchema>;
 
 /** Multipart text fields that accompany the uploaded audio part. */
 export const createAttemptFieldsSchema = z.object({
-  learnerId: z.string().min(1),
   attemptIndex: z.coerce.number().int().min(1).max(2),
-  durationSec: z.coerce.number().nonnegative().max(60 * 30),
+  durationSec: z.coerce
+    .number()
+    .nonnegative()
+    .max(60 * 30),
   mocked: z
     .union([z.boolean(), z.enum(["true", "false"])])
     .optional()
@@ -253,17 +256,12 @@ export const createAttemptFieldsSchema = z.object({
 export type CreateAttemptFields = z.infer<typeof createAttemptFieldsSchema>;
 
 export const saveExpressionRequestSchema = z.object({
-  learnerId: z.string().min(1),
   expression: expressionSchema,
 });
 export type SaveExpressionRequest = z.infer<typeof saveExpressionRequestSchema>;
 
-export const learnerQuerySchema = z.object({
-  learnerId: z.string().min(1),
-});
-export type LearnerQuery = z.infer<typeof learnerQuerySchema>;
-
 export const idParamsSchema = z.object({ id: z.string().min(1) });
+export const sessionIdParamsSchema = z.object({ sessionId: z.string().min(1) });
 
 /* ------------------------------------------------------------------ */
 /* Responses                                                           */
@@ -277,6 +275,19 @@ export const healthResponseSchema = responseMetaSchema.extend({
 });
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
+export const livenessResponseSchema = responseMetaSchema.extend({
+  status: z.literal("ok"),
+  uptimeSec: z.number(),
+  version: z.string(),
+});
+export type LivenessResponse = z.infer<typeof livenessResponseSchema>;
+
+export const readinessResponseSchema = responseMetaSchema.extend({
+  status: z.literal("ready"),
+  database: z.literal("up"),
+});
+export type ReadinessResponse = z.infer<typeof readinessResponseSchema>;
+
 export const promptsResponseSchema = responseMetaSchema.extend({
   prompts: z.array(promptSchema),
 });
@@ -284,6 +295,7 @@ export type PromptsResponse = z.infer<typeof promptsResponseSchema>;
 
 export const learnerResponseSchema = responseMetaSchema.extend({
   learner: learnerSchema,
+  token: z.string().min(1),
 });
 export type LearnerResponse = z.infer<typeof learnerResponseSchema>;
 
@@ -302,7 +314,17 @@ export const savedExpressionsResponseSchema = responseMetaSchema.extend({
 });
 export type SavedExpressionsResponse = z.infer<typeof savedExpressionsResponseSchema>;
 
+export const savedExpressionResponseSchema = responseMetaSchema.extend({
+  expression: savedExpressionSchema,
+});
+export type SavedExpressionResponse = z.infer<typeof savedExpressionResponseSchema>;
+
 export const progressResponseSchema = responseMetaSchema.extend({
   progress: progressSchema,
 });
 export type ProgressResponse = z.infer<typeof progressResponseSchema>;
+
+export const deleteSavedExpressionResponseSchema = responseMetaSchema.extend({
+  deleted: z.literal(true),
+});
+export type DeleteSavedExpressionResponse = z.infer<typeof deleteSavedExpressionResponseSchema>;

@@ -19,6 +19,12 @@ export class ApiError extends Error {
   static validation(message: string, details?: string[]) {
     return new ApiError(422, "validation_failed", message, details);
   }
+  static unauthorized(message = "A valid learner token is required.") {
+    return new ApiError(401, "unauthorized", message);
+  }
+  static conflict(message: string) {
+    return new ApiError(409, "conflict", message);
+  }
   static missingAudio(message = "An audio recording is required for this attempt.") {
     return new ApiError(400, "missing_audio", message);
   }
@@ -39,6 +45,10 @@ export class ApiError extends Error {
   }
   static database(message = "The database is unavailable. Please try again.") {
     return new ApiError(503, "database_failure", message);
+  }
+
+  static internal(message = "Something went wrong while processing the request.") {
+    return new ApiError(500, "internal_error", message);
   }
 }
 

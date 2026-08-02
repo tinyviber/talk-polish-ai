@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kotoba
+      POSTGRES_PASSWORD: kotoba
+      POSTGRES_DB: kotoba
+    ports:
+      - "5432:5432"
+    volumes:
+      - kotoba-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kotoba -d kotoba"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  kotoba-postgres:

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AppMode } from "./mode";
 
 export type RecorderStatus = "idle" | "requesting" | "recording" | "recorded" | "denied";
 
@@ -7,20 +8,21 @@ export type RecorderState = {
   seconds: number;
   level: number;
   audioUrl: string | null;
+  audioBlob: Blob | null;
   mocked: boolean;
   error: string | null;
 };
 
 /**
- * MediaRecorder wrapper with a graceful demo fallback:
- * if the mic is unavailable or denied, recording still "works" in mock mode.
+ * MediaRecorder wrapper. Demo mode may explicitly simulate a recording; API mode never does.
  */
-export function useRecorder() {
+export function useRecorder({ mode = "demo" }: { mode?: AppMode } = {}) {
   const [state, setState] = useState<RecorderState>({
     status: "idle",
     seconds: 0,
     level: 0,
     audioUrl: null,
+    audioBlob: null,
     mocked: false,
     error: null,
   });
@@ -32,6 +34,12 @@ export function useRecorder() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+
+  const revokeAudioUrl = useCallback(() => {
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioUrlRef.current = null;
+  }, []);
 
   const cleanup = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -45,7 +53,13 @@ export function useRecorder() {
     ctxRef.current = null;
   }, []);
 
-  useEffect(() => () => cleanup(), [cleanup]);
+  useEffect(
+    () => () => {
+      cleanup();
+      revokeAudioUrl();
+    },
+    [cleanup, revokeAudioUrl],
+  );
 
   const startTimer = useCallback(() => {
     timerRef.current = setInterval(() => {
@@ -76,6 +90,7 @@ export function useRecorder() {
       seconds: 0,
       level: 0,
       audioUrl: null,
+      audioBlob: null,
       mocked: false,
       error: null,
     });
@@ -87,13 +102,18 @@ export function useRecorder() {
 
     if (!supported) {
       setState({
-        status: "recording",
+        status: mode === "api" ? "denied" : "recording",
         seconds: 0,
         level: 0,
         audioUrl: null,
-        mocked: true,
-        error: "This browser doesn't support microphone recording — running in demo mode.",
+        audioBlob: null,
+        mocked: mode !== "api",
+        error:
+          mode === "api"
+            ? "This browser cannot capture a microphone recording. Switch to demo mode to continue."
+            : "This browser doesn't support microphone recording — running in demo mode.",
       });
+      if (mode === "api") return;
       startTimer();
       startMockLevels();
       return;
@@ -137,6 +157,7 @@ export function useRecorder() {
         seconds: 0,
         level: 0,
         audioUrl: null,
+        audioBlob: null,
         mocked: false,
         error: null,
       });
@@ -148,11 +169,15 @@ export function useRecorder() {
         seconds: 0,
         level: 0,
         audioUrl: null,
-        mocked: true,
-        error: "Microphone access was blocked.",
+        audioBlob: null,
+        mocked: false,
+        error:
+          mode === "api"
+            ? "Microphone access was blocked. Allow it or switch to demo mode explicitly."
+            : "Microphone access was blocked.",
       });
     }
-  }, [cleanup, startTimer, startMockLevels]);
+  }, [cleanup, mode, startTimer, startMockLevels]);
 
   /** Continue without a microphone (demo mode). */
   const startDemo = useCallback(() => {
@@ -161,6 +186,7 @@ export function useRecorder() {
       seconds: 0,
       level: 0,
       audioUrl: null,
+      audioBlob: null,
       mocked: true,
       error: "Demo mode: your voice isn't being captured.",
     });
@@ -182,6 +208,8 @@ export function useRecorder() {
       });
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       const url = blob.size > 0 ? URL.createObjectURL(blob) : null;
+      revokeAudioUrl();
+      audioUrlRef.current = url;
       recorderRef.current = null;
       cleanup();
       setState((s) => ({
@@ -189,19 +217,29 @@ export function useRecorder() {
         status: "recorded",
         level: 0,
         audioUrl: url,
+        audioBlob: blob.size > 0 ? blob : null,
         mocked: url === null,
       }));
       return;
     }
     cleanup();
-    setState((s) => ({ ...s, status: "recorded", level: 0, mocked: true }));
-  }, [cleanup]);
+    setState((s) => ({ ...s, status: "recorded", level: 0, audioBlob: null, mocked: true }));
+  }, [cleanup, revokeAudioUrl]);
 
   const reset = useCallback(() => {
     cleanup();
+    revokeAudioUrl();
     recorderRef.current = null;
-    setState({ status: "idle", seconds: 0, level: 0, audioUrl: null, mocked: false, error: null });
-  }, [cleanup]);
+    setState({
+      status: "idle",
+      seconds: 0,
+      level: 0,
+      audioUrl: null,
+      audioBlob: null,
+      mocked: false,
+      error: null,
+    });
+  }, [cleanup, revokeAudioUrl]);
 
   return { ...state, start, startDemo, stop, reset };
 }

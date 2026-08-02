@@ -8,11 +8,16 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3333),
   HOST: z.string().default("0.0.0.0"),
-  DATABASE_URL: z
-    .string()
-    .default("postgres://kotoba:kotoba@localhost:5432/kotoba"),
+  DATABASE_URL: z.string().default("postgres://kotoba:kotoba@localhost:5432/kotoba"),
   /** Comma-separated list, or `*` for local development. */
   CORS_ORIGIN: z.string().default("*"),
+  /** HMAC key used to sign anonymous learner bearer tokens. Change in deployment. */
+  ANON_TOKEN_SECRET: z.string().min(16).default("local-development-anon-token-secret"),
+  ANON_TOKEN_TTL_SEC: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60 * 60 * 24 * 365),
   /** Root directory for local development artefacts (never committed). */
   DATA_DIR: z.string().default("./data"),
   /** `local` today; `s3` once an S3-compatible provider is added. */
@@ -20,7 +25,11 @@ const envSchema = z.object({
   TRANSCRIPTION_PROVIDER: z.enum(["mock"]).default("mock"),
   ASSESSMENT_PROVIDER: z.enum(["mock"]).default("mock"),
   TTS_PROVIDER: z.enum(["mock"]).default("mock"),
-  MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+  MAX_UPLOAD_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(25 * 1024 * 1024),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -33,6 +42,12 @@ export function env(): Env {
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
       throw new Error(`Invalid API environment configuration:\n  ${issues.join("\n  ")}`);
+    }
+    if (
+      parsed.data.NODE_ENV === "production" &&
+      parsed.data.ANON_TOKEN_SECRET === "local-development-anon-token-secret"
+    ) {
+      throw new Error("ANON_TOKEN_SECRET must be changed in production.");
     }
     cached = parsed.data;
   }

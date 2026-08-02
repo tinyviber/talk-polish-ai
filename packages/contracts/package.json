@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "bun test --bail || true"
+    "test": "bun test"
   },
   "dependencies": {
     "zod": "^3.24.2"

@@ -2,12 +2,15 @@
   "name": "kotoba-loop",
   "private": true,
   "type": "module",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "setup": "bun install",
     "dev": "bun --filter @kotoba/web dev",
     "dev:api": "bun --filter @kotoba/api dev",
-    "dev:all": "bun --filter '*' dev",
+    "dev:all": "bun run dev:api & bun run dev",
     "build": "bun --filter @kotoba/contracts build && bun --filter @kotoba/web build && bun --filter @kotoba/api build",
     "build:dev": "bun --filter @kotoba/web build:dev",
     "build:web": "bun --filter @kotoba/web build",
@@ -15,8 +18,8 @@
     "lint": "eslint .",
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun --filter '*' test",
-    "format": "prettier --write .",
-    "db:generate": "bun --filter @kotoba/api db:generate",
+    "test:integration": "bun --filter @kotoba/api test:integration",
+    "format": "prettier --write README.md package.json docker-compose.yml \"apps/**/*.{ts,tsx,json,md,yml,yaml}\" \"packages/**/*.{ts,tsx,json,md,yml,yaml}\"",
     "db:migrate": "bun --filter @kotoba/api db:migrate",
     "db:seed": "bun --filter @kotoba/api db:seed",
     "db:up": "docker compose up -d",

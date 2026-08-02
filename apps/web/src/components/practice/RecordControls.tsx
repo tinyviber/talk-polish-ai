@@ -2,6 +2,7 @@ import { Mic, Square, RotateCcw, Play, Pause } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { RecorderState } from "@/lib/practice/useRecorder";
+import type { AppMode } from "@/lib/practice/mode";
 import { cn } from "@/lib/utils";
 
 function fmt(s: number) {
@@ -35,6 +36,8 @@ export function RecordControls({
   targetSeconds,
   onSubmit,
   submitLabel,
+  mode,
+  onUseDemo,
 }: {
   recorder: RecorderState & {
     start: () => Promise<void>;
@@ -45,8 +48,10 @@ export function RecordControls({
   targetSeconds: number;
   onSubmit: () => void;
   submitLabel: string;
+  mode: AppMode;
+  onUseDemo: () => void;
 }) {
-  const { status, seconds, level, audioUrl, mocked, error } = recorder;
+  const { status, seconds, level, audioUrl, error } = recorder;
 
   return (
     <div className="rounded-3xl border border-border bg-card p-5 shadow-lift sm:p-6">
@@ -54,13 +59,20 @@ export function RecordControls({
         <div className="space-y-3 text-center">
           <p className="font-display text-lg">Microphone blocked</p>
           <p className="mx-auto max-w-sm text-sm text-muted-foreground">
-            We couldn't access your mic. Allow it in your browser settings, or keep going in demo
-            mode — the coaching flow works either way.
+            {mode === "api"
+              ? "Allow microphone access to upload a real recording, or explicitly switch to demo mode."
+              : "We couldn't access your mic. Allow it in your browser settings, or keep going in demo mode."}
           </p>
           <div className="flex flex-wrap justify-center gap-2">
             <Button onClick={() => void recorder.start()}>Try again</Button>
-            <Button variant="outline" onClick={recorder.startDemo}>
-              Continue in demo mode
+            <Button
+              variant="outline"
+              onClick={() => {
+                onUseDemo();
+                recorder.startDemo();
+              }}
+            >
+              {mode === "api" ? "Switch to demo mode" : "Continue in demo mode"}
             </Button>
           </div>
         </div>
@@ -116,9 +128,9 @@ export function RecordControls({
             {error ? (
               <p className="max-w-sm text-center text-xs text-muted-foreground">{error}</p>
             ) : null}
-            {mocked && status === "recording" ? (
+            {mode === "demo" && status === "recording" ? (
               <p className="text-xs text-muted-foreground">
-                Demo mode — sample audio will be used.
+                Demo mode — a sample answer powers feedback; any local audio stays in your browser.
               </p>
             ) : null}
           </div>

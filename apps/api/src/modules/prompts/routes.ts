@@ -17,9 +17,9 @@ export async function promptRoutes(app: FastifyInstance) {
         response: { 200: promptsResponseSchema, 503: errorResponseSchema },
       },
     },
-    async (request) => ({
-      prompts: await listPrompts(request.query.lang),
-      requestId: request.id,
-    }),
+    async (request) => {
+      const query = listPromptsQuerySchema.parse(request.query);
+      return { prompts: await listPrompts(query.lang), requestId: request.id };
+    },
   );
 }

@@ -1,7 +1,12 @@
 import type { Lang, Progress, SessionRecord } from "@kotoba/contracts";
 import { asc, eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { attemptResults, practiceSessions, savedExpressions, speakingAttempts } from "../../db/schema";
+import {
+  attemptResults,
+  practiceSessions,
+  savedExpressions,
+  speakingAttempts,
+} from "../../db/schema";
 import { withDb } from "../../http/with-db";
 
 /** Consecutive days (ending today or yesterday) with at least one session. */
@@ -59,7 +64,10 @@ export async function getProgress(learnerId: string): Promise<Progress> {
   const sessions = [...byId.values()].reverse();
   const improved = sessions.filter((s) => s.second !== null);
   const savedRows = await withDb("countSaved", () =>
-    db().select({ id: savedExpressions.id }).from(savedExpressions).where(eq(savedExpressions.learnerId, learnerId)),
+    db()
+      .select({ id: savedExpressions.id })
+      .from(savedExpressions)
+      .where(eq(savedExpressions.learnerId, learnerId)),
   );
 
   return {

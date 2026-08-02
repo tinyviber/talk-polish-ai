@@ -40,4 +40,9 @@ export function providers(): Providers {
   return cached;
 }
 
-export type { AssessmentProvider, AudioStorageProvider, TranscriptionProvider, TextToSpeechProvider };
+export type {
+  AssessmentProvider,
+  AudioStorageProvider,
+  TranscriptionProvider,
+  TextToSpeechProvider,
+};

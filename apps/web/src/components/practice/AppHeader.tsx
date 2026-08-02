@@ -11,7 +11,7 @@ const NAV = [
 ] as const;
 
 export function AppHeader() {
-  const { state } = usePracticeStore();
+  const { state, mode } = usePracticeStore();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const streak = computeStreak(state.sessions);
 
@@ -63,6 +63,9 @@ export function AppHeader() {
           <span>{streak}</span>
           <span className="sr-only">day streak</span>
         </div>
+        <span className="hidden rounded-full border border-border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground sm:inline">
+          {mode} mode
+        </span>
       </div>
     </header>
   );

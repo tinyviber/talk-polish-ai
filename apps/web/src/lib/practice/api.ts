@@ -1,0 +1,216 @@
+import {
+  attemptResponseSchema,
+  createAnonymousLearnerRequestSchema,
+  deleteSavedExpressionResponseSchema,
+  errorResponseSchema,
+  learnerResponseSchema,
+  practiceSessionResponseSchema,
+  progressResponseSchema,
+  promptsResponseSchema,
+  savedExpressionResponseSchema,
+  savedExpressionsResponseSchema,
+  type Expression,
+  type Feedback,
+  type Lang,
+  type Prompt,
+  type Progress,
+  type PracticeSession,
+  type SavedExpression,
+} from "@kotoba/contracts";
+import { apiBaseUrl } from "./mode";
+
+const TOKEN_KEY = "kotoba.api.token.v1";
+const DEVICE_KEY = "kotoba.api.device.v1";
+
+function readStorage(key: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // API credentials can be recreated through anonymous bootstrap.
+  }
+}
+
+let token: string | null = readStorage(TOKEN_KEY);
+let deviceId: string | null = readStorage(DEVICE_KEY);
+
+export class ApiClientError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly requestId: string | undefined;
+
+  constructor(message: string, status: number, code = "internal_error", requestId?: string) {
+    super(message);
+    this.name = "ApiClientError";
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
+function getDeviceId() {
+  if (deviceId) return deviceId;
+  deviceId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `device-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+  writeStorage(DEVICE_KEY, deviceId);
+  return deviceId;
+}
+
+async function request<T>(
+  path: string,
+  schema: { parse: (value: unknown) => T },
+  init: RequestInit = {},
+  authenticated = true,
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body && !(init.body instanceof FormData))
+    headers.set("content-type", "application/json");
+  if (authenticated) {
+    if (!token) throw new ApiClientError("The learner session has expired.", 401, "unauthorized");
+    headers.set("authorization", `Bearer ${token}`);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers });
+  } catch {
+    throw new ApiClientError("The API could not be reached. Check that it is running.", 0);
+  }
+
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const parsed = errorResponseSchema.safeParse(payload);
+    if (parsed.success) {
+      throw new ApiClientError(
+        parsed.data.error.message,
+        response.status,
+        parsed.data.error.code,
+        parsed.data.requestId,
+      );
+    }
+    throw new ApiClientError("The API returned an unexpected error.", response.status);
+  }
+
+  try {
+    return schema.parse(payload);
+  } catch {
+    throw new ApiClientError("The API returned an invalid response.", response.status);
+  }
+}
+
+export async function bootstrapLearner(lang: Lang | null) {
+  const body = createAnonymousLearnerRequestSchema.parse({ deviceId: getDeviceId(), lang });
+  const response = await request(
+    "/api/learners/anonymous",
+    learnerResponseSchema,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    false,
+  );
+  token = response.token;
+  writeStorage(TOKEN_KEY, token);
+  return response.learner;
+}
+
+export async function listPrompts(lang?: Lang): Promise<Prompt[]> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return (await request(`/api/prompts${query}`, promptsResponseSchema, {}, false)).prompts;
+}
+
+export async function createSession(promptId: string): Promise<PracticeSession> {
+  if (!token) await bootstrapLearner(null);
+  return (
+    await request("/api/sessions", practiceSessionResponseSchema, {
+      method: "POST",
+      body: JSON.stringify({ promptId }),
+    })
+  ).session;
+}
+
+export async function getSession(id: string): Promise<PracticeSession> {
+  if (!token) await bootstrapLearner(null);
+  return (await request(`/api/sessions/${encodeURIComponent(id)}`, practiceSessionResponseSchema))
+    .session;
+}
+
+export async function createAttempt(
+  sessionId: string,
+  input: { index: 1 | 2; durationSec: number; audio: Blob | null },
+) {
+  if (!token) await bootstrapLearner(null);
+  const form = new FormData();
+  form.set("attemptIndex", String(input.index));
+  form.set("durationSec", String(input.durationSec));
+  if (input.audio) form.set("audio", input.audio, "recording.webm");
+  else form.set("mocked", "true");
+  return (
+    await request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/attempts`,
+      attemptResponseSchema,
+      { method: "POST", body: form },
+    )
+  ).attempt;
+}
+
+export async function getAttempt(id: string) {
+  if (!token) await bootstrapLearner(null);
+  return (await request(`/api/attempts/${encodeURIComponent(id)}`, attemptResponseSchema)).attempt;
+}
+
+export async function listSaved(): Promise<SavedExpression[]> {
+  if (!token) await bootstrapLearner(null);
+  return (await request("/api/saved", savedExpressionsResponseSchema)).expressions;
+}
+
+export async function saveExpression(expression: Expression): Promise<SavedExpression> {
+  if (!token) await bootstrapLearner(null);
+  return (
+    await request("/api/saved", savedExpressionResponseSchema, {
+      method: "POST",
+      body: JSON.stringify({ expression }),
+    })
+  ).expression;
+}
+
+export async function deleteSaved(expressionId: string) {
+  if (!token) await bootstrapLearner(null);
+  return request(
+    `/api/saved/${encodeURIComponent(expressionId)}`,
+    deleteSavedExpressionResponseSchema,
+    { method: "DELETE" },
+  );
+}
+
+export async function getProgress(): Promise<Progress> {
+  if (!token) await bootstrapLearner(null);
+  return (await request("/api/progress", progressResponseSchema)).progress;
+}
+
+export function toReadyAttempt(value: Awaited<ReturnType<typeof createAttempt>>) {
+  if (value.status !== "ready" || !value.transcript || !value.feedback) {
+    throw new ApiClientError(
+      "The attempt did not finish processing.",
+      503,
+      "processing_unavailable",
+    );
+  }
+  return {
+    index: value.index,
+    transcript: value.transcript,
+    feedback: value.feedback as Feedback,
+    durationSec: value.durationSec,
+    mocked: value.mocked,
+  };
+}

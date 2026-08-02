@@ -10,26 +10,30 @@ import { client, closeDatabase } from "./client";
 export async function runMigrations() {
   const sql = client();
   const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
-
-  await sql`create table if not exists _migrations (
-    name text primary key,
-    applied_at timestamptz not null default now()
-  )`;
-
-  const applied = new Set(
-    (await sql<{ name: string }[]>`select name from _migrations`).map((r) => r.name),
-  );
-
   const files = (await readdir(dir)).filter((f) => f.endsWith(".sql")).sort();
+
   let count = 0;
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const body = await readFile(path.join(dir, file), "utf8");
-    await sql.unsafe(body);
-    await sql`insert into _migrations (name) values (${file})`;
-    console.log(`applied migration ${file}`);
-    count += 1;
-  }
+  await sql.begin(async (tx) => {
+    // Transaction-scoped lock makes concurrent API/container starts serialize
+    // without holding a session lock after this transaction commits.
+    await tx`select pg_advisory_xact_lock(hashtext('kotoba_loop_migrations'))`;
+    await tx`create table if not exists _migrations (
+      name text primary key,
+      applied_at timestamptz not null default now()
+    )`;
+
+    const applied = new Set(
+      (await tx<{ name: string }[]>`select name from _migrations`).map((row) => row.name),
+    );
+    for (const file of files) {
+      if (applied.has(file)) continue;
+      const body = await readFile(path.join(dir, file), "utf8");
+      await tx.unsafe(body);
+      await tx`insert into _migrations (name) values (${file}) on conflict (name) do nothing`;
+      console.log(`applied migration ${file}`);
+      count += 1;
+    }
+  });
   console.log(count === 0 ? "migrations up to date" : `applied ${count} migration(s)`);
 }
 

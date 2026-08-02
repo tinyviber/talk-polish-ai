@@ -1,0 +1,308 @@
+import { z } from "zod";
+
+/* ------------------------------------------------------------------ */
+/* Primitives                                                          */
+/* ------------------------------------------------------------------ */
+
+export const langSchema = z.enum(["en", "ja"]);
+export type Lang = z.infer<typeof langSchema>;
+
+export const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
+
+/** Metadata attached to every response so failures can be traced in logs. */
+export const responseMetaSchema = z.object({
+  requestId: z.string(),
+});
+
+/* ------------------------------------------------------------------ */
+/* Errors                                                              */
+/* ------------------------------------------------------------------ */
+
+export const errorCodeSchema = z.enum([
+  "bad_request",
+  "validation_failed",
+  "missing_audio",
+  "unsupported_media_type",
+  "payload_too_large",
+  "not_found",
+  "processing_unavailable",
+  "storage_failure",
+  "database_failure",
+  "internal_error",
+]);
+export type ErrorCode = z.infer<typeof errorCodeSchema>;
+
+export const errorResponseSchema = z.object({
+  error: z.object({
+    code: errorCodeSchema,
+    message: z.string(),
+    /** Safe, user-presentable details only — never stack traces or credentials. */
+    details: z.array(z.string()).optional(),
+  }),
+  requestId: z.string(),
+});
+export type ErrorResponse = z.infer<typeof errorResponseSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Domain: prompts                                                     */
+/* ------------------------------------------------------------------ */
+
+export const promptSchema = z.object({
+  id: z.string(),
+  lang: langSchema,
+  scenario: z.string(),
+  situation: z.string(),
+  question: z.string(),
+  questionTranslation: z.string().optional(),
+  hints: z.array(z.string()),
+  seconds: z.number().int().positive(),
+});
+export type Prompt = z.infer<typeof promptSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Domain: feedback                                                    */
+/* ------------------------------------------------------------------ */
+
+export const scoreKeySchema = z.enum([
+  "fluency",
+  "pauses",
+  "grammar",
+  "vocabulary",
+  "naturalness",
+  "pronunciation",
+]);
+export type ScoreKey = z.infer<typeof scoreKeySchema>;
+
+export const scoresSchema = z.object({
+  fluency: z.number(),
+  pauses: z.number(),
+  grammar: z.number(),
+  vocabulary: z.number(),
+  naturalness: z.number(),
+  pronunciation: z.number(),
+});
+export type Scores = z.infer<typeof scoresSchema>;
+
+export const annotationSchema = z.object({
+  text: z.string(),
+  kind: z.enum(["ok", "grammar", "filler", "word"]),
+  note: z.string().optional(),
+});
+export type Annotation = z.infer<typeof annotationSchema>;
+
+export const improvementSchema = z.object({
+  title: z.string(),
+  detail: z.string(),
+  before: z.string(),
+  after: z.string(),
+});
+export type Improvement = z.infer<typeof improvementSchema>;
+
+export const expressionSchema = z.object({
+  id: z.string(),
+  lang: langSchema,
+  text: z.string(),
+  reading: z.string().optional(),
+  meaning: z.string(),
+  savedAt: z.number().optional(),
+});
+export type Expression = z.infer<typeof expressionSchema>;
+
+export const feedbackSchema = z.object({
+  overall: z.number(),
+  headline: z.string(),
+  scores: scoresSchema,
+  improvements: z.array(improvementSchema),
+  annotations: z.array(annotationSchema),
+  expressions: z.array(expressionSchema),
+  stats: z.object({
+    words: z.number(),
+    wpm: z.number(),
+    fillers: z.number(),
+    longestPause: z.string(),
+  }),
+});
+export type Feedback = z.infer<typeof feedbackSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Domain: audio                                                       */
+/* ------------------------------------------------------------------ */
+
+export const SUPPORTED_AUDIO_MIME_TYPES = [
+  "audio/webm",
+  "audio/ogg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/m4a",
+] as const;
+
+/** 25 MB — comfortably above a two-minute browser recording. */
+export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+
+export const audioMetadataSchema = z.object({
+  id: z.string(),
+  /** Opaque storage reference, e.g. `local://recordings/<id>.webm` or `s3://bucket/key`. */
+  storageKey: z.string(),
+  mimeType: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  durationSec: z.number().nonnegative(),
+});
+export type AudioMetadata = z.infer<typeof audioMetadataSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Domain: learner / session / attempt                                 */
+/* ------------------------------------------------------------------ */
+
+export const learnerSchema = z.object({
+  id: z.string(),
+  deviceId: z.string(),
+  lang: langSchema.nullable(),
+  createdAt: z.string(),
+});
+export type Learner = z.infer<typeof learnerSchema>;
+
+export const attemptStatusSchema = z.enum(["processing", "ready", "failed"]);
+export type AttemptStatus = z.infer<typeof attemptStatusSchema>;
+
+export const attemptSchema = z.object({
+  id: z.string(),
+  sessionId: z.string(),
+  index: z.union([z.literal(1), z.literal(2)]),
+  status: attemptStatusSchema,
+  transcript: z.string().nullable(),
+  feedback: feedbackSchema.nullable(),
+  durationSec: z.number().nonnegative(),
+  /** True when no real audio was captured (demo / mic-blocked fallback). */
+  mocked: z.boolean(),
+  audio: audioMetadataSchema.nullable(),
+  createdAt: z.string(),
+});
+export type Attempt = z.infer<typeof attemptSchema>;
+
+export const practiceSessionSchema = z.object({
+  id: z.string(),
+  learnerId: z.string(),
+  promptId: z.string(),
+  lang: langSchema,
+  createdAt: z.string(),
+  attempts: z.array(attemptSchema),
+});
+export type PracticeSession = z.infer<typeof practiceSessionSchema>;
+
+export const savedExpressionSchema = expressionSchema.extend({
+  savedAt: z.number(),
+});
+export type SavedExpression = z.infer<typeof savedExpressionSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Domain: progress                                                    */
+/* ------------------------------------------------------------------ */
+
+export const sessionRecordSchema = z.object({
+  id: z.string(),
+  lang: langSchema,
+  promptId: z.string(),
+  date: isoDateSchema,
+  first: z.number(),
+  second: z.number().nullable(),
+});
+export type SessionRecord = z.infer<typeof sessionRecordSchema>;
+
+export const progressSchema = z.object({
+  streak: z.number().int().nonnegative(),
+  totalSessions: z.number().int().nonnegative(),
+  avgSecondAttemptGain: z.number().nullable(),
+  savedCount: z.number().int().nonnegative(),
+  sessions: z.array(sessionRecordSchema),
+});
+export type Progress = z.infer<typeof progressSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Requests                                                            */
+/* ------------------------------------------------------------------ */
+
+export const createAnonymousLearnerRequestSchema = z.object({
+  deviceId: z.string().min(6).max(128),
+  lang: langSchema.nullish(),
+});
+export type CreateAnonymousLearnerRequest = z.infer<typeof createAnonymousLearnerRequestSchema>;
+
+export const listPromptsQuerySchema = z.object({
+  lang: langSchema.optional(),
+});
+export type ListPromptsQuery = z.infer<typeof listPromptsQuerySchema>;
+
+export const createPracticeSessionRequestSchema = z.object({
+  learnerId: z.string().min(1),
+  promptId: z.string().min(1),
+});
+export type CreatePracticeSessionRequest = z.infer<typeof createPracticeSessionRequestSchema>;
+
+/** Multipart text fields that accompany the uploaded audio part. */
+export const createAttemptFieldsSchema = z.object({
+  learnerId: z.string().min(1),
+  attemptIndex: z.coerce.number().int().min(1).max(2),
+  durationSec: z.coerce.number().nonnegative().max(60 * 30),
+  mocked: z
+    .union([z.boolean(), z.enum(["true", "false"])])
+    .optional()
+    .transform((v) => v === true || v === "true"),
+});
+export type CreateAttemptFields = z.infer<typeof createAttemptFieldsSchema>;
+
+export const saveExpressionRequestSchema = z.object({
+  learnerId: z.string().min(1),
+  expression: expressionSchema,
+});
+export type SaveExpressionRequest = z.infer<typeof saveExpressionRequestSchema>;
+
+export const learnerQuerySchema = z.object({
+  learnerId: z.string().min(1),
+});
+export type LearnerQuery = z.infer<typeof learnerQuerySchema>;
+
+export const idParamsSchema = z.object({ id: z.string().min(1) });
+
+/* ------------------------------------------------------------------ */
+/* Responses                                                           */
+/* ------------------------------------------------------------------ */
+
+export const healthResponseSchema = responseMetaSchema.extend({
+  status: z.literal("ok"),
+  uptimeSec: z.number(),
+  version: z.string(),
+  database: z.enum(["up", "down"]),
+});
+export type HealthResponse = z.infer<typeof healthResponseSchema>;
+
+export const promptsResponseSchema = responseMetaSchema.extend({
+  prompts: z.array(promptSchema),
+});
+export type PromptsResponse = z.infer<typeof promptsResponseSchema>;
+
+export const learnerResponseSchema = responseMetaSchema.extend({
+  learner: learnerSchema,
+});
+export type LearnerResponse = z.infer<typeof learnerResponseSchema>;
+
+export const practiceSessionResponseSchema = responseMetaSchema.extend({
+  session: practiceSessionSchema,
+});
+export type PracticeSessionResponse = z.infer<typeof practiceSessionResponseSchema>;
+
+export const attemptResponseSchema = responseMetaSchema.extend({
+  attempt: attemptSchema,
+});
+export type AttemptResponse = z.infer<typeof attemptResponseSchema>;
+
+export const savedExpressionsResponseSchema = responseMetaSchema.extend({
+  expressions: z.array(savedExpressionSchema),
+});
+export type SavedExpressionsResponse = z.infer<typeof savedExpressionsResponseSchema>;
+
+export const progressResponseSchema = responseMetaSchema.extend({
+  progress: progressSchema,
+});
+export type ProgressResponse = z.infer<typeof progressResponseSchema>;

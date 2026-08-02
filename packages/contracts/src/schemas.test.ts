@@ -42,4 +42,25 @@ describe("shared contracts", () => {
       }),
     );
   });
+
+  test("rejects fractional feedback scores that cannot fit PostgreSQL integer columns", () => {
+    expect(
+      feedbackSchema.safeParse({
+        overall: 70.5,
+        headline: "Good",
+        scores: {
+          fluency: 70,
+          pauses: 70,
+          grammar: 70,
+          vocabulary: 70,
+          naturalness: 70,
+          pronunciation: 70,
+        },
+        improvements: [],
+        annotations: [],
+        expressions: [],
+        stats: { words: 10, wpm: 80, fillers: 1, longestPause: "1s" },
+      }).success,
+    ).toBe(false);
+  });
 });

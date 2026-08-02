@@ -279,7 +279,7 @@ function Practice() {
         <div className="mt-6 space-y-6">
           {step === "prompt" ? (
             <>
-              <PromptCard prompt={prompt} />
+              <PromptCard prompt={prompt} mode={mode} />
               <div className="flex flex-wrap items-center gap-3">
                 <Button
                   size="lg"
@@ -303,7 +303,7 @@ function Practice() {
 
           {step === "record" || step === "record2" ? (
             <>
-              <PromptCard prompt={prompt} compact />
+              <PromptCard prompt={prompt} compact mode={mode} />
               {step === "record2" && first ? (
                 <div className="rounded-2xl border border-primary/40 bg-primary/8 px-4 py-3">
                   <p className="text-sm font-semibold">Second take — focus on this:</p>
@@ -333,6 +333,7 @@ function Practice() {
               attempt={current}
               previous={step === "result" ? first : null}
               jp={jp}
+              mode={mode}
               isSaved={isSaved}
               onToggleSave={(e) => {
                 const wasSaved = isSaved(e.id);
@@ -405,12 +406,14 @@ function FeedbackView({
   attempt,
   previous,
   jp,
+  mode,
   isSaved,
   onToggleSave,
 }: {
   attempt: Attempt;
   previous: Attempt | null;
   jp: boolean;
+  mode: import("@/lib/practice/mode").AppMode;
   isSaved: (id: string) => boolean;
   onToggleSave: (e: import("@/lib/practice/types").Expression) => void;
 }) {
@@ -441,7 +444,14 @@ function FeedbackView({
         </h2>
         <ul className="mt-3 space-y-3">
           {fb.improvements.map((item, i) => (
-            <ImprovementCard key={item.title} item={item} index={i + 1} jp={jp} />
+            <ImprovementCard
+              key={item.title}
+              item={item}
+              index={i + 1}
+              jp={jp}
+              lang={jp ? "ja" : "en"}
+              mode={mode}
+            />
           ))}
         </ul>
       </section>
@@ -471,6 +481,7 @@ function FeedbackView({
               key={e.id}
               expression={e}
               saved={isSaved(e.id)}
+              mode={mode}
               onToggle={() => onToggleSave(e)}
             />
           ))}

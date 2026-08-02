@@ -9,13 +9,16 @@ import {
   promptsResponseSchema,
   savedExpressionResponseSchema,
   savedExpressionsResponseSchema,
+  synthesisResponseSchema,
   type Expression,
   type Feedback,
   type Lang,
+  type Learner,
   type Prompt,
   type Progress,
   type PracticeSession,
   type SavedExpression,
+  type SynthesisRequest,
 } from "@kotoba/contracts";
 import { apiBaseUrl } from "./mode";
 
@@ -41,6 +44,19 @@ function writeStorage(key: string, value: string) {
 
 let token: string | null = readStorage(TOKEN_KEY);
 let deviceId: string | null = readStorage(DEVICE_KEY);
+let lastBootstrapLang: Lang | null = null;
+const bootstrapInFlight = new Map<Lang | null, Promise<Learner>>();
+const REQUEST_TIMEOUT_MS = 30_000;
+const READ_RETRY_LIMIT = 2;
+
+/** Build same-origin API URLs; never attach bearer tokens to arbitrary origins. */
+export function apiUrl(path: string) {
+  const base = new URL(`${apiBaseUrl}/`);
+  const target = new URL(path, base);
+  if (target.origin !== base.origin)
+    throw new ApiClientError("Invalid API URL.", 0, "internal_error");
+  return target.toString();
+}
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -72,6 +88,23 @@ async function request<T>(
   init: RequestInit = {},
   authenticated = true,
 ): Promise<T> {
+  const response = await fetchWithRetry(path, init, authenticated);
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw apiErrorFromResponse(response, payload, "The API");
+  try {
+    return schema.parse(payload);
+  } catch {
+    throw new ApiClientError("The API returned an invalid response.", response.status);
+  }
+}
+
+async function fetchWithRetry(
+  path: string,
+  init: RequestInit = {},
+  authenticated = true,
+  refreshAttempted = false,
+): Promise<Response> {
+  if (authenticated && !token) await bootstrapLearner(lastBootstrapLang);
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData))
     headers.set("content-type", "application/json");
@@ -80,35 +113,67 @@ async function request<T>(
     headers.set("authorization", `Bearer ${token}`);
   }
 
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers });
-  } catch {
-    throw new ApiClientError("The API could not be reached. Check that it is running.", 0);
-  }
-
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const parsed = errorResponseSchema.safeParse(payload);
-    if (parsed.success) {
-      throw new ApiClientError(
-        parsed.data.error.message,
-        response.status,
-        parsed.data.error.code,
-        parsed.data.requestId,
-      );
+  const method = (init.method ?? "GET").toUpperCase();
+  const retryLimit = method === "GET" || method === "HEAD" ? READ_RETRY_LIMIT : 0;
+  for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(apiUrl(path), {
+        ...init,
+        headers,
+        signal: controller.signal,
+        redirect: "error",
+      });
+      if (response.status === 401 && authenticated && !refreshAttempted) {
+        token = null;
+        await bootstrapLearner(lastBootstrapLang);
+        return fetchWithRetry(path, init, authenticated, true);
+      }
+      return response;
+    } catch (error) {
+      if (error instanceof ApiClientError) throw error;
+      if (attempt >= retryLimit) {
+        throw new ApiClientError(
+          controller.signal.aborted
+            ? "The API request timed out. Please try again."
+            : "The API could not be reached. Check that it is running.",
+          0,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    } finally {
+      clearTimeout(timer);
     }
-    throw new ApiClientError("The API returned an unexpected error.", response.status);
   }
-
-  try {
-    return schema.parse(payload);
-  } catch {
-    throw new ApiClientError("The API returned an invalid response.", response.status);
-  }
+  throw new ApiClientError("The API request failed.", 0);
 }
 
-export async function bootstrapLearner(lang: Lang | null) {
+function apiErrorFromResponse(response: Response, payload: unknown, prefix: string) {
+  const parsed = errorResponseSchema.safeParse(payload);
+  if (parsed.success) {
+    return new ApiClientError(
+      parsed.data.error.message,
+      response.status,
+      parsed.data.error.code,
+      parsed.data.requestId,
+    );
+  }
+  return new ApiClientError(`${prefix} returned an unexpected error.`, response.status);
+}
+
+export async function bootstrapLearner(lang: Lang | null): Promise<Learner> {
+  const existing = bootstrapInFlight.get(lang);
+  if (existing) return existing;
+
+  const inFlight = bootstrapLearnerOnce(lang).finally(() => {
+    if (bootstrapInFlight.get(lang) === inFlight) bootstrapInFlight.delete(lang);
+  });
+  bootstrapInFlight.set(lang, inFlight);
+  return inFlight;
+}
+
+async function bootstrapLearnerOnce(lang: Lang | null) {
   const body = createAnonymousLearnerRequestSchema.parse({ deviceId: getDeviceId(), lang });
   const response = await request(
     "/api/learners/anonymous",
@@ -120,6 +185,7 @@ export async function bootstrapLearner(lang: Lang | null) {
     false,
   );
   token = response.token;
+  lastBootstrapLang = response.learner.lang;
   writeStorage(TOKEN_KEY, token);
   return response.learner;
 }
@@ -196,6 +262,29 @@ export async function deleteSaved(expressionId: string) {
 export async function getProgress(): Promise<Progress> {
   if (!token) await bootstrapLearner(null);
   return (await request("/api/progress", progressResponseSchema)).progress;
+}
+
+export async function synthesizeSpeech(input: SynthesisRequest) {
+  if (!token) await bootstrapLearner(input.lang);
+  return (
+    await request("/api/tts", synthesisResponseSchema, {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  ).audio;
+}
+
+/**
+ * Fetch protected audio with bearer auth and return a browser object URL.
+ * Caller owns URL.revokeObjectURL(url).
+ */
+export async function fetchAuthenticatedAudioUrl(playbackPath: string): Promise<string> {
+  const response = await fetchWithRetry(playbackPath, { redirect: "error" });
+  if (!response.ok) {
+    const payload: unknown = await response.json().catch(() => null);
+    throw apiErrorFromResponse(response, payload, "The audio API");
+  }
+  return URL.createObjectURL(await response.blob());
 }
 
 export function toReadyAttempt(value: Awaited<ReturnType<typeof createAttempt>>) {

@@ -1,7 +1,17 @@
 import type { Prompt } from "@/lib/practice/types";
+import type { AppMode } from "@/lib/practice/mode";
+import { AudioPlayButton } from "./AudioPlayButton";
 import { cn } from "@/lib/utils";
 
-export function PromptCard({ prompt, compact }: { prompt: Prompt; compact?: boolean }) {
+export function PromptCard({
+  prompt,
+  compact,
+  mode,
+}: {
+  prompt: Prompt;
+  compact?: boolean;
+  mode?: AppMode;
+}) {
   const jp = prompt.lang === "ja";
   return (
     <article
@@ -29,6 +39,11 @@ export function PromptCard({ prompt, compact }: { prompt: Prompt; compact?: bool
       >
         {prompt.question}
       </blockquote>
+      {mode === "api" ? (
+        <div className="mt-3 pl-4">
+          <AudioPlayButton text={prompt.question} lang={prompt.lang} mode={mode} purpose="prompt" />
+        </div>
+      ) : null}
       {prompt.questionTranslation ? (
         <p className="mt-2 pl-4 text-sm italic text-muted-foreground text-balance-wrap">
           {prompt.questionTranslation}

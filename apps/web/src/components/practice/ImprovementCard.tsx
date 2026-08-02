@@ -1,15 +1,22 @@
 import { ArrowRight } from "lucide-react";
 import type { Improvement } from "@/lib/practice/types";
+import type { AppMode } from "@/lib/practice/mode";
+import type { Lang } from "@/lib/practice/types";
+import { AudioPlayButton } from "./AudioPlayButton";
 import { cn } from "@/lib/utils";
 
 export function ImprovementCard({
   item,
   index,
   jp,
+  lang,
+  mode,
 }: {
   item: Improvement;
   index: number;
   jp: boolean;
+  lang: Lang;
+  mode: AppMode;
 }) {
   return (
     <li className="rounded-2xl border border-border bg-card p-4">
@@ -47,6 +54,11 @@ export function ImprovementCard({
               {item.after}
             </p>
           </div>
+          {mode === "api" ? (
+            <div className="mt-3">
+              <AudioPlayButton text={item.after} lang={lang} mode={mode} purpose="answer" />
+            </div>
+          ) : null}
         </div>
       </div>
     </li>

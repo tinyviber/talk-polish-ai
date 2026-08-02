@@ -12,6 +12,7 @@ import type {
 export function createMockTranscriptionProvider(): TranscriptionProvider {
   return {
     name: "mock-asr",
+    async check() {},
     async transcribe(input: TranscriptionInput): Promise<TranscriptionResult> {
       await new Promise((r) => setTimeout(r, 350));
       return {

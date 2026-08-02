@@ -22,6 +22,7 @@
     "format": "prettier --write README.md package.json docker-compose.yml \"apps/**/*.{ts,tsx,json,md,yml,yaml}\" \"packages/**/*.{ts,tsx,json,md,yml,yaml}\"",
     "db:migrate": "bun --filter @kotoba/api db:migrate",
     "db:seed": "bun --filter @kotoba/api db:seed",
+    "storage:cleanup": "bun --filter @kotoba/api storage:cleanup",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down"
   },

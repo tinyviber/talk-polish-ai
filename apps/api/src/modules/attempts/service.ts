@@ -21,6 +21,8 @@ import { providers } from "../../providers";
 import { StorageError } from "../../providers/storage";
 import { getAttempt } from "../sessions/service";
 import { requirePrompt } from "../prompts/service";
+import { enforceProviderRateLimit } from "../providers/rate-limit";
+import { removeOrQueueStorage } from "../../db/storage-cleanup";
 
 export type UploadedAudio = {
   buffer: Buffer;
@@ -66,6 +68,7 @@ export async function createAttempt(
   learnerId: string,
   fields: CreateAttemptFields,
   audio: UploadedAudio | null,
+  clientIp?: string,
 ): Promise<Attempt> {
   const sessionRows = await withDb("loadSessionForAttempt", () =>
     db().select().from(practiceSessions).where(eq(practiceSessions.id, sessionId)),
@@ -81,6 +84,9 @@ export async function createAttempt(
   const attemptIndex = fields.attemptIndex === 2 ? 2 : 1;
   const attemptId = `att_${randomUUID()}`;
   const { storage, transcription, assessment } = providers();
+  if (transcription.name !== "mock-transcription" || assessment.name !== "mock-assessment") {
+    enforceProviderRateLimit(learnerId, "attempt", clientIp);
+  }
 
   let audioId: string | null = null;
   let storageKey: string | null = null;
@@ -166,14 +172,12 @@ export async function createAttempt(
       }),
     );
   } catch (error) {
-    if (storageKey) await storage.remove(storageKey).catch(() => undefined);
+    if (storageKey) await removeOrQueueStorage(storage, storageKey, "attempt-db-failed");
     throw error;
   }
 
   for (const reclaimedKey of reclaimedStorageKeys) {
-    await storage.remove(reclaimedKey).catch((error) => {
-      console.error("[storage] reclaimed audio cleanup failed:", error);
-    });
+    await removeOrQueueStorage(storage, reclaimedKey, "reclaimed-attempt");
   }
 
   try {
@@ -211,6 +215,7 @@ export async function createAttempt(
           attemptId,
           transcript: transcript.text,
           transcriptionProvider: transcript.provider,
+          transcription: transcript.transcription,
           assessmentProvider: assessed.provider,
           overallScore: feedback.overall,
           feedback,
@@ -268,7 +273,7 @@ export async function createAttempt(
         );
       }
     }
-    if (storageKey) await storage.remove(storageKey).catch(() => undefined);
+    if (storageKey) await removeOrQueueStorage(storage, storageKey, "attempt-processing-failed");
     if (error instanceof ApiError) throw error;
     console.error(
       "[providers] attempt processing failed:",

@@ -94,11 +94,45 @@ export const attemptResults = pgTable("attempt_results", {
     .references(() => speakingAttempts.id, { onDelete: "cascade" }),
   transcript: text("transcript").notNull(),
   transcriptionProvider: varchar("transcription_provider", { length: 48 }).notNull(),
+  transcription: jsonb("transcription"),
   assessmentProvider: varchar("assessment_provider", { length: 48 }).notNull(),
   overallScore: integer("overall_score").notNull(),
   feedback: jsonb("feedback").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Opaque, short-lived playback metadata; audio bytes remain in object storage. */
+export const audioPlaybackReferences = pgTable(
+  "audio_playback_references",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    learnerId: varchar("learner_id", { length: 64 })
+      .notNull()
+      .references(() => learners.id, { onDelete: "cascade" }),
+    storageKey: text("storage_key").notNull(),
+    mimeType: varchar("mime_type", { length: 128 }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("audio_playback_references_learner_expiry_idx").on(t.learnerId, t.expiresAt),
+    index("audio_playback_references_expiry_idx").on(t.expiresAt),
+    index("audio_playback_references_storage_key_idx").on(t.storageKey),
+  ],
+);
+
+/** Durable compensation queue for objects that could not be deleted. */
+export const storageCleanupJobs = pgTable(
+  "storage_cleanup_jobs",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    storageKey: text("storage_key").notNull(),
+    reason: varchar("reason", { length: 64 }).notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("storage_cleanup_jobs_next_attempt_idx").on(t.nextAttemptAt)],
+);
 
 export const savedExpressions = pgTable(
   "saved_expressions",

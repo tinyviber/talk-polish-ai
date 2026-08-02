@@ -1,16 +1,20 @@
 import { Bookmark, BookmarkCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Expression } from "@/lib/practice/types";
+import type { AppMode } from "@/lib/practice/mode";
+import { AudioPlayButton } from "./AudioPlayButton";
 import { cn } from "@/lib/utils";
 
 export function ExpressionRow({
   expression,
   saved,
   onToggle,
+  mode,
 }: {
   expression: Expression;
   saved: boolean;
   onToggle: () => void;
+  mode?: AppMode;
 }) {
   const jp = expression.lang === "ja";
   return (
@@ -26,6 +30,14 @@ export function ExpressionRow({
           {expression.meaning}
         </p>
       </div>
+      {mode === "api" ? (
+        <AudioPlayButton
+          text={expression.text}
+          lang={expression.lang}
+          mode={mode}
+          purpose="expression"
+        />
+      ) : null}
       <Button
         variant={saved ? "secondary" : "outline"}
         size="sm"

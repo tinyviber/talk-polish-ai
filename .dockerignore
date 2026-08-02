@@ -5,4 +5,8 @@ node_modules
 dist
 coverage
 data
+llm_config.json
+.env
+.env.*
+!.env.example
 *.log

@@ -1,4 +1,4 @@
-import type { Lang } from "@kotoba/contracts";
+import type { Lang, TranscriptionMetadata } from "@kotoba/contracts";
 
 export type TranscriptionInput = {
   lang: Lang;
@@ -10,6 +10,7 @@ export type TranscriptionInput = {
 
 export type TranscriptionResult = {
   text: string;
+  transcription?: TranscriptionMetadata;
   /** True when no real audio was analysed (demo / mic-blocked fallback). */
   mocked: boolean;
   provider: string;
@@ -18,6 +19,8 @@ export type TranscriptionResult = {
 export interface TranscriptionProvider {
   readonly name: string;
   transcribe(input: TranscriptionInput): Promise<TranscriptionResult>;
+  check?(): Promise<void>;
+  probe?(): Promise<void>;
 }
 
 export class ProviderUnavailableError extends Error {}

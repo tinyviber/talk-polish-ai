@@ -16,4 +16,6 @@ export type AssessmentResult = {
 export interface AssessmentProvider {
   readonly name: string;
   assess(input: AssessmentInput): Promise<AssessmentResult>;
+  check?(): Promise<void>;
+  probe?(): Promise<void>;
 }

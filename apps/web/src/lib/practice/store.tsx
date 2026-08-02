@@ -69,10 +69,9 @@ export function PracticeStoreProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (mode === "demo") {
-      setState(loadDemo());
-      setPrompts(PROMPTS);
-    }
+    if (mode !== "demo") return;
+    setState(loadDemo());
+    setPrompts(PROMPTS);
     setReady(true);
   }, [mode]);
 
@@ -85,31 +84,62 @@ export function PracticeStoreProvider({ children }: { children: ReactNode }) {
     }
   }, [mode, ready, state]);
 
-  const refreshApi = useCallback(async (lang: Lang | null, background = false) => {
-    if (!lang) return;
-    if (!background) setReady(false);
+  const refreshApi = useCallback(
+    async (lang: Lang | null, background = false, ensureBootstrap = false) => {
+      if (!lang) return;
+      if (!background) setReady(false);
+      setError(null);
+      try {
+        if (ensureBootstrap) await bootstrapLearner(lang);
+        const [nextPrompts, progress, saved] = await Promise.all([
+          listPrompts(),
+          getProgress(),
+          listSaved(),
+        ]);
+        setPrompts(nextPrompts);
+        setState((current) => ({
+          ...current,
+          lang,
+          onboarded: true,
+          sessions: progress.sessions,
+          saved,
+        }));
+      } catch (cause) {
+        setError(errorMessage(cause));
+        throw cause;
+      } finally {
+        if (!background) setReady(true);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (mode !== "api") return;
+    let cancelled = false;
+    setReady(false);
     setError(null);
-    try {
-      const [nextPrompts, progress, saved] = await Promise.all([
-        listPrompts(),
-        getProgress(),
-        listSaved(),
-      ]);
-      setPrompts(nextPrompts);
-      setState((current) => ({
-        ...current,
-        lang,
-        onboarded: true,
-        sessions: progress.sessions,
-        saved,
-      }));
-    } catch (cause) {
-      setError(errorMessage(cause));
-      throw cause;
-    } finally {
-      if (!background) setReady(true);
-    }
-  }, []);
+
+    void (async () => {
+      try {
+        const learner = await bootstrapLearner(null);
+        if (cancelled) return;
+        if (!learner.lang) {
+          setState(EMPTY);
+          return;
+        }
+        await refreshApi(learner.lang);
+      } catch (cause) {
+        if (!cancelled) setError(errorMessage(cause));
+      } finally {
+        if (!cancelled) setReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, refreshApi]);
 
   const setLang = useCallback(
     (lang: Lang) => {
@@ -118,7 +148,7 @@ export function PracticeStoreProvider({ children }: { children: ReactNode }) {
         return;
       }
       setState((current) => ({ ...current, lang, onboarded: true }));
-      void refreshApi(lang).catch(() => undefined);
+      void refreshApi(lang, false, true).catch(() => undefined);
     },
     [mode, refreshApi],
   );
@@ -130,21 +160,8 @@ export function PracticeStoreProvider({ children }: { children: ReactNode }) {
         setState((current) => ({ ...current, lang, onboarded: true }));
         return;
       }
-      setReady(false);
       try {
-        await bootstrapLearner(lang);
-        const [nextPrompts, progress, saved] = await Promise.all([
-          listPrompts(),
-          getProgress(),
-          listSaved(),
-        ]);
-        setPrompts(nextPrompts);
-        setState({
-          lang,
-          onboarded: true,
-          sessions: progress.sessions,
-          saved,
-        });
+        await refreshApi(lang, false, true);
       } catch (cause) {
         setError(errorMessage(cause));
         throw cause;
@@ -152,7 +169,7 @@ export function PracticeStoreProvider({ children }: { children: ReactNode }) {
         setReady(true);
       }
     },
-    [mode],
+    [mode, refreshApi],
   );
 
   const toggleSaved = useCallback(

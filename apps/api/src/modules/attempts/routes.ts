@@ -25,6 +25,7 @@ export async function attemptRoutes(app: FastifyInstance) {
           401: errorResponseSchema,
           404: errorResponseSchema,
           409: errorResponseSchema,
+          429: errorResponseSchema,
           413: errorResponseSchema,
           415: errorResponseSchema,
           422: errorResponseSchema,
@@ -63,7 +64,13 @@ export async function attemptRoutes(app: FastifyInstance) {
           parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
         );
       }
-      const attempt = await createAttempt(params.sessionId, learner.id, parsed.data, audio);
+      const attempt = await createAttempt(
+        params.sessionId,
+        learner.id,
+        parsed.data,
+        audio,
+        request.ip,
+      );
       return { attempt, requestId: request.id };
     },
   );

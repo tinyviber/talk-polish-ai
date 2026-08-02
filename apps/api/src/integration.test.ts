@@ -3,7 +3,10 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "./app";
 
 const integration = process.env.RUN_INTEGRATION === "1" ? test : test.skip;
+const ttsIntegration =
+  process.env.RUN_INTEGRATION === "1" && process.env.RUN_TTS_INTEGRATION === "1" ? test : test.skip;
 let app: FastifyInstance;
+let ttsFixture: ReturnType<typeof Bun.serve> | undefined;
 
 function multipart(fields: Record<string, string>, audio: Buffer) {
   const boundary = `----kotoba-${Date.now()}`;
@@ -29,11 +32,32 @@ function multipart(fields: Record<string, string>, audio: Buffer) {
 }
 
 beforeAll(async () => {
+  if (process.env.RUN_TTS_INTEGRATION === "1") {
+    process.env.TTS_PROVIDER = "openai-compatible";
+    process.env.TTS_API_KEY = "integration-fixture-key";
+    process.env.TTS_MODEL = "integration-tts";
+    ttsFixture = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        if (request.headers.get("authorization") !== "Bearer integration-fixture-key") {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+        if (new URL(request.url).pathname !== "/audio/speech") {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        return new Response(Buffer.from("integration tts"), {
+          headers: { "content-type": "audio/mpeg" },
+        });
+      },
+    });
+    process.env.TTS_BASE_URL = ttsFixture.url.origin;
+  }
   if (process.env.RUN_INTEGRATION === "1") app = await buildApp();
 });
 
 afterAll(async () => {
   await app?.close();
+  ttsFixture?.stop(true);
 });
 
 describe("persisted practice journey", () => {
@@ -79,7 +103,8 @@ describe("persisted practice journey", () => {
     expect(firstResponse.statusCode).toBe(200);
     const first = firstResponse.json().attempt;
     expect(first.status).toBe("ready");
-    expect(first.audio.storageKey).toMatch(/^local:\/\/recordings\//);
+    expect(first.audio.playbackUrl).toBe(`/api/audio/recordings/${first.audio.id}`);
+    expect(first.audio).not.toHaveProperty("storageKey");
     expect(first.feedback).toBeTruthy();
 
     const secondUpload = multipart({ attemptIndex: "2", durationSec: "12" }, audio);
@@ -116,5 +141,46 @@ describe("persisted practice journey", () => {
     expect(progress.totalSessions).toBeGreaterThanOrEqual(1);
     expect(progress.sessions[0].second).toBeGreaterThan(progress.sessions[0].first);
     expect(progress.savedCount).toBeGreaterThanOrEqual(1);
+
+    const diagnosticsResponse = await app.inject({
+      method: "GET",
+      url: "/api/providers/diagnostics?probe=true",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(diagnosticsResponse.statusCode).toBe(200);
+    const diagnostics = diagnosticsResponse.json();
+    expect(diagnostics.storage.status).toMatch(/^(configured|available)$/);
+    expect(diagnostics.database.status).toBe("available");
+    expect(diagnostics.chat.status).toBe("available");
+    expect(diagnostics.transcription.status).toBe("available");
+    expect(JSON.stringify(diagnostics)).not.toContain("minioadmin");
+  });
+
+  ttsIntegration("generates, stores, and plays authenticated TTS audio", async () => {
+    const deviceId = `tts-integration-${crypto.randomUUID()}`;
+    const learnerResponse = await app.inject({
+      method: "POST",
+      url: "/api/learners/anonymous",
+      payload: { deviceId, lang: "en" },
+    });
+    const { token } = learnerResponse.json();
+    const ttsResponse = await app.inject({
+      method: "POST",
+      url: "/api/tts",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { text: "A clear sample answer.", lang: "en", purpose: "answer" },
+    });
+    expect(ttsResponse.statusCode).toBe(200);
+    const audio = ttsResponse.json().audio;
+    expect(audio.playbackUrl).toMatch(/^\/api\/audio\//);
+
+    const playbackResponse = await app.inject({
+      method: "GET",
+      url: audio.playbackUrl,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(playbackResponse.statusCode).toBe(200);
+    expect(playbackResponse.headers["content-type"]).toContain("audio/mpeg");
+    expect(Buffer.from(playbackResponse.rawPayload)).toEqual(Buffer.from("integration tts"));
   });
 });

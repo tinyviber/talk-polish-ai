@@ -15,7 +15,18 @@ import { registerRoutes } from "./routes";
 export async function buildApp() {
   const config = env();
   const app = Fastify({
-    logger: true,
+    logger: {
+      redact: {
+        paths: [
+          "req.headers.authorization",
+          "req.headers.cookie",
+          "req.headers.x-api-key",
+          "req.body",
+          'res.headers["set-cookie"]',
+        ],
+        censor: "[REDACTED]",
+      },
+    },
     bodyLimit: config.MAX_UPLOAD_BYTES + 1024 * 1024,
   }).withTypeProvider<ZodTypeProvider>();
 
@@ -40,6 +51,7 @@ export async function buildApp() {
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ApiError) {
+      if (error.code === "rate_limited") reply.header("Retry-After", "60");
       reply.status(error.statusCode).send(toErrorResponse(error, request.id));
       return;
     }

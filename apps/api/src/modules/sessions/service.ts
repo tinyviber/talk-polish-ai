@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { Attempt, AttemptStatus, Feedback, Lang, PracticeSession } from "@kotoba/contracts";
+import {
+  feedbackSchema,
+  transcriptionMetadataSchema,
+  type Attempt,
+  type AttemptStatus,
+  type Lang,
+  type PracticeSession,
+} from "@kotoba/contracts";
 import { asc, eq } from "drizzle-orm";
 import { db } from "../../db/client";
 import {
@@ -90,22 +97,35 @@ export function composeAttempt(
   result: typeof attemptResults.$inferSelect | null,
   audio: typeof audioRecordings.$inferSelect | null,
 ): Attempt {
+  let feedback = null;
+  if (result?.feedback !== undefined) {
+    const parsed = feedbackSchema.safeParse(result.feedback);
+    if (!parsed.success) throw ApiError.internal("Stored attempt feedback is invalid.");
+    feedback = parsed.data;
+  }
+  let transcription;
+  if (result?.transcription !== null && result?.transcription !== undefined) {
+    const parsed = transcriptionMetadataSchema.safeParse(result.transcription);
+    if (!parsed.success) throw ApiError.internal("Stored transcription metadata is invalid.");
+    transcription = parsed.data;
+  }
   return {
     id: attempt.id,
     sessionId: attempt.sessionId,
     index: attempt.attemptIndex === 2 ? 2 : 1,
     status: attempt.status as AttemptStatus,
     transcript: result?.transcript ?? null,
-    feedback: (result?.feedback as Feedback | undefined) ?? null,
+    ...(transcription ? { transcription } : {}),
+    feedback,
     durationSec: attempt.durationSec,
     mocked: attempt.mocked,
     audio: audio
       ? {
           id: audio.id,
-          storageKey: audio.storageKey,
           mimeType: audio.mimeType,
           sizeBytes: audio.sizeBytes,
           durationSec: audio.durationSec,
+          playbackUrl: `/api/audio/recordings/${audio.id}`,
         }
       : null,
     createdAt: attempt.createdAt.toISOString(),

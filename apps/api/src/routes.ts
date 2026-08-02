@@ -13,6 +13,7 @@ import { attemptRoutes } from "./modules/attempts/routes";
 import { progressRoutes } from "./modules/progress/routes";
 import { promptRoutes } from "./modules/prompts/routes";
 import { sessionRoutes } from "./modules/sessions/routes";
+import { providerRoutes } from "./modules/providers/routes";
 
 export async function registerRoutes(app: FastifyInstance) {
   const health = async (request: { id: string }) => ({
@@ -74,4 +75,5 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(attemptRoutes);
   await app.register(expressionRoutes);
   await app.register(progressRoutes);
+  await app.register(providerRoutes);
 }

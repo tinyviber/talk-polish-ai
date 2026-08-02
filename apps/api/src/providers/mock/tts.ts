@@ -8,6 +8,7 @@ import type { SynthesisInput, SynthesisResult, TextToSpeechProvider } from "../t
 export function createMockTtsProvider(): TextToSpeechProvider {
   return {
     name: "mock-tts",
+    async check() {},
     async synthesize({ text }: SynthesisInput): Promise<SynthesisResult> {
       await new Promise((r) => setTimeout(r, 100));
       return {

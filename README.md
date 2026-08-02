@@ -19,7 +19,7 @@ Requirements: Bun 1.2+, Docker, and a browser with microphone support for the re
 bun install
 cp .env.example .env
 
-# Start PostgreSQL 16 with a persistent Docker volume.
+# Start PostgreSQL 16, MinIO, and idempotent audio bucket initialization.
 bun run db:up
 
 # Apply the hand-written SQL migrations and seed prompts.
@@ -31,6 +31,12 @@ bun run dev:api
 
 # Terminal 2: web app
 bun run dev
+```
+
+Optional local cleanup worker (expires TTS playback references and retries failed object deletes):
+
+```sh
+docker compose --profile cleanup up -d storage-cleanup
 ```
 
 For demo mode, keep `VITE_APP_MODE=demo`. For the full flow, set `VITE_APP_MODE=api` and `VITE_API_URL=http://localhost:3333` before starting the web dev server. Vite variables are build-time values, so restart Vite after changing them.
@@ -50,10 +56,17 @@ Routes:
 - `POST /api/sessions/:sessionId/attempts` (multipart), `GET /api/attempts/:id`
 - `GET /api/saved`, `POST /api/saved`, `DELETE /api/saved/:id`
 - `GET /api/progress`
+- `GET /api/providers/diagnostics` (authenticated; active upstream probes require server-side opt-in)
+- `POST /api/tts` and `GET /api/audio/:opaqueReference` (authenticated)
+- `POST /api/realtime/experimental/smoke` (authenticated, feature flag)
 
 After anonymous bootstrap, learner-scoped routes require an HMAC-signed `Authorization: Bearer ...` token with `scope=learner`. Client-supplied learner IDs are not accepted for those routes; ownership mismatches return a safe 404.
 
-Audio bytes are stored under `DATA_DIR` (mount `/app/data` in a container). This MVP is intentionally mock-only for ASR, assessment, and TTS, and local-storage-only for audio; production must explicitly add and configure real provider/storage implementations rather than treating these mocks as production speech analysis. The attempt pipeline stores the file first, passes the actual `storageKey` to ASR, validates provider feedback with the shared contract, then commits result, ready status, and progress in one database transaction. Failed processing removes provisional data; if PostgreSQL is temporarily unavailable, the attempt is marked/reclaimed as failed on recovery so its unique slot does not remain permanently blocked.
+Audio bytes use `DATA_DIR` with `AUDIO_STORAGE_DRIVER=local`, or AWS SDK S3-compatible storage with `AUDIO_STORAGE_DRIVER=s3`. Local development provides MinIO at `http://127.0.0.1:9000` and console at `http://127.0.0.1:9001`; `minio-init` creates `S3_BUCKET` idempotently. Cloudflare R2 uses its account endpoint, `S3_REGION=auto`, and normally `S3_FORCE_PATH_STYLE=false`. Single-node MinIO is for development/evaluation.
+
+ASR, assessment, and TTS remain deterministic mocks by default. Real mode uses independent OpenAI-compatible configuration: `CHAT_*`, `TRANSCRIPTION_*`, and `TTS_*` each have their own URL, key, model, and timeout. Backend reads untracked `llm_config.json` only for local model-name hints when environment overrides are absent; endpoints and credentials always come from server environment. It never exposes credentials from that file. Rotate any credentials ever stored there, keep it ignored and excluded from Docker context, and put current keys only in server environment or secret manager. Never use `VITE_*` for provider keys.
+
+Attempt pipeline stores file first, lets ASR re-read it through `AudioStorageProvider`, validates feedback against shared contract, then commits result, transcription metadata, ready status, and progress in one database transaction. Audio and TTS bytes never enter PostgreSQL. Failed deletes enter `storage_cleanup_jobs` for later retry. TTS uses authenticated `POST /api/tts` and `GET /api/audio/:opaqueReference`; mock TTS returns no playable object by design. Realtime smoke only tests WebSocket session protocol; no media relay or UI rewrite.
 
 ## Build and validation
 

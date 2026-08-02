@@ -46,6 +46,11 @@ export class ApiError extends Error {
   static database(message = "The database is unavailable. Please try again.") {
     return new ApiError(503, "database_failure", message);
   }
+  static rateLimited(
+    message = "This capability is temporarily rate limited. Please try again later.",
+  ) {
+    return new ApiError(429, "rate_limited", message);
+  }
 
   static internal(message = "Something went wrong while processing the request.") {
     return new ApiError(500, "internal_error", message);

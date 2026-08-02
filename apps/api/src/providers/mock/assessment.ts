@@ -8,6 +8,7 @@ import type { AssessmentInput, AssessmentProvider, AssessmentResult } from "../a
 export function createMockAssessmentProvider(): AssessmentProvider {
   return {
     name: "mock-assessment",
+    async check() {},
     async assess(input: AssessmentInput): Promise<AssessmentResult> {
       await new Promise((r) => setTimeout(r, 350));
       return {

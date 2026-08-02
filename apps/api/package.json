@@ -9,10 +9,12 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:integration": "bun run db:migrate && bun run db:seed && RUN_INTEGRATION=1 bun test src/integration.test.ts",
+    "storage:cleanup": "bun src/db/storage-cleanup.ts",
     "db:migrate": "bun src/db/migrate.ts",
     "db:seed": "bun src/db/seed.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1101.0",
     "@fastify/cors": "^10.0.1",
     "@fastify/multipart": "^9.0.1",
     "@fastify/swagger": "^9.4.0",

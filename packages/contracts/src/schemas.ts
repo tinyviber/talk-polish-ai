@@ -31,6 +31,8 @@ export const errorCodeSchema = z.enum([
   "storage_failure",
   "database_failure",
   "internal_error",
+  "provider_unavailable",
+  "rate_limited",
 ]);
 export type ErrorCode = z.infer<typeof errorCodeSchema>;
 
@@ -76,12 +78,12 @@ export const scoreKeySchema = z.enum([
 export type ScoreKey = z.infer<typeof scoreKeySchema>;
 
 export const scoresSchema = z.object({
-  fluency: z.number().min(0).max(100),
-  pauses: z.number().min(0).max(100),
-  grammar: z.number().min(0).max(100),
-  vocabulary: z.number().min(0).max(100),
-  naturalness: z.number().min(0).max(100),
-  pronunciation: z.number().min(0).max(100),
+  fluency: z.number().int().min(0).max(100),
+  pauses: z.number().int().min(0).max(100),
+  grammar: z.number().int().min(0).max(100),
+  vocabulary: z.number().int().min(0).max(100),
+  naturalness: z.number().int().min(0).max(100),
+  pronunciation: z.number().int().min(0).max(100),
 });
 export type Scores = z.infer<typeof scoresSchema>;
 
@@ -111,7 +113,7 @@ export const expressionSchema = z.object({
 export type Expression = z.infer<typeof expressionSchema>;
 
 export const feedbackSchema = z.object({
-  overall: z.number().min(0).max(100),
+  overall: z.number().int().min(0).max(100),
   headline: z.string(),
   scores: scoresSchema,
   improvements: z.array(improvementSchema),
@@ -125,6 +127,33 @@ export const feedbackSchema = z.object({
   }),
 });
 export type Feedback = z.infer<typeof feedbackSchema>;
+
+export const transcriptionSegmentSchema = z.object({
+  id: z.number().int().nonnegative().optional(),
+  start: z.number().nonnegative().optional(),
+  end: z.number().nonnegative().optional(),
+  text: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+});
+export type TranscriptionSegment = z.infer<typeof transcriptionSegmentSchema>;
+
+export const transcriptionWordTimestampSchema = z.object({
+  word: z.string(),
+  start: z.number().nonnegative().optional(),
+  end: z.number().nonnegative().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+});
+export type TranscriptionWordTimestamp = z.infer<typeof transcriptionWordTimestampSchema>;
+
+/** Provider-returned metadata only. Missing fields are intentionally omitted. */
+export const transcriptionMetadataSchema = z.object({
+  faithfulTranscript: z.string().optional(),
+  normalizedTranscript: z.string().optional(),
+  segments: z.array(transcriptionSegmentSchema).optional(),
+  wordTimestamps: z.array(transcriptionWordTimestampSchema).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+});
+export type TranscriptionMetadata = z.infer<typeof transcriptionMetadataSchema>;
 
 /* ------------------------------------------------------------------ */
 /* Domain: audio                                                       */
@@ -145,11 +174,11 @@ export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
 export const audioMetadataSchema = z.object({
   id: z.string(),
-  /** Opaque storage reference, e.g. `local://recordings/<id>.webm` or `s3://bucket/key`. */
-  storageKey: z.string(),
+  /** Opaque backend-issued playback route; provider storage keys never reach browsers. */
   mimeType: z.string(),
   sizeBytes: z.number().int().nonnegative(),
   durationSec: z.number().nonnegative(),
+  playbackUrl: z.string().optional(),
 });
 export type AudioMetadata = z.infer<typeof audioMetadataSchema>;
 
@@ -174,6 +203,7 @@ export const attemptSchema = z.object({
   index: z.union([z.literal(1), z.literal(2)]),
   status: attemptStatusSchema,
   transcript: z.string().nullable(),
+  transcription: transcriptionMetadataSchema.optional(),
   feedback: feedbackSchema.nullable(),
   durationSec: z.number().nonnegative(),
   /** True when no real audio was captured (demo / mic-blocked fallback). */
@@ -328,3 +358,54 @@ export const deleteSavedExpressionResponseSchema = responseMetaSchema.extend({
   deleted: z.literal(true),
 });
 export type DeleteSavedExpressionResponse = z.infer<typeof deleteSavedExpressionResponseSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Providers                                                           */
+/* ------------------------------------------------------------------ */
+
+export const providerStatusSchema = z.enum(["configured", "available", "unsupported", "failed"]);
+export type ProviderStatus = z.infer<typeof providerStatusSchema>;
+
+export const providerCapabilitySchema = z.object({
+  status: providerStatusSchema,
+  provider: z.string(),
+  checkedAt: z.string().optional(),
+  errorCode: z.string().optional(),
+});
+export type ProviderCapability = z.infer<typeof providerCapabilitySchema>;
+
+export const providerDiagnosticsSchema = responseMetaSchema.extend({
+  storage: providerCapabilitySchema,
+  database: providerCapabilitySchema,
+  chat: providerCapabilitySchema,
+  transcription: providerCapabilitySchema,
+  tts: providerCapabilitySchema,
+  realtime: providerCapabilitySchema,
+});
+export type ProviderDiagnostics = z.infer<typeof providerDiagnosticsSchema>;
+
+export const synthesisRequestSchema = z.object({
+  text: z.string().trim().min(1).max(10_000),
+  lang: langSchema,
+  voice: z.string().trim().min(1).max(64).optional(),
+  purpose: z.enum(["prompt", "answer", "expression"]).optional(),
+});
+export type SynthesisRequest = z.infer<typeof synthesisRequestSchema>;
+
+export const synthesisResponseSchema = responseMetaSchema.extend({
+  audio: z.object({
+    playbackUrl: z.string().nullable(),
+    seconds: z.number().positive(),
+    provider: z.string(),
+  }),
+});
+export type SynthesisResponse = z.infer<typeof synthesisResponseSchema>;
+
+export const realtimeSmokeResponseSchema = responseMetaSchema.extend({
+  capability: z.literal("realtime"),
+  status: providerStatusSchema,
+  provider: z.string(),
+  protocol: z.literal("websocket"),
+  errorCode: z.string().optional(),
+});
+export type RealtimeSmokeResponse = z.infer<typeof realtimeSmokeResponseSchema>;

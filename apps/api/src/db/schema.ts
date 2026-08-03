@@ -47,9 +47,14 @@ export const practiceSessions = pgTable(
       .notNull()
       .references(() => prompts.id, { onDelete: "restrict" }),
     lang: varchar("lang", { length: 8 }).notNull(),
+    /** Client-generated idempotency key so an offline device can create a session later. */
+    clientSessionId: varchar("client_session_id", { length: 128 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("practice_sessions_learner_idx").on(t.learnerId)],
+  (t) => [
+    index("practice_sessions_learner_idx").on(t.learnerId),
+    uniqueIndex("practice_sessions_learner_client_session_key").on(t.learnerId, t.clientSessionId),
+  ],
 );
 
 /* Storage reference + metadata only — audio bytes live in object storage. */

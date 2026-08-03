@@ -5,7 +5,10 @@ export type RecordingQueueItem = {
   /** Learner namespace; prevents a later token/device from reading old blobs. */
   learnerId: string;
   clientAttemptId: string;
-  sessionId: string;
+  /** Server session id once known; null while the session was created offline. */
+  sessionId: string | null;
+  /** Client-generated session idempotency key, used to create the session on reconnect. */
+  clientSessionId: string;
   promptId: string;
   lang: Lang;
   attemptIndex: 1 | 2;
@@ -16,6 +19,8 @@ export type RecordingQueueItem = {
   syncStatus: QueueStatus;
   attemptId?: string;
   lastError?: string;
+  /** Bytes are dropped once the attempt is safely stored server-side. */
+  blobDiscarded?: boolean;
 };
 
 export function isQueueSyncCandidate(status: QueueStatus) {
@@ -158,7 +163,10 @@ export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStat
   }
   await cleanupRecordingQueue();
   const existing = await allItems();
-  const totalBytes = existing.reduce((sum, item) => sum + item.blob.size, 0);
+  // Synced recordings keep only metadata, so they never consume the quota.
+  const totalBytes = existing
+    .filter((item) => item.syncStatus !== "ready")
+    .reduce((sum, item) => sum + item.blob.size, 0);
   if (totalBytes + input.blob.size > MAX_BYTES) {
     throw new Error("Offline recording storage is full. Retry or remove an older recording first.");
   }
@@ -191,6 +199,13 @@ export async function retryQueuedRecordings(learnerId?: string) {
   );
 }
 
+export type QueueUploadResult = {
+  id: string;
+  status: QueueStatus;
+  /** Returned when the session had to be created during the upload. */
+  sessionId?: string;
+};
+
 let syncInFlight: Promise<void> | null = null;
 
 function wait(ms: number) {
@@ -213,7 +228,7 @@ function isTransientUploadError(error: unknown) {
 
 async function uploadWithProcessingPoll(
   item: RecordingQueueItem,
-  upload: (item: RecordingQueueItem) => Promise<{ id: string; status: QueueStatus }>,
+  upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
 ) {
   let current = await upload(item);
   for (const delay of PROCESSING_POLL_DELAYS_MS) {
@@ -229,7 +244,7 @@ async function uploadWithProcessingPoll(
 }
 
 export async function syncRecordingQueue(
-  upload: (item: RecordingQueueItem) => Promise<{ id: string; status: QueueStatus }>,
+  upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
   learnerId?: string,
 ) {
   if (syncInFlight) return syncInFlight;
@@ -249,14 +264,26 @@ export async function syncRecordingQueue(
         await put(syncing);
         const attempt = await uploadWithProcessingPoll(syncing, upload);
         const { lastError: _lastError, ...withoutError } = syncing;
-        await put({ ...withoutError, attemptId: attempt.id, syncStatus: attempt.status });
+        const synced = attempt.status === "ready";
+        await put({
+          ...withoutError,
+          ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
+          attemptId: attempt.id,
+          syncStatus: attempt.status,
+          // Free the device once the server owns the recording; the metadata
+          // row stays so the UI can still report the completed upload.
+          ...(synced
+            ? { blob: new Blob([], { type: withoutError.mimeType }), blobDiscarded: true }
+            : {}),
+        });
         if (attempt.status === "ready" && typeof window !== "undefined") {
           window.dispatchEvent(
             new CustomEvent("kotoba:queue-ready", {
               detail: {
                 learnerId: item.learnerId,
                 clientAttemptId: item.clientAttemptId,
-                sessionId: item.sessionId,
+                sessionId: attempt.sessionId ?? item.sessionId,
+                clientSessionId: item.clientSessionId,
                 attemptIndex: item.attemptIndex,
                 attemptId: attempt.id,
               },

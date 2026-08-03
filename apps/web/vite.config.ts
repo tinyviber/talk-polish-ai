@@ -11,10 +11,10 @@ export default defineConfig({
   vite: {
     plugins: [
       VitePWA({
-        // TanStack Start/Nitro publishes the client build under .output/public.
-        // Point Workbox at that final public directory so hashed assets are
-        // part of the injectManifest precache, not only includeAssets.
-        outDir: ".output/public",
+        // Nitro publishes the client build (hashed assets, icons, fonts,
+        // offline.html) under dist/client. Workbox must read that directory or
+        // the precache manifest ships empty and offline navigation breaks.
+        outDir: "dist/client",
         registerType: "prompt",
         strategies: "injectManifest",
         srcDir: "src",

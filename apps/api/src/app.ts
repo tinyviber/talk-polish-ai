@@ -119,8 +119,10 @@ function isPayloadTooLarge(error: unknown) {
 function fastifyClientError(error: unknown) {
   if (typeof error !== "object" || error === null || !("code" in error)) return null;
   const code = error.code;
-  if (code === "FST_ERR_CTP_INVALID_JSON_BODY") return ApiError.badRequest("Request body is not valid JSON.");
-  if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") return ApiError.badRequest("Unsupported content type.");
+  if (code === "FST_ERR_CTP_INVALID_JSON_BODY")
+    return ApiError.badRequest("Request body is not valid JSON.");
+  if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE")
+    return ApiError.badRequest("Unsupported content type.");
   if (code === "FST_ERR_CTP_BODY_TOO_LARGE" || code === "FST_REQ_BODY_TOO_LARGE") return null;
   return null;
 }

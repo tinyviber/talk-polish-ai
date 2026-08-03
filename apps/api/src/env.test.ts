@@ -9,6 +9,8 @@ describe("production configuration safety", () => {
   });
 
   test("accepts a sufficiently long non-placeholder secret", () => {
-    expect(() => assertProductionSecret("8f67b0b8aee44a2c9f2ac3b1f8cb879c4b7fe0bd0e1d5a92")).not.toThrow();
+    expect(() =>
+      assertProductionSecret("8f67b0b8aee44a2c9f2ac3b1f8cb879c4b7fe0bd0e1d5a92"),
+    ).not.toThrow();
   });
 });

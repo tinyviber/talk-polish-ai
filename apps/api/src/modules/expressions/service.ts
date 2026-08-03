@@ -21,14 +21,14 @@ export async function saveExpression(
 ): Promise<SavedExpression> {
   await requireLearner(learnerId);
   const row = await savedExpressionRepository.save({
-        id: `exp_${randomUUID()}`,
-        learnerId,
-        expressionId: expression.id,
-        lang: expression.lang,
-        text: expression.text,
-        reading: expression.reading ?? null,
-        meaning: expression.meaning,
-      });
+    id: `exp_${randomUUID()}`,
+    learnerId,
+    expressionId: expression.id,
+    lang: expression.lang,
+    text: expression.text,
+    reading: expression.reading ?? null,
+    meaning: expression.meaning,
+  });
   return toSaved(row);
 }
 

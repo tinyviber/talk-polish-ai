@@ -156,7 +156,9 @@ export function assertProductionSecret(secret: string) {
     secret.length < 32 ||
     /(?:replace[-_ ]?with|change[-_ ]?me|example|local-development|test-secret)/i.test(secret)
   ) {
-    throw new Error("ANON_TOKEN_SECRET must be a unique random secret of at least 32 characters in production.");
+    throw new Error(
+      "ANON_TOKEN_SECRET must be a unique random secret of at least 32 characters in production.",
+    );
   }
 }
 

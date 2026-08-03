@@ -41,6 +41,10 @@ docker compose --profile cleanup up -d storage-cleanup
 
 For demo mode, keep `VITE_APP_MODE=demo`. For the full flow, set `VITE_APP_MODE=api` and `VITE_API_URL=http://localhost:3333` before starting the web dev server. Vite variables are build-time values, so restart Vite after changing them.
 
+See [`docs/deployment.md`](docs/deployment.md) for production setup, CI's
+secret/container requirements, and the local `llm_config.json` → `.env`
+converter.
+
 ## PWA and production topology
 
 The web build uses one `vite-plugin-pwa` instance in `injectManifest` mode. It precaches hashed app assets, local fonts, icons, the manifest, and `offline.html`. Navigation is network-first with the app-owned offline page as fallback. Only unauthenticated `GET /api/prompts` has a bounded runtime cache; all other `/api` requests, every `Authorization` request, POST/multipart uploads, learner/session/attempt/progress/saved/TTS/audio/diagnostics/provider paths, and future `/realtime/*` traffic are network-only. Browser Cache Storage never receives recordings, feedback, or authenticated audio.
@@ -83,7 +87,7 @@ After anonymous bootstrap, learner-scoped routes require an HMAC-signed `Authori
 
 Audio bytes use `DATA_DIR` with `AUDIO_STORAGE_DRIVER=local`, or AWS SDK S3-compatible storage with `AUDIO_STORAGE_DRIVER=s3`. Local development provides MinIO at `http://127.0.0.1:9000` and console at `http://127.0.0.1:9001`; `minio-init` creates `S3_BUCKET` idempotently. Cloudflare R2 uses its account endpoint, `S3_REGION=auto`, and normally `S3_FORCE_PATH_STYLE=false`. Single-node MinIO is for development/evaluation.
 
-ASR, assessment, and TTS remain deterministic mocks by default. Real mode uses independent OpenAI-compatible configuration: `CHAT_*`, `TRANSCRIPTION_*`, and `TTS_*` each have their own URL, key, model, and timeout. Backend reads untracked `llm_config.json` only for local model-name hints when environment overrides are absent; endpoints and credentials always come from server environment. It never exposes credentials from that file. Rotate any credentials ever stored there, keep it ignored and excluded from Docker context, and put current keys only in server environment or secret manager. Never use `VITE_*` for provider keys.
+ASR, assessment, and TTS remain deterministic mocks by default. Real mode uses independent OpenAI-compatible configuration: `CHAT_*`, `TRANSCRIPTION_*`, and `TTS_*` each have their own URL, key, model, and timeout. Backend reads untracked `llm_config.json` only for local model-name hints when environment overrides are absent; endpoints and credentials always come from server environment. It never exposes credentials from that file. Rotate any credentials ever stored there, keep it ignored and excluded from Docker context, and put current keys only in server environment or secret manager. Never use `VITE_*` for provider keys. GitHub CI uses mocks and needs no LLM API key.
 
 Attempt pipeline stores file first, lets ASR re-read it through `AudioStorageProvider`, validates feedback against shared contract, then commits result, transcription metadata, ready status, and progress in one database transaction. Audio and TTS bytes never enter PostgreSQL. Failed deletes enter `storage_cleanup_jobs` for later retry. TTS uses authenticated `POST /api/tts` and `GET /api/audio/:opaqueReference`; mock TTS returns no playable object by design. Realtime smoke only tests WebSocket session protocol; no media relay or UI rewrite.
 

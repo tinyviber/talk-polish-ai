@@ -481,7 +481,17 @@ async function syncRecordingQueueOnce(
   const items = orderQueueItems(
     queueItems.filter((item) => !item.nextPollAt || item.nextPollAt <= now),
   );
-  const blockedSessions = new Set<string>();
+  const blockedSessions = new Set(
+    queueItems
+      .filter(
+        (item) =>
+          item.attemptIndex === 1 &&
+          item.syncStatus === "processing" &&
+          typeof item.nextPollAt === "number" &&
+          item.nextPollAt > now,
+      )
+      .map((item) => item.sessionId ?? item.clientSessionId),
+  );
   for (const item of items) {
     const sessionKey = item.sessionId ?? item.clientSessionId;
     // Attempt 2 must never race past an attempt 1 which is still processing

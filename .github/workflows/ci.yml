@@ -41,13 +41,17 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
+      AUDIO_STORAGE_DRIVER: local
       DATABASE_URL: postgres://kotoba:kotoba@localhost:5432/kotoba
       ANON_TOKEN_SECRET: ci-integration-anon-token-secret
       DATA_DIR: ./data
+      ASSESSMENT_PROVIDER: mock
+      TRANSCRIPTION_PROVIDER: mock
+      TTS_PROVIDER: mock
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.17
       - run: bun install --frozen-lockfile
-      - run: bun --filter @kotoba/api run test:integration
+      - run: bun run test:integration

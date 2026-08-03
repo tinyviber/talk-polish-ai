@@ -4,6 +4,7 @@ import {
   saveRecordingDraft,
   subscribeRecordingQueue,
   syncRecordingQueue,
+  cancelScheduledRecordingQueueSync,
   type RecordingQueueItem,
 } from "./offlineQueue";
 
@@ -158,5 +159,39 @@ describe("offline queue persistence and trailing sync", () => {
 
     expect(uploaded).toEqual(["attempt-1", "attempt-2"]);
     expect(fake.records.get("attempt-2")?.syncStatus).toBe("ready");
+  });
+
+  test("blocks a queued second attempt behind a future processing first attempt", async () => {
+    const fake = installFakeIndexedDb();
+    fake.records.set(
+      "attempt-processing",
+      item({
+        clientAttemptId: "attempt-processing",
+        attemptIndex: 1,
+        syncStatus: "processing",
+        nextPollAt: Date.now() + 60_000,
+      }),
+    );
+    fake.records.set(
+      "attempt-2",
+      item({
+        clientAttemptId: "attempt-2",
+        attemptIndex: 2,
+        syncStatus: "queued",
+        createdAt: Date.now() + 1,
+      }),
+    );
+    const uploaded: string[] = [];
+
+    try {
+      await syncRecordingQueue(async (queued) => {
+        uploaded.push(queued.clientAttemptId);
+        return { id: `server-${queued.clientAttemptId}`, status: "ready" as const };
+      }, "learner-1");
+    } finally {
+      cancelScheduledRecordingQueueSync();
+    }
+
+    expect(uploaded).toEqual([]);
   });
 });

@@ -12,6 +12,9 @@ describe("service worker cache boundaries", () => {
       ),
     ).toBe(false);
     expect(isPublicPromptsRequest(url, new Request(url, { method: "POST" }))).toBe(false);
+    expect(
+      isPublicPromptsRequest(url, new Request(url, { headers: { Cookie: "session=secret" } })),
+    ).toBe(false);
   });
 
   test("keeps learner, audio, provider and realtime paths network-only", () => {

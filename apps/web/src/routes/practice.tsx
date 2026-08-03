@@ -414,8 +414,8 @@ function Practice() {
     setBusy(true, "queue");
     try {
       await syncRecordingQueue(async (item) => {
-        const attempt = await uploadQueuedAttempt(item);
-        return { id: attempt.id, status: attempt.status };
+        const { attempt, sessionId } = await uploadQueuedAttempt(item);
+        return { id: attempt.id, status: attempt.status, sessionId };
       }, learnerId);
     } finally {
       setBusy(false, "queue");

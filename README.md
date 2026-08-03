@@ -13,7 +13,7 @@ If microphone access fails in API mode, the UI reports the error and offers an e
 
 ## Local development
 
-Requirements: Bun 1.2+, Docker, and a browser with microphone support for the real recording path.
+Requirements: Bun **1.2.17** (the version pinned in `packageManager`, CI, and the API image), Docker, and a browser with microphone support for the real recording path. Do not use an unpinned `latest` Bun release: `bun.lock` is generated and verified with 1.2.17.
 
 ```sh
 bun install

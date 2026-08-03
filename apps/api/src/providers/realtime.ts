@@ -59,13 +59,14 @@ export function createRealtimeProvider(config: RealtimeConfig): RealtimeProvider
         // The model is selected during the handshake; session.update only
         // carries session options, and sending `model` there is rejected by
         // OpenAI-compatible Realtime servers.
+        const updatedEvent = waitForEvent(socket, "session.updated", config.timeoutMs);
         socket.send(
           JSON.stringify({
             type: "session.update",
-            session: { modalities: ["text"] },
+            session: { output_modalities: ["text"] },
           }),
         );
-        const updated = await waitForEvent(socket, "session.updated", config.timeoutMs);
+        const updated = await updatedEvent;
         if (!updated)
           throw new ProviderRequestError("Realtime session update failed", {
             code: "response",
@@ -134,7 +135,23 @@ function waitForEvent(socket: WebSocket, type: string, timeoutMs: number) {
     };
     const onMessage = (event: MessageEvent) => {
       try {
-        const parsed = JSON.parse(String(event.data)) as { type?: unknown };
+        const parsed = JSON.parse(String(event.data)) as {
+          type?: unknown;
+          error?: { message?: unknown };
+        };
+        if (parsed.type === "error") {
+          settled = true;
+          cleanup();
+          reject(
+            new ProviderRequestError(
+              typeof parsed.error?.message === "string"
+                ? parsed.error.message
+                : "Realtime protocol error",
+              { code: "response", retryCount: 0 },
+            ),
+          );
+          return;
+        }
         if (parsed.type === type) {
           settled = true;
           cleanup();

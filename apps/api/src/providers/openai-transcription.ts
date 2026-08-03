@@ -15,8 +15,8 @@ export type OpenAITranscriptionConfig = {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
-  /** `json` for servers that do not implement verbose transcription payloads. */
-  responseFormat?: "json" | "verbose_json";
+  /** Explicit override, or `auto` for conservative model capability detection. */
+  responseFormat?: "auto" | "json" | "verbose_json" | "diarized_json";
   timeoutMs: number;
   maxAttempts: number;
 };
@@ -62,7 +62,11 @@ export function createOpenAICompatibleTranscriptionProvider(
           form.append("file", new Blob([body], { type: mimeType }), extensionForMime(mimeType));
           form.set("model", config.model!);
           form.set("language", langCode(input.lang));
-          form.set("response_format", config.responseFormat ?? "verbose_json");
+          const capability = transcriptionCapability(config.model!, config.responseFormat);
+          form.set("response_format", capability.responseFormat);
+          for (const granularity of capability.timestampGranularities) {
+            form.append("timestamp_granularities[]", granularity);
+          }
           return form;
         },
       });
@@ -75,6 +79,44 @@ export function createOpenAICompatibleTranscriptionProvider(
       };
     },
   };
+}
+
+export type TranscriptionCapability = {
+  responseFormat: "json" | "verbose_json" | "diarized_json";
+  timestampGranularities: ("segment" | "word")[];
+};
+
+/** Resolve only documented OpenAI model ids; unknown compatible models stay on JSON. */
+export function transcriptionCapability(
+  model: string,
+  override: OpenAITranscriptionConfig["responseFormat"] = "auto",
+): TranscriptionCapability {
+  if (override && override !== "auto") {
+    return {
+      responseFormat: override,
+      timestampGranularities:
+        override === "verbose_json" && isWhisperModel(model) ? ["segment", "word"] : [],
+    };
+  }
+  if (isWhisperModel(model)) {
+    return { responseFormat: "verbose_json", timestampGranularities: ["segment", "word"] };
+  }
+  if (isDiarizeModel(model)) {
+    return { responseFormat: "diarized_json", timestampGranularities: [] };
+  }
+  return { responseFormat: "json", timestampGranularities: [] };
+}
+
+function isWhisperModel(model: string) {
+  return model.trim().toLowerCase() === "whisper-1";
+}
+
+function isDiarizeModel(model: string) {
+  const normalized = model.trim().toLowerCase();
+  return (
+    normalized === "gpt-4o-transcribe-diarize" ||
+    /^gpt-4o-transcribe-diarize-\d{4}-\d{2}-\d{2}$/.test(normalized)
+  );
 }
 
 function requireConfigured(config: OpenAITranscriptionConfig) {

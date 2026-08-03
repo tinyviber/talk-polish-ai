@@ -39,6 +39,7 @@ export function RecordControls({
   mode,
   onUseDemo,
   savedDraft = false,
+  onDiscardDraft,
 }: {
   recorder: RecorderState & {
     start: () => Promise<void>;
@@ -52,6 +53,7 @@ export function RecordControls({
   mode: AppMode;
   onUseDemo: () => void;
   savedDraft?: boolean;
+  onDiscardDraft?: () => void | Promise<void>;
 }) {
   const { status, seconds, level, audioUrl, error } = recorder;
 
@@ -123,10 +125,10 @@ export function RecordControls({
                 <AudioPreview url={audioUrl} seconds={seconds} />
                 <div className="flex flex-wrap justify-center gap-2">
                   {savedDraft ? (
-                    <p className="max-w-sm text-center text-xs text-muted-foreground">
-                      This interrupted take is saved with one upload ID. Submit it to avoid a
-                      duplicate attempt.
-                    </p>
+                    <Button variant="outline" onClick={() => void onDiscardDraft?.()}>
+                      <RotateCcw className="size-4" aria-hidden />
+                      Record again
+                    </Button>
                   ) : (
                     <Button variant="outline" onClick={recorder.reset}>
                       <RotateCcw className="size-4" aria-hidden />

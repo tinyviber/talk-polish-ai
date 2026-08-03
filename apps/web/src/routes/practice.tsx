@@ -30,10 +30,12 @@ import {
 } from "@/lib/practice/api";
 import {
   enqueueRecording,
+  deleteRecording,
   listRecordingQueue,
   retryQueuedRecordings,
   subscribeRecordingQueue,
   syncRecordingQueue,
+  saveRecordingDraft,
   type RecordingQueueItem,
 } from "@/lib/practice/offlineQueue";
 import { usePwa } from "@/lib/pwa";
@@ -193,12 +195,13 @@ function Practice() {
       // before the asynchronous IndexedDB write finishes.
       setBusy(true, "draft-save");
       try {
-        await enqueueRecording({
+        await saveRecordingDraft({
           learnerId,
           clientAttemptId,
           sessionId,
           clientSessionId,
           promptId: prompt.id,
+          promptText: prompt.question,
           lang,
           attemptIndex: step === "record2" ? 2 : 1,
           duration: draft.durationSec,
@@ -208,7 +211,9 @@ function Practice() {
         });
         setInterruptedDraftPending(true);
         setError(
-          "Your interrupted recording was saved on this device and will upload when you reconnect.",
+          draft.reason === "manual"
+            ? "Your recording is saved on this device. Review it, then submit or record again."
+            : "Your interrupted recording is saved on this device. Review it before submitting.",
         );
       } finally {
         setBusy(false, "draft-save");
@@ -218,6 +223,7 @@ function Practice() {
   );
   const recorder = useRecorder({ mode, onInterruptedRecording: saveInterruptedDraft });
   const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
+  const restoredDraftRef = useRef<string | null>(null);
   useEffect(() => {
     const refreshQueue = () =>
       void listRecordingQueue(getLearnerId() ?? undefined)
@@ -269,8 +275,34 @@ function Practice() {
     };
   }, [sessionId]);
   useEffect(() => {
+    if (mode !== "api" || recorder.status !== "idle") return;
+    const draft = queuedItems
+      .filter((item) => item.syncStatus === "recorded-unsent")
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!draft || restoredDraftRef.current === draft.clientAttemptId) return;
+    restoredDraftRef.current = draft.clientAttemptId;
+    interruptedAttemptIdRef.current = draft.clientAttemptId;
+    clientSessionIdRef.current = draft.clientSessionId;
+    setSessionId(draft.sessionId);
+    const draftPromptIndex = languagePrompts.findIndex(
+      (candidate) => candidate.id === draft.promptId,
+    );
+    if (draftPromptIndex >= 0) {
+      const offset =
+        (draftPromptIndex - baseIndex + languagePrompts.length) % languagePrompts.length;
+      setPromptOffset(offset);
+    }
+    setStep(draft.attemptIndex === 2 ? "record2" : "record");
+    recorder.restore({ blob: draft.blob, durationSec: draft.duration, mimeType: draft.mimeType });
+    setInterruptedDraftPending(true);
+    setError("Restored your unsubmitted recording from this device.");
+  }, [baseIndex, languagePrompts, mode, queuedItems, recorder.restore, recorder.status]);
+  useEffect(() => {
     setBusy(
-      recorder.status === "recording" || step === "processing" || step === "processing2",
+      recorder.status === "recording" ||
+        recorder.status === "recorded" ||
+        step === "processing" ||
+        step === "processing2",
       "practice",
     );
     return () => setBusy(false, "practice");
@@ -438,6 +470,11 @@ function Practice() {
       setStep(index === 1 ? "record" : "record2");
       return;
     }
+    if (mode === "api") {
+      await deleteRecording(clientAttemptId).catch(() => {
+        setError("Feedback is ready, but the local recording could not be cleared yet.");
+      });
+    }
     interruptedAttemptIdRef.current = null;
     setInterruptedDraftPending(false);
     recorder.reset();
@@ -479,13 +516,15 @@ function Practice() {
             <span className="flex-1">
               {pendingQueueItems.length > 0
                 ? `${pendingQueueItems.length} recording(s) ${
-                    pendingQueueItems.some((item) => item.syncStatus === "uploading")
-                      ? "uploading"
-                      : pendingQueueItems.some((item) => item.syncStatus === "processing")
-                        ? "processing"
-                        : pendingQueueItems.some((item) => item.syncStatus === "queued")
-                          ? "waiting to upload"
-                          : "failed and ready to retry"
+                    pendingQueueItems.some((item) => item.syncStatus === "recorded-unsent")
+                      ? "saved and awaiting your confirmation"
+                      : pendingQueueItems.some((item) => item.syncStatus === "uploading")
+                        ? "uploading"
+                        : pendingQueueItems.some((item) => item.syncStatus === "processing")
+                          ? "processing"
+                          : pendingQueueItems.some((item) => item.syncStatus === "queued")
+                            ? "waiting to upload"
+                            : "failed and ready to retry"
                   }.`
                 : `${readyQueueItems.length} recording(s) uploaded successfully.`}
             </span>
@@ -543,6 +582,14 @@ function Practice() {
                 mode={mode}
                 onUseDemo={switchToDemo}
                 savedDraft={interruptedDraftPending}
+                onDiscardDraft={async () => {
+                  const id = interruptedAttemptIdRef.current;
+                  if (id) await deleteRecording(id);
+                  interruptedAttemptIdRef.current = null;
+                  restoredDraftRef.current = null;
+                  setInterruptedDraftPending(false);
+                  recorder.reset();
+                }}
               />
             </>
           ) : null}

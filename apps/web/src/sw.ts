@@ -31,7 +31,7 @@ const navigation = new NetworkFirst({
 });
 
 registerRoute(
-  ({ request, url }) => isPublicNavigationRequest(request, url),
+  ({ request, url }) => isPublicNavigationRequest(request, url, self.location.origin),
   async ({ event, request }) => {
     try {
       const response = await navigation.handle({ event, request });
@@ -57,8 +57,9 @@ registerRoute(
 
 // Authenticated reads, all mutations, audio, diagnostics, provider and realtime
 // endpoints are never replayed or stored by this worker.
-registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly());
-registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly(), "POST");
+for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"] as const) {
+  registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly(), method);
+}
 
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();

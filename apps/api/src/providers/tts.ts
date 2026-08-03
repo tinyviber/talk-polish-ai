@@ -15,6 +15,7 @@ export type SynthesisResult = {
   contentType?: string;
   seconds: number;
   provider: string;
+  cacheStatus: "hit" | "created";
 };
 
 export interface TextToSpeechProvider {

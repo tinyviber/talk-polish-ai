@@ -15,7 +15,7 @@ import { PracticeStoreProvider } from "../lib/practice/store";
 import { Toaster } from "../components/ui/sonner";
 import { PwaProvider, usePwa } from "../lib/pwa";
 import { getLearnerId } from "../lib/practice/api";
-import { syncRecordingQueue } from "../lib/practice/offlineQueue";
+import { subscribeRecordingQueue, syncRecordingQueue } from "../lib/practice/offlineQueue";
 import { uploadQueuedAttempt } from "../lib/practice/api";
 
 function NotFoundComponent() {
@@ -174,11 +174,16 @@ function OfflineQueueSync() {
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("kotoba:retry-queue", sync);
     window.addEventListener("kotoba:learner-ready", sync);
+    // enqueueRecording persists the Blob before notifying. This also receives
+    // BroadcastChannel notifications from another tab, while the queue's Web
+    // Lock prevents the two tabs from uploading the same item concurrently.
+    const unsubscribeQueue = subscribeRecordingQueue(sync);
     return () => {
       window.removeEventListener("online", sync);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("kotoba:retry-queue", sync);
       window.removeEventListener("kotoba:learner-ready", sync);
+      unsubscribeQueue();
     };
   }, [setBusy]);
   return null;

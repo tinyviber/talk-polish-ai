@@ -20,7 +20,6 @@ import { providers } from "../../providers";
 import { StorageError } from "../../providers/storage";
 import { issueAudioReference, resolveAudioReference } from "./audio-references";
 import { enforceProviderRateLimit } from "./rate-limit";
-import { removeOrQueueStorage } from "../../db/storage-cleanup";
 import { z } from "zod";
 
 export async function providerRoutes(app: FastifyInstance) {
@@ -80,13 +79,9 @@ export async function providerRoutes(app: FastifyInstance) {
               )
             : null;
         } catch (error) {
-          if (result.storageKey) {
-            await removeOrQueueStorage(
-              providers().storage,
-              result.storageKey,
-              "tts-reference-failed",
-            );
-          }
+          // A deterministic TTS key may already be in use by a concurrent
+          // request. Without an atomic object/reference transaction, deleting
+          // it here can break that request. Retain it for cache reuse/cleanup.
           throw error;
         }
         return {

@@ -1,6 +1,12 @@
 import type { Lang } from "./types";
 
-export type QueueStatus = "queued" | "uploading" | "processing" | "ready" | "failed";
+export type QueueStatus =
+  | "recorded-unsent"
+  | "queued"
+  | "uploading"
+  | "processing"
+  | "ready"
+  | "failed";
 export type RecordingQueueItem = {
   /** Learner namespace; prevents a later token/device from reading old blobs. */
   learnerId: string;
@@ -10,6 +16,8 @@ export type RecordingQueueItem = {
   /** Client-generated session idempotency key, used to create the session on reconnect. */
   clientSessionId: string;
   promptId: string;
+  /** Display copy retained so a restored draft never appears under a different prompt. */
+  promptText?: string;
   lang: Lang;
   attemptIndex: 1 | 2;
   duration: number;
@@ -39,10 +47,18 @@ const MAX_BYTES = 100 * 1024 * 1024;
 const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
+let queueChannel: BroadcastChannel | null = null;
+
+function broadcastQueueChange() {
+  if (typeof window === "undefined" || typeof BroadcastChannel === "undefined") return;
+  queueChannel ??= new BroadcastChannel("kotoba-recording-queue");
+  queueChannel.postMessage("change");
+}
 
 function notify() {
   listeners.forEach((listener) => listener());
   if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:queue-change"));
+  broadcastQueueChange();
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -165,13 +181,34 @@ export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStat
   const existing = await allItems();
   // Synced recordings keep only metadata, so they never consume the quota.
   const totalBytes = existing
-    .filter((item) => item.syncStatus !== "ready")
+    .filter((item) => item.syncStatus !== "ready" && item.clientAttemptId !== input.clientAttemptId)
     .reduce((sum, item) => sum + item.blob.size, 0);
   if (totalBytes + input.blob.size > MAX_BYTES) {
     throw new Error("Offline recording storage is full. Retry or remove an older recording first.");
   }
   await put({ ...input, syncStatus: "queued" });
   return input.clientAttemptId;
+}
+
+/** Persist a completed take before the learner decides whether to submit it. */
+export async function saveRecordingDraft(input: Omit<RecordingQueueItem, "syncStatus">) {
+  if (!input.learnerId || input.learnerId === "legacy") {
+    throw new Error("Learner session is unavailable; recording was not saved.");
+  }
+  await cleanupRecordingQueue();
+  const existing = await allItems();
+  const totalBytes = existing
+    .filter((item) => item.syncStatus !== "ready" && item.clientAttemptId !== input.clientAttemptId)
+    .reduce((sum, item) => sum + item.blob.size, 0);
+  if (totalBytes + input.blob.size > MAX_BYTES) {
+    throw new Error("Recording storage is full. Remove an older recording and try again.");
+  }
+  await put({ ...input, syncStatus: "recorded-unsent" });
+  return input.clientAttemptId;
+}
+
+export async function deleteRecording(clientAttemptId: string) {
+  await remove(clientAttemptId);
 }
 
 export async function listRecordingQueue(learnerId?: string) {
@@ -181,8 +218,13 @@ export async function listRecordingQueue(learnerId?: string) {
 
 export function subscribeRecordingQueue(listener: () => void) {
   listeners.add(listener);
+  if (typeof window !== "undefined" && typeof BroadcastChannel !== "undefined") {
+    queueChannel ??= new BroadcastChannel("kotoba-recording-queue");
+    queueChannel.addEventListener("message", listener);
+  }
   return () => {
     listeners.delete(listener);
+    queueChannel?.removeEventListener("message", listener);
   };
 }
 
@@ -207,6 +249,25 @@ export type QueueUploadResult = {
 };
 
 let syncInFlight: Promise<void> | null = null;
+
+async function withCrossTabSyncLock(work: () => Promise<void>) {
+  if (typeof navigator === "undefined" || !("locks" in navigator)) return work();
+  return navigator.locks.request("kotoba-recording-queue-sync", { mode: "exclusive" }, work);
+}
+
+/** Deterministic ordering is important even when IndexedDB returns insertion order today. */
+export function orderQueueItems(items: RecordingQueueItem[]) {
+  return [...items].sort((left, right) => {
+    const leftSession = left.sessionId ?? left.clientSessionId;
+    const rightSession = right.sessionId ?? right.clientSessionId;
+    return (
+      leftSession.localeCompare(rightSession) ||
+      left.attemptIndex - right.attemptIndex ||
+      left.createdAt - right.createdAt ||
+      left.clientAttemptId.localeCompare(right.clientAttemptId)
+    );
+  });
+}
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -248,14 +309,21 @@ export async function syncRecordingQueue(
   learnerId?: string,
 ) {
   if (syncInFlight) return syncInFlight;
-  syncInFlight = (async () => {
+  syncInFlight = withCrossTabSyncLock(async () => {
     if (!learnerId || (typeof navigator !== "undefined" && !navigator.onLine)) return;
     await recoverInterruptedUploads();
     await cleanupRecordingQueue();
-    const items = (await allItems()).filter(
-      (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
+    const items = orderQueueItems(
+      (await allItems()).filter(
+        (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
+      ),
     );
+    const blockedSessions = new Set<string>();
     for (const item of items) {
+      const sessionKey = item.sessionId ?? item.clientSessionId;
+      // Attempt 2 must never race past an attempt 1 which is still processing
+      // (or whose response was lost). A later sync will query/replay attempt 1.
+      if (blockedSessions.has(sessionKey)) continue;
       try {
         const syncing = {
           ...item,
@@ -276,6 +344,7 @@ export async function syncRecordingQueue(
             ? { blob: new Blob([], { type: withoutError.mimeType }), blobDiscarded: true }
             : {}),
         });
+        if (attempt.status !== "ready") blockedSessions.add(sessionKey);
         if (attempt.status === "ready" && typeof window !== "undefined") {
           window.dispatchEvent(
             new CustomEvent("kotoba:queue-ready", {
@@ -299,10 +368,11 @@ export async function syncRecordingQueue(
           syncStatus: isTransientUploadError(error) ? "queued" : "failed",
           lastError: message,
         });
+        blockedSessions.add(sessionKey);
         if (isTransientUploadError(error)) break;
       }
     }
-  })().finally(() => {
+  }).finally(() => {
     syncInFlight = null;
   });
   return syncInFlight;

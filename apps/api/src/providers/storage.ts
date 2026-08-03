@@ -27,7 +27,13 @@ export interface AudioStorageProvider {
 }
 
 export type StorageErrorCode =
-  "not_found" | "timeout" | "auth" | "network" | "invalid_key" | "io" | "unknown";
+  | "not_found"
+  | "timeout"
+  | "auth"
+  | "network"
+  | "invalid_key"
+  | "io"
+  | "unknown";
 
 export class StorageError extends Error {
   readonly code: StorageErrorCode;

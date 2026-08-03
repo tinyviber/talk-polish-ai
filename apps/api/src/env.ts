@@ -35,8 +35,10 @@ const envSchema = z.object({
   TRANSCRIPTION_API_KEY: optionalString(),
   TRANSCRIPTION_MODEL: optionalString(),
   TRANSCRIPTION_TIMEOUT_MS: positiveInt(60_000),
-  /** Some OpenAI-compatible servers only implement `json`. */
-  TRANSCRIPTION_RESPONSE_FORMAT: z.enum(["json", "verbose_json"]).default("verbose_json"),
+  /** Override automatic model capability detection for compatible providers. */
+  TRANSCRIPTION_RESPONSE_FORMAT: z
+    .enum(["auto", "json", "verbose_json", "diarized_json"])
+    .default("auto"),
   TTS_BASE_URL: optionalString(),
   TTS_API_KEY: optionalString(),
   TTS_MODEL: optionalString(),

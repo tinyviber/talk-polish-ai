@@ -14,16 +14,15 @@ example.com {
     Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; connect-src 'self' https: wss:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
   }
 
-  @pwa path /sw.js /manifest.webmanifest /offline.html
-  header @pwa Cache-Control "no-cache"
+  # Stable public filenames must revalidate. Their contents can change without
+  # their URL changing (including generated manifests and touch icons).
+  @pwa path /sw.js /manifest.webmanifest /offline.html /apple-touch-icon.png /apple-touch-icon-180.png /favicon.ico /icons/* /fonts/*
+  header @pwa Cache-Control "public, max-age=0, must-revalidate"
 
   # Only assets under Vite's hashed /assets/ directory get immutable cache
   # headers. This deliberately excludes /sw.js, which must revalidate.
-  @hashed path_regexp hashed ^/assets/[^/]+\.(js|css|png|svg|ttf|woff2)$
+  @hashed path_regexp hashed ^/assets/[^/]+-[A-Za-z0-9_-]+\.(js|css|png|svg|ttf|woff2)$
   header @hashed Cache-Control "public, max-age=31536000, immutable"
-
-  @static-assets path /icons/* /fonts/*
-  header @static-assets Cache-Control "public, max-age=31536000, immutable"
 
   handle /api/* { reverse_proxy 127.0.0.1:3333 }
   handle /realtime/* { reverse_proxy 127.0.0.1:3001 }

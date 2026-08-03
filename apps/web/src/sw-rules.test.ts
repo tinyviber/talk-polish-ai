@@ -37,5 +37,6 @@ describe("service worker cache boundaries", () => {
       ({ mode: "navigate", headers: new Headers(headers) }) as Request;
     expect(isPublicNavigationRequest(navigation(), url)).toBe(true);
     expect(isPublicNavigationRequest(navigation({ Cookie: "session=secret" }), url)).toBe(false);
+    expect(isPublicNavigationRequest(navigation(), url, "https://other.example.com")).toBe(false);
   });
 });

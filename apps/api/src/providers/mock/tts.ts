@@ -15,6 +15,7 @@ export function createMockTtsProvider(): TextToSpeechProvider {
         storageKey: null,
         seconds: Math.max(4, Math.round(text.length / 14)),
         provider: "mock-tts",
+        cacheStatus: "created",
       };
     },
   };

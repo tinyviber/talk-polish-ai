@@ -6,7 +6,10 @@ import { PROMPTS, fixtureFeedback } from "@kotoba/contracts";
 import { createOpenAICompatibleAssessmentProvider } from "./openai-assessment";
 import { createOpenAICompatibleHttpClient } from "./http";
 import { createLocalAudioStorage } from "./local-storage";
-import { createOpenAICompatibleTranscriptionProvider } from "./openai-transcription";
+import {
+  createOpenAICompatibleTranscriptionProvider,
+  transcriptionCapability,
+} from "./openai-transcription";
 import { createOpenAICompatibleTtsProvider } from "./openai-tts";
 import { createRealtimeProvider } from "./realtime";
 
@@ -17,6 +20,8 @@ let alwaysInvalidFeedback = false;
 let tempDir = "";
 let realtimeServer: ReturnType<typeof Bun.serve>;
 let realtimeUrl = "";
+let transcriptionForm: FormData | undefined;
+let speechRequests = 0;
 
 beforeAll(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "kotoba-openai-fixture-"));
@@ -40,6 +45,7 @@ beforeAll(async () => {
         return Response.json({ choices: [{ message: { content } }] });
       }
       if (url.pathname === "/audio/transcriptions") {
+        transcriptionForm = await request.formData();
         return Response.json({
           text: "real transcript",
           segments: [{ id: 0, start: 0, end: 1, text: "real transcript", confidence: 0.8 }],
@@ -48,6 +54,7 @@ beforeAll(async () => {
         });
       }
       if (url.pathname === "/audio/speech") {
+        speechRequests += 1;
         return new Response(Buffer.from("fixture audio"), {
           headers: { "content-type": "audio/mpeg" },
         });
@@ -74,9 +81,20 @@ beforeAll(async () => {
         socket.send(JSON.stringify({ type: "session.created" }));
       },
       message(socket, message) {
-        const parsed = JSON.parse(String(message)) as { type?: string };
+        const parsed = JSON.parse(String(message)) as {
+          type?: string;
+          session?: Record<string, unknown>;
+        };
         if (parsed.type === "session.update") {
-          socket.send(JSON.stringify({ type: "session.updated" }));
+          if (
+            parsed.session?.model ||
+            parsed.session?.modalities ||
+            JSON.stringify(parsed.session?.output_modalities) !== JSON.stringify(["text"])
+          ) {
+            socket.send(
+              JSON.stringify({ type: "error", error: { message: "invalid session.update" } }),
+            );
+          } else socket.send(JSON.stringify({ type: "session.updated" }));
         }
       },
     },
@@ -178,6 +196,32 @@ describe("OpenAI-compatible HTTP fixtures", () => {
     expect(result.text).toBe("real transcript");
     expect(result.transcription?.confidence).toBe(0.8);
     expect(result.transcription?.wordTimestamps?.[0]?.word).toBe("real");
+    expect(transcriptionForm?.get("response_format")).toBe("json");
+    expect(transcriptionForm?.getAll("timestamp_granularities[]")).toEqual([]);
+  });
+
+  test("maps exact transcription model capabilities and explicit overrides", () => {
+    expect(transcriptionCapability("gpt-4o-transcribe")).toEqual({
+      responseFormat: "json",
+      timestampGranularities: [],
+    });
+    expect(transcriptionCapability("gpt-4o-mini-transcribe-2025-12-15")).toEqual({
+      responseFormat: "json",
+      timestampGranularities: [],
+    });
+    expect(transcriptionCapability("whisper-1")).toEqual({
+      responseFormat: "verbose_json",
+      timestampGranularities: ["segment", "word"],
+    });
+    expect(transcriptionCapability("gpt-4o-transcribe-diarize")).toEqual({
+      responseFormat: "diarized_json",
+      timestampGranularities: [],
+    });
+    expect(transcriptionCapability("third-party-whisper-1-enhanced")).toEqual({
+      responseFormat: "json",
+      timestampGranularities: [],
+    });
+    expect(transcriptionCapability("custom", "diarized_json").responseFormat).toBe("diarized_json");
   });
 
   test("caches TTS bytes in storage and returns stable object reference", async () => {
@@ -193,9 +237,18 @@ describe("OpenAI-compatible HTTP fixtures", () => {
       },
       storage,
     );
-    const first = await provider.synthesize({ text: "Hello", lang: "en" });
+    speechRequests = 0;
+    const [first, concurrent] = await Promise.all([
+      provider.synthesize({ text: "Hello", lang: "en" }),
+      provider.synthesize({ text: "Hello", lang: "en" }),
+    ]);
     const second = await provider.synthesize({ text: "Hello", lang: "en" });
     expect(first.storageKey).toBe(second.storageKey);
+    expect(concurrent.storageKey).toBe(first.storageKey);
+    expect(first.cacheStatus).toBe("created");
+    expect(concurrent.cacheStatus).toBe("hit");
+    expect(second.cacheStatus).toBe("hit");
+    expect(speechRequests).toBe(1);
     expect(await storage.get(first.storageKey!)).toEqual(Buffer.from("fixture audio"));
   });
 

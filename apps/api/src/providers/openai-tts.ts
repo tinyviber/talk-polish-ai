@@ -18,6 +18,7 @@ export function createOpenAICompatibleTtsProvider(
   storage: AudioStorageProvider,
 ): TextToSpeechProvider {
   const client = createOpenAICompatibleHttpClient({ capability: "tts", ...config });
+  const inFlight = new Map<string, Promise<SynthesisResult>>();
   return {
     name: "openai-compatible-tts",
     async check() {
@@ -48,21 +49,35 @@ export function createOpenAICompatibleTtsProvider(
           contentType: "audio/mpeg",
           seconds: estimateSeconds(input.text),
           provider: "openai-compatible-tts",
+          cacheStatus: "hit",
         };
       }
-
-      const bytes = await requestAudio(client, model, voice, input.text);
-      const stored = await storage.put({
-        key: logicalKey,
-        body: Buffer.from(bytes),
-        contentType: "audio/mpeg",
-      });
-      return {
-        storageKey: stored.storageKey,
-        contentType: "audio/mpeg",
-        seconds: estimateSeconds(input.text),
-        provider: "openai-compatible-tts",
-      };
+      const existing = inFlight.get(logicalKey);
+      if (existing) {
+        const result = await existing;
+        return { ...result, cacheStatus: "hit" };
+      }
+      const creation = (async (): Promise<SynthesisResult> => {
+        const bytes = await requestAudio(client, model, voice, input.text);
+        const stored = await storage.put({
+          key: logicalKey,
+          body: Buffer.from(bytes),
+          contentType: "audio/mpeg",
+        });
+        return {
+          storageKey: stored.storageKey,
+          contentType: "audio/mpeg",
+          seconds: estimateSeconds(input.text),
+          provider: "openai-compatible-tts",
+          cacheStatus: "created",
+        };
+      })();
+      inFlight.set(logicalKey, creation);
+      try {
+        return await creation;
+      } finally {
+        if (inFlight.get(logicalKey) === creation) inFlight.delete(logicalKey);
+      }
     },
   };
 }

@@ -211,7 +211,9 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
               ? current.error
               : "The recording was interrupted before audio data was available.",
         }));
-        if (saveDraft && blob.size > 0) {
+        // Every valid completed take is persisted by the owner immediately;
+        // `saveDraft` only distinguishes an interruption for messaging.
+        if (blob.size > 0) {
           try {
             await onInterruptedRecording?.({
               blob,
@@ -454,5 +456,23 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
       error: null,
     });
   }, [cleanup, revokeAudioUrl, update]);
-  return { ...state, start, startDemo, stop: () => stop(), reset };
+  const restore = useCallback(
+    (draft: Pick<RecorderDraft, "blob" | "durationSec" | "mimeType">) => {
+      cleanup();
+      revokeAudioUrl();
+      const url = URL.createObjectURL(draft.blob);
+      audioUrlRef.current = url;
+      update({
+        status: "recorded",
+        seconds: draft.durationSec,
+        level: 0,
+        audioUrl: url,
+        audioBlob: draft.blob,
+        mocked: false,
+        error: null,
+      });
+    },
+    [cleanup, revokeAudioUrl, update],
+  );
+  return { ...state, start, startDemo, stop: () => stop(), reset, restore };
 }

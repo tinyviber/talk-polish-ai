@@ -75,6 +75,16 @@ export function getLearnerId() {
   return learnerId;
 }
 
+/** Stable local namespace available before an anonymous API bootstrap succeeds. */
+export function getQueueLearnerId() {
+  return `device:${getDeviceId()}`;
+}
+
+/** Include the stable namespace and the server id for queues created by older builds. */
+export function getQueueLearnerIds() {
+  return [...new Set([getQueueLearnerId(), learnerId].filter((value): value is string => !!value))];
+}
+
 /** Build same-origin API URLs; never attach bearer tokens to arbitrary origins. */
 export function apiUrl(path: string) {
   const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost";

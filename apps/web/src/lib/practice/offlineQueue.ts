@@ -243,9 +243,16 @@ export async function removeQueuedRecording(clientAttemptId: string) {
   await remove(clientAttemptId);
 }
 
-export async function listRecordingQueue(learnerId?: string) {
-  if (!learnerId) return [] as RecordingQueueItem[];
-  return (await allItems()).filter((item) => item.learnerId === learnerId);
+function learnerMatches(item: RecordingQueueItem, learnerIds: string | string[] | undefined) {
+  if (!learnerIds) return false;
+  return (Array.isArray(learnerIds) ? learnerIds : [learnerIds]).includes(item.learnerId);
+}
+
+export async function listRecordingQueue(learnerIds?: string | string[]) {
+  if (!learnerIds || (Array.isArray(learnerIds) && learnerIds.length === 0)) {
+    return [] as RecordingQueueItem[];
+  }
+  return (await allItems()).filter((item) => learnerMatches(item, learnerIds));
 }
 
 export function subscribeRecordingQueue(listener: () => void) {
@@ -256,9 +263,9 @@ export function subscribeRecordingQueue(listener: () => void) {
   };
 }
 
-export async function retryQueuedRecordings(learnerId?: string) {
-  if (!learnerId) return;
-  const items = (await allItems()).filter((item) => item.learnerId === learnerId);
+export async function retryQueuedRecordings(learnerIds?: string | string[]) {
+  if (!learnerIds || (Array.isArray(learnerIds) && learnerIds.length === 0)) return;
+  const items = (await allItems()).filter((item) => learnerMatches(item, learnerIds));
   await Promise.all(
     items
       .filter((item) => item.syncStatus === "failed")
@@ -324,6 +331,26 @@ async function releaseSyncLease(learnerId: string) {
   });
 }
 
+async function renewSyncLease(learnerId: string) {
+  const db = await openDb();
+  const ownerId = getSyncOwnerId();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(LEASE_STORE, "readwrite");
+    const store = tx.objectStore(LEASE_STORE);
+    let renewed = false;
+    const request = store.get(learnerId);
+    request.onsuccess = () => {
+      const current = request.result as { ownerId?: string } | undefined;
+      if (current?.ownerId !== ownerId) return;
+      store.put({ learnerId, ownerId, expiresAt: Date.now() + LEASE_MS });
+      renewed = true;
+    };
+    tx.oncomplete = () => resolve(renewed);
+    tx.onerror = () => reject(tx.error ?? new Error("Could not renew recording sync lease."));
+    tx.onabort = () => reject(tx.error ?? new Error("Could not renew recording sync lease."));
+  });
+}
+
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
@@ -361,21 +388,29 @@ async function uploadWithProcessingPoll(
 
 export async function syncRecordingQueue(
   upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
-  learnerId?: string,
+  learnerIds?: string | string[],
 ) {
   if (syncInFlight) return syncInFlight;
   const run = async () => {
-    if (!learnerId || (typeof navigator !== "undefined" && !navigator.onLine)) return;
+    if (
+      !learnerIds ||
+      (Array.isArray(learnerIds) && learnerIds.length === 0) ||
+      (typeof navigator !== "undefined" && !navigator.onLine)
+    )
+      return;
+    const queueLearnerIds = Array.isArray(learnerIds) ? learnerIds : [learnerIds];
     await recoverInterruptedUploads();
     await cleanupRecordingQueue();
     const items = (await allItems()).filter(
-      (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
+      (item) => learnerMatches(item, queueLearnerIds) && isQueueSyncCandidate(item.syncStatus),
     );
     const readySessionKeys = new Set(
       (await allItems())
         .filter(
           (item) =>
-            item.learnerId === learnerId && item.attemptIndex === 1 && item.syncStatus === "ready",
+            learnerMatches(item, queueLearnerIds) &&
+            item.attemptIndex === 1 &&
+            item.syncStatus === "ready",
         )
         .map((item) => item.clientSessionId),
     );
@@ -432,20 +467,32 @@ export async function syncRecordingQueue(
     }
   };
   const runWithCrossTabLease = async () => {
-    if (!learnerId || typeof indexedDB === "undefined") return run();
-    const acquired = await acquireSyncLease(learnerId);
+    const queueLearnerIds = Array.isArray(learnerIds) ? learnerIds : learnerIds ? [learnerIds] : [];
+    if (queueLearnerIds.length === 0 || typeof indexedDB === "undefined") return run();
+    const leaseKey = queueLearnerIds.join("|");
+    const acquired = await acquireSyncLease(leaseKey);
     if (!acquired) return;
     const runWithRelease = async () => {
+      const heartbeat = setInterval(
+        () => {
+          void renewSyncLease(leaseKey).catch(() => {
+            // An expiring lease is safer than throwing from a timer. The next
+            // foreground sync will recover uploading rows if this tab suspends.
+          });
+        },
+        Math.floor(LEASE_MS / 3),
+      );
       try {
         return await run();
       } finally {
-        await releaseSyncLease(learnerId);
+        clearInterval(heartbeat);
+        await releaseSyncLease(leaseKey);
       }
     };
     const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
     if (!locks) return runWithRelease();
     return locks.request("kotoba-loop-recording-sync", { ifAvailable: true }, (lock) =>
-      lock ? runWithRelease() : releaseSyncLease(learnerId),
+      lock ? runWithRelease() : releaseSyncLease(leaseKey),
     );
   };
   syncInFlight = runWithCrossTabLease().finally(() => {

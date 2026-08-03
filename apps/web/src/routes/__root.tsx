@@ -14,7 +14,7 @@ import { reportLovableError } from "../lib/lovable-error-reporting";
 import { PracticeStoreProvider } from "../lib/practice/store";
 import { Toaster } from "../components/ui/sonner";
 import { PwaProvider, usePwa } from "../lib/pwa";
-import { getLearnerId } from "../lib/practice/api";
+import { getQueueLearnerIds } from "../lib/practice/api";
 import { syncRecordingQueue } from "../lib/practice/offlineQueue";
 import { uploadQueuedAttempt } from "../lib/practice/api";
 
@@ -158,13 +158,12 @@ function OfflineQueueSync() {
   const { setBusy } = usePwa();
   useEffect(() => {
     const sync = () => {
-      const learnerId = getLearnerId();
-      if (!learnerId) return;
+      const learnerIds = getQueueLearnerIds();
       setBusy(true, "queue");
       void syncRecordingQueue(async (item) => {
         const { attempt, sessionId } = await uploadQueuedAttempt(item);
         return { id: attempt.id, status: attempt.status, sessionId };
-      }, learnerId).finally(() => setBusy(false, "queue"));
+      }, learnerIds).finally(() => setBusy(false, "queue"));
     };
     sync();
     window.addEventListener("online", sync);

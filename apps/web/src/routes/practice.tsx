@@ -24,7 +24,8 @@ import {
   createAttempt,
   createSession,
   getAttempt,
-  getLearnerId,
+  getQueueLearnerId,
+  getQueueLearnerIds,
   toReadyAttempt,
   uploadQueuedAttempt,
 } from "@/lib/practice/api";
@@ -199,11 +200,7 @@ function Practice() {
       if (mode !== "api" || !prompt) return;
       const clientSessionId = clientSessionIdRef.current;
       if (!clientSessionId) return;
-      const learnerId = getLearnerId();
-      if (!learnerId) {
-        setError("Your learner session is not ready; the interrupted take was not queued.");
-        return;
-      }
+      const learnerId = getQueueLearnerId();
       const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
       interruptedAttemptIdRef.current = clientAttemptId;
       // Keep this separate from recorder.status: the latter becomes recorded
@@ -237,7 +234,7 @@ function Practice() {
   const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
   useEffect(() => {
     const refreshQueue = () =>
-      void listRecordingQueue(getLearnerId() ?? undefined)
+      void listRecordingQueue(getQueueLearnerIds())
         .then(setQueuedItems)
         .catch(() => {});
     refreshQueue();
@@ -255,7 +252,7 @@ function Practice() {
       ).detail;
       const belongsToThisSession =
         detail &&
-        detail.learnerId === getLearnerId() &&
+        getQueueLearnerIds().includes(detail.learnerId) &&
         (detail.sessionId === sessionId ||
           (clientSessionIdRef.current !== null &&
             detail.clientSessionId === clientSessionIdRef.current));
@@ -368,7 +365,7 @@ function Practice() {
         // leaves an idempotent durable record instead of an in-memory Blob only.
         try {
           await enqueueRecording({
-            learnerId: getLearnerId() ?? "",
+            learnerId: getQueueLearnerId(),
             clientAttemptId,
             sessionId,
             clientSessionId: clientSessionIdRef.current!,
@@ -456,8 +453,7 @@ function Practice() {
         recorder.audioBlob
       ) {
         try {
-          const learnerId = getLearnerId();
-          if (!learnerId) throw new Error("Learner session is unavailable.");
+          const learnerId = getQueueLearnerId();
           await enqueueRecording({
             learnerId,
             clientAttemptId,
@@ -493,15 +489,14 @@ function Practice() {
   };
 
   const retryOffline = async () => {
-    const learnerId = getLearnerId();
-    if (!learnerId) return;
-    await retryQueuedRecordings(learnerId);
+    const learnerIds = getQueueLearnerIds();
+    await retryQueuedRecordings(learnerIds);
     setBusy(true, "queue");
     try {
       await syncRecordingQueue(async (item) => {
         const { attempt, sessionId } = await uploadQueuedAttempt(item);
         return { id: attempt.id, status: attempt.status, sessionId };
-      }, learnerId);
+      }, learnerIds);
     } finally {
       setBusy(false, "queue");
     }

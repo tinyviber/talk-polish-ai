@@ -129,10 +129,11 @@ export const feedbackSchema = z.object({
 export type Feedback = z.infer<typeof feedbackSchema>;
 
 export const transcriptionSegmentSchema = z.object({
-  id: z.number().int().nonnegative().optional(),
+  id: z.union([z.number().int().nonnegative(), z.string()]).optional(),
   start: z.number().nonnegative().optional(),
   end: z.number().nonnegative().optional(),
   text: z.string().optional(),
+  speaker: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
 });
 export type TranscriptionSegment = z.infer<typeof transcriptionSegmentSchema>;

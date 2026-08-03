@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppMode } from "./mode";
 
-export type RecorderStatus = "idle" | "requesting" | "recording" | "recorded" | "denied";
+export type RecorderStatus =
+  "idle" | "requesting" | "recording" | "saving-draft" | "recorded" | "denied";
 export type RecorderDraft = { blob: Blob; durationSec: number; mimeType: string; reason: string };
 export type RecorderState = {
   status: RecorderStatus;
@@ -198,9 +199,10 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
         audioUrlRef.current = url;
         recorderRef.current = null;
         cleanup();
+        const savingDraft = blob.size > 0 && onInterruptedRecording !== undefined;
         update((current) => ({
           ...current,
-          status: "recorded",
+          status: savingDraft ? "saving-draft" : "recorded",
           seconds,
           level: 0,
           audioUrl: url,
@@ -226,6 +228,9 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
               ...current,
               error: "The interrupted recording is still on this device, but could not be queued.",
             }));
+          }
+          if (savingDraft) {
+            update((current) => ({ ...current, status: "recorded" }));
           }
         }
       } else {

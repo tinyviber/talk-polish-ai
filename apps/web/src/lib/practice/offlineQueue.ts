@@ -1,12 +1,7 @@
 import type { Lang } from "./types";
 
 export type QueueStatus =
-  | "recorded-unsent"
-  | "queued"
-  | "uploading"
-  | "processing"
-  | "ready"
-  | "failed";
+  "recorded-unsent" | "queued" | "uploading" | "processing" | "ready" | "failed";
 export type RecordingQueueItem = {
   /** Learner namespace; prevents a later token/device from reading old blobs. */
   learnerId: string;
@@ -27,8 +22,14 @@ export type RecordingQueueItem = {
   syncStatus: QueueStatus;
   attemptId?: string;
   lastError?: string;
+  /** Do not retry a still-processing attempt before this time. */
+  nextPollAt?: number;
   /** Bytes are dropped once the attempt is safely stored server-side. */
   blobDiscarded?: boolean;
+};
+
+export type SyncableRecordingQueueItem = Omit<RecordingQueueItem, "syncStatus"> & {
+  syncStatus: Exclude<QueueStatus, "recorded-unsent">;
 };
 
 export function isQueueSyncCandidate(status: QueueStatus) {
@@ -41,10 +42,15 @@ export function recoverQueueStatus(status: QueueStatus): QueueStatus {
 
 const DB_NAME = "kotoba-loop-offline";
 const STORE = "recordings";
-const DB_VERSION = 2;
+const LOCK_STORE = "locks";
+const SYNC_LOCK_KEY = "recording-queue";
+const SYNC_LOCK_TTL_MS = 30_000;
+const SYNC_LOCK_RENEWAL_MS = 10_000;
+const DB_VERSION = 3;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
 const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
+const PROCESSING_RETRY_DELAY_MS = 15_000;
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
 let queueChannel: BroadcastChannel | null = null;
@@ -74,28 +80,32 @@ function openDb(): Promise<IDBDatabase> {
       const existed = request.result.objectStoreNames.contains(STORE);
       if (!existed) {
         request.result.createObjectStore(STORE, { keyPath: "clientAttemptId" });
-        return;
-      }
-      // v1 items had no learner namespace. Keep their bytes isolated and
-      // visible only to cleanup, rather than ever uploading them as another
-      // learner after a token/device change.
-      const store = request.transaction?.objectStore(STORE);
-      if (!store) return;
-      const cursorRequest = store.openCursor();
-      cursorRequest.onsuccess = () => {
-        const cursor = cursorRequest.result;
-        if (!cursor) return;
-        const value = cursor.value as Record<string, unknown>;
-        if (!value["learnerId"]) {
-          cursor.update({
-            ...value,
-            learnerId: "legacy",
-            syncStatus: "failed",
-            lastError: "This recording needs to be re-recorded after the app update.",
-          });
+      } else {
+        // v1 items had no learner namespace. Keep their bytes isolated and
+        // visible only to cleanup, rather than ever uploading them as another
+        // learner after a token/device change.
+        const store = request.transaction?.objectStore(STORE);
+        if (store) {
+          const cursorRequest = store.openCursor();
+          cursorRequest.onsuccess = () => {
+            const cursor = cursorRequest.result;
+            if (!cursor) return;
+            const value = cursor.value as Record<string, unknown>;
+            if (!value["learnerId"]) {
+              cursor.update({
+                ...value,
+                learnerId: "legacy",
+                syncStatus: "failed",
+                lastError: "This recording needs to be re-recorded after the app update.",
+              });
+            }
+            cursor.continue();
+          };
         }
-        cursor.continue();
-      };
+      }
+      if (!request.result.objectStoreNames.contains(LOCK_STORE)) {
+        request.result.createObjectStore(LOCK_STORE, { keyPath: "key" });
+      }
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -136,9 +146,18 @@ async function allItems() {
 async function put(item: RecordingQueueItem) {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
-    const request = db.transaction(STORE, "readwrite").objectStore(STORE).put(item);
-    request.onsuccess = () => resolve();
+    const transaction = db.transaction(STORE, "readwrite") as IDBTransaction;
+    const waitForTransaction = "oncomplete" in transaction;
+    const request = transaction.objectStore(STORE).put(item);
+    request.onsuccess = () => {
+      // Real IndexedDB can still abort after the request succeeds. Wait for
+      // the transaction when the implementation exposes that lifecycle.
+      if (!waitForTransaction) resolve();
+    };
     request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB write failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB write aborted"));
   });
   notify();
 }
@@ -146,9 +165,16 @@ async function put(item: RecordingQueueItem) {
 async function remove(clientAttemptId: string) {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
-    const request = db.transaction(STORE, "readwrite").objectStore(STORE).delete(clientAttemptId);
-    request.onsuccess = () => resolve();
+    const transaction = db.transaction(STORE, "readwrite") as IDBTransaction;
+    const waitForTransaction = "oncomplete" in transaction;
+    const request = transaction.objectStore(STORE).delete(clientAttemptId);
+    request.onsuccess = () => {
+      if (!waitForTransaction) resolve();
+    };
     request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB delete failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB delete aborted"));
   });
   notify();
 }
@@ -249,10 +275,139 @@ export type QueueUploadResult = {
 };
 
 let syncInFlight: Promise<void> | null = null;
+let syncRequested = false;
+let syncRequestedLearnerId: string | null = null;
+let processingPollTimer: ReturnType<typeof setTimeout> | null = null;
+let syncGeneration = 0;
+
+function clearProcessingPollTimer() {
+  if (processingPollTimer) clearTimeout(processingPollTimer);
+  processingPollTimer = null;
+}
+
+export function cancelScheduledRecordingQueueSync() {
+  syncGeneration += 1;
+  clearProcessingPollTimer();
+}
+
+function scheduleProcessingPoll(
+  upload: (item: SyncableRecordingQueueItem) => Promise<QueueUploadResult>,
+  learnerId: string,
+  delayMs = PROCESSING_RETRY_DELAY_MS,
+  generation = syncGeneration,
+) {
+  clearProcessingPollTimer();
+  if (generation !== syncGeneration) return;
+  const timerGeneration = generation;
+  processingPollTimer = setTimeout(() => {
+    processingPollTimer = null;
+    if (timerGeneration !== syncGeneration) return;
+    void syncRecordingQueue(upload, learnerId);
+  }, delayMs);
+}
+
+type ReleaseSyncLock = () => Promise<void>;
+
+async function renewIndexedDbSyncLock(db: IDBDatabase, owner: string) {
+  return new Promise<boolean>((resolve, reject) => {
+    const transaction = db.transaction(LOCK_STORE, "readwrite");
+    const store = transaction.objectStore(LOCK_STORE);
+    const request = store.get(SYNC_LOCK_KEY);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const current = request.result as { owner?: string } | undefined;
+      if (current?.owner !== owner) {
+        transaction.abort();
+        resolve(false);
+        return;
+      }
+      store.put({
+        key: SYNC_LOCK_KEY,
+        owner,
+        expiresAt: Date.now() + SYNC_LOCK_TTL_MS,
+      });
+      transaction.oncomplete = () => resolve(true);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => resolve(false);
+    };
+  });
+}
+
+async function acquireIndexedDbSyncLock(): Promise<ReleaseSyncLock | null> {
+  if (typeof indexedDB === "undefined") return null;
+  const db = await openDb().catch(() => null);
+  if (!db) return null;
+  const owner =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()}`;
+  for (;;) {
+    const acquired = await new Promise<boolean>((resolve, reject) => {
+      const transaction = db.transaction(LOCK_STORE, "readwrite");
+      const store = transaction.objectStore(LOCK_STORE);
+      const request = store.get(SYNC_LOCK_KEY);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const current = request.result as { owner?: string; expiresAt?: number } | undefined;
+        if (current?.owner && current.owner !== owner && (current.expiresAt ?? 0) > Date.now()) {
+          transaction.abort();
+          resolve(false);
+          return;
+        }
+        store.put({
+          key: SYNC_LOCK_KEY,
+          owner,
+          expiresAt: Date.now() + SYNC_LOCK_TTL_MS,
+        });
+        transaction.oncomplete = () => resolve(true);
+        transaction.onerror = () => reject(transaction.error);
+      };
+    });
+    if (acquired) {
+      let released = false;
+      let renewalInFlight: Promise<boolean> | null = null;
+      const renewalTimer = setInterval(() => {
+        if (released || renewalInFlight) return;
+        renewalInFlight = renewIndexedDbSyncLock(db, owner)
+          .catch(() => false)
+          .finally(() => {
+            renewalInFlight = null;
+          });
+        void renewalInFlight;
+      }, SYNC_LOCK_RENEWAL_MS);
+      return async () => {
+        released = true;
+        clearInterval(renewalTimer);
+        await renewalInFlight;
+        await new Promise<void>((resolve, reject) => {
+          const transaction = db.transaction(LOCK_STORE, "readwrite");
+          const store = transaction.objectStore(LOCK_STORE);
+          const request = store.get(SYNC_LOCK_KEY);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            const current = request.result as { owner?: string } | undefined;
+            if (current?.owner === owner) store.delete(SYNC_LOCK_KEY);
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+          };
+        });
+      };
+    }
+    await wait(100);
+  }
+}
 
 async function withCrossTabSyncLock(work: () => Promise<void>) {
-  if (typeof navigator === "undefined" || !("locks" in navigator)) return work();
-  return navigator.locks.request("kotoba-recording-queue-sync", { mode: "exclusive" }, work);
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    return navigator.locks.request("kotoba-recording-queue-sync", { mode: "exclusive" }, work);
+  }
+  const release = await acquireIndexedDbSyncLock();
+  if (!release) return work();
+  try {
+    return await work();
+  } finally {
+    await release();
+  }
 }
 
 /** Deterministic ordering is important even when IndexedDB returns insertion order today. */
@@ -288,8 +443,8 @@ function isTransientUploadError(error: unknown) {
 }
 
 async function uploadWithProcessingPoll(
-  item: RecordingQueueItem,
-  upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
+  item: SyncableRecordingQueueItem,
+  upload: (item: SyncableRecordingQueueItem) => Promise<QueueUploadResult>,
 ) {
   let current = await upload(item);
   for (const delay of PROCESSING_POLL_DELAYS_MS) {
@@ -304,76 +459,132 @@ async function uploadWithProcessingPoll(
   return current;
 }
 
-export async function syncRecordingQueue(
-  upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
+async function syncRecordingQueueOnce(
+  upload: (item: SyncableRecordingQueueItem) => Promise<QueueUploadResult>,
   learnerId?: string,
+  generation = syncGeneration,
 ) {
-  if (syncInFlight) return syncInFlight;
-  syncInFlight = withCrossTabSyncLock(async () => {
-    if (!learnerId || (typeof navigator !== "undefined" && !navigator.onLine)) return;
-    await recoverInterruptedUploads();
-    await cleanupRecordingQueue();
-    const items = orderQueueItems(
-      (await allItems()).filter(
-        (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
-      ),
-    );
-    const blockedSessions = new Set<string>();
-    for (const item of items) {
-      const sessionKey = item.sessionId ?? item.clientSessionId;
-      // Attempt 2 must never race past an attempt 1 which is still processing
-      // (or whose response was lost). A later sync will query/replay attempt 1.
-      if (blockedSessions.has(sessionKey)) continue;
-      try {
-        const syncing = {
-          ...item,
-          syncStatus: item.syncStatus === "processing" ? "processing" : "uploading",
-        } as RecordingQueueItem;
-        await put(syncing);
-        const attempt = await uploadWithProcessingPoll(syncing, upload);
-        const { lastError: _lastError, ...withoutError } = syncing;
-        const synced = attempt.status === "ready";
+  if (!learnerId || (typeof navigator !== "undefined" && !navigator.onLine)) return;
+  await recoverInterruptedUploads();
+  await cleanupRecordingQueue();
+  const now = Date.now();
+  const queueItems = (await allItems()).filter(
+    (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
+  ) as SyncableRecordingQueueItem[];
+  const nextPollAt = queueItems
+    .map((item) => item.nextPollAt)
+    .filter((value): value is number => typeof value === "number" && value > now)
+    .sort((left, right) => left - right)[0];
+  if (nextPollAt !== undefined) {
+    scheduleProcessingPoll(upload, learnerId, nextPollAt - now, generation);
+  }
+  const items = orderQueueItems(
+    queueItems.filter((item) => !item.nextPollAt || item.nextPollAt <= now),
+  );
+  const blockedSessions = new Set<string>();
+  for (const item of items) {
+    const sessionKey = item.sessionId ?? item.clientSessionId;
+    // Attempt 2 must never race past an attempt 1 which is still processing
+    // (or whose response was lost). A later sync will query/replay attempt 1.
+    if (blockedSessions.has(sessionKey)) continue;
+    try {
+      const { nextPollAt: _nextPollAt, ...withoutNextPollAt } = item;
+      const syncing = {
+        ...withoutNextPollAt,
+        syncStatus: item.syncStatus === "processing" ? "processing" : "uploading",
+      } as SyncableRecordingQueueItem;
+      await put(syncing);
+      const attempt = await uploadWithProcessingPoll(syncing, upload);
+      const { lastError: _lastError, ...withoutError } = syncing;
+      const synced = attempt.status === "ready";
+      const stored = {
+        ...withoutError,
+        ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
+        attemptId: attempt.id,
+        syncStatus: attempt.status,
+        // Free the device once the server owns the recording; the metadata
+        // row stays so the UI can still report the completed upload.
+        ...(synced
+          ? { blob: new Blob([], { type: withoutError.mimeType }), blobDiscarded: true }
+          : {}),
+      } as RecordingQueueItem;
+      if (attempt.status === "processing") {
         await put({
-          ...withoutError,
-          ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
-          attemptId: attempt.id,
-          syncStatus: attempt.status,
-          // Free the device once the server owns the recording; the metadata
-          // row stays so the UI can still report the completed upload.
-          ...(synced
-            ? { blob: new Blob([], { type: withoutError.mimeType }), blobDiscarded: true }
-            : {}),
+          ...stored,
+          syncStatus: "processing",
+          nextPollAt: Date.now() + PROCESSING_RETRY_DELAY_MS,
         });
-        if (attempt.status !== "ready") blockedSessions.add(sessionKey);
-        if (attempt.status === "ready" && typeof window !== "undefined") {
-          window.dispatchEvent(
-            new CustomEvent("kotoba:queue-ready", {
-              detail: {
-                learnerId: item.learnerId,
-                clientAttemptId: item.clientAttemptId,
-                sessionId: attempt.sessionId ?? item.sessionId,
-                clientSessionId: item.clientSessionId,
-                attemptIndex: item.attemptIndex,
-                attemptId: attempt.id,
-              },
-            }),
-          );
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Upload failed";
-        // Network/5xx failures can resume automatically. Permanent 4xx and
-        // validation failures stay failed until the user explicitly retries.
-        await put({
-          ...item,
-          syncStatus: isTransientUploadError(error) ? "queued" : "failed",
-          lastError: message,
-        });
-        blockedSessions.add(sessionKey);
-        if (isTransientUploadError(error)) break;
+        scheduleProcessingPoll(upload, learnerId, PROCESSING_RETRY_DELAY_MS, generation);
+      } else {
+        await put(stored);
+      }
+      if (attempt.status !== "ready") blockedSessions.add(sessionKey);
+      if (attempt.status === "ready" && typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("kotoba:queue-ready", {
+            detail: {
+              learnerId: item.learnerId,
+              clientAttemptId: item.clientAttemptId,
+              sessionId: attempt.sessionId ?? item.sessionId,
+              clientSessionId: item.clientSessionId,
+              attemptIndex: item.attemptIndex,
+              attemptId: attempt.id,
+            },
+          }),
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Upload failed";
+      // Network/5xx failures can resume automatically. Permanent 4xx and
+      // validation failures stay failed until the user explicitly retries.
+      const transient = isTransientUploadError(error);
+      await put({
+        ...item,
+        syncStatus: transient ? "queued" : "failed",
+        lastError: message,
+        ...(transient ? { nextPollAt: Date.now() + PROCESSING_RETRY_DELAY_MS } : {}),
+      });
+      blockedSessions.add(sessionKey);
+      if (transient) {
+        scheduleProcessingPoll(upload, learnerId, PROCESSING_RETRY_DELAY_MS, generation);
+        break;
       }
     }
-  }).finally(() => {
-    syncInFlight = null;
+  }
+}
+
+async function syncRecordingQueueLoop(
+  upload: (item: SyncableRecordingQueueItem) => Promise<QueueUploadResult>,
+  learnerId: string,
+) {
+  let nextLearnerId = learnerId;
+  const generation = syncGeneration;
+  for (;;) {
+    if (generation !== syncGeneration) return;
+    syncRequested = false;
+    syncRequestedLearnerId = null;
+    await withCrossTabSyncLock(() => syncRecordingQueueOnce(upload, nextLearnerId, generation));
+    if (generation !== syncGeneration || !syncRequested) return;
+    nextLearnerId = syncRequestedLearnerId ?? nextLearnerId;
+  }
+}
+
+export function syncRecordingQueue(
+  upload: (item: SyncableRecordingQueueItem) => Promise<QueueUploadResult>,
+  learnerId?: string,
+) {
+  if (!learnerId) return Promise.resolve();
+  if (syncInFlight) {
+    // Queue-change notifications can arrive while a sync is running. Keep
+    // one trailing pass so newly queued items and final processing states are
+    // never lost when the current promise is reused.
+    syncRequested = true;
+    syncRequestedLearnerId = learnerId;
+    return syncInFlight;
+  }
+  const inFlight = syncRecordingQueueLoop(upload, learnerId).finally(() => {
+    if (syncInFlight === inFlight) syncInFlight = null;
   });
-  return syncInFlight;
+  syncInFlight = inFlight;
+  return inFlight;
 }

@@ -70,20 +70,13 @@ export async function providerRoutes(app: FastifyInstance) {
       try {
         const result = await providers().tts.synthesize({ ...input, scope: learner.id });
         let reference: string | null = null;
-        try {
-          reference = result.storageKey
-            ? await issueAudioReference(
-                learner.id,
-                result.storageKey,
-                result.contentType ?? "audio/mpeg",
-              )
-            : null;
-        } catch (error) {
-          // A deterministic TTS key may already be in use by a concurrent
-          // request. Without an atomic object/reference transaction, deleting
-          // it here can break that request. Retain it for cache reuse/cleanup.
-          throw error;
-        }
+        reference = result.storageKey
+          ? await issueAudioReference(
+              learner.id,
+              result.storageKey,
+              result.contentType ?? "audio/mpeg",
+            )
+          : null;
         return {
           requestId: request.id,
           audio: {

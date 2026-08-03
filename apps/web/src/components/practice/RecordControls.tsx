@@ -120,6 +120,12 @@ export function RecordControls({
               </Button>
             ) : null}
 
+            {status === "saving-draft" ? (
+              <p className="max-w-sm text-center text-sm text-muted-foreground" aria-live="polite">
+                Saving your recording on this device…
+              </p>
+            ) : null}
+
             {status === "recorded" ? (
               <div className="flex w-full flex-col items-center gap-3">
                 <AudioPreview url={audioUrl} seconds={seconds} />

@@ -39,7 +39,7 @@ import {
   type RecordingQueueItem,
 } from "@/lib/practice/offlineQueue";
 import { usePwa } from "@/lib/pwa";
-import type { Attempt, ScoreKey } from "@/lib/practice/types";
+import type { Attempt, Prompt, ScoreKey } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/practice")({
@@ -147,6 +147,7 @@ function Practice() {
     state,
     mode,
     prompts,
+    setLang,
     error: storeError,
     toggleSaved,
     isSaved,
@@ -164,8 +165,12 @@ function Practice() {
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [interruptedDraftPending, setInterruptedDraftPending] = useState(false);
+  const [restoredDraftPrompt, setRestoredDraftPrompt] = useState<Prompt | null>(null);
   const { setBusy } = usePwa();
   const interruptedAttemptIdRef = useRef<string | null>(null);
+  const restoredDraftRef = useRef<string | null>(null);
+  const ignoredDraftIdsRef = useRef(new Set<string>());
+  const sessionGenerationRef = useRef(0);
   // Generated when a session starts so recordings captured with no network can
   // still be attached to one practice session once the device reconnects.
   const clientSessionIdRef = useRef<string | null>(null);
@@ -178,10 +183,19 @@ function Practice() {
   // Frozen at mount so the prompt never changes mid-session when a session is recorded.
   const [baseIndex] = useState(() => state.sessions.filter((s) => s.lang === lang).length);
   const prompt = languagePrompts[(baseIndex + promptOffset) % Math.max(1, languagePrompts.length)];
+  const activePrompt = restoredDraftPrompt?.lang === lang ? restoredDraftPrompt : prompt;
   const jp = lang === "ja";
+  const resetCurrentSession = useCallback(() => {
+    sessionGenerationRef.current += 1;
+    clientSessionIdRef.current = null;
+    interruptedAttemptIdRef.current = null;
+    restoredDraftRef.current = null;
+    setRestoredDraftPrompt(null);
+    setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
+  }, [mode]);
   const saveInterruptedDraft = useCallback(
     async (draft: RecorderDraft) => {
-      if (mode !== "api" || !prompt) return;
+      if (mode !== "api" || !activePrompt) return;
       const clientSessionId = clientSessionIdRef.current;
       if (!clientSessionId) return;
       const learnerId = getLearnerId();
@@ -200,8 +214,8 @@ function Practice() {
           clientAttemptId,
           sessionId,
           clientSessionId,
-          promptId: prompt.id,
-          promptText: prompt.question,
+          promptId: activePrompt.id,
+          promptText: activePrompt.question,
           lang,
           attemptIndex: step === "record2" ? 2 : 1,
           duration: draft.durationSec,
@@ -219,12 +233,14 @@ function Practice() {
         setBusy(false, "draft-save");
       }
     },
-    [lang, mode, prompt, sessionId, setBusy, step],
+    [activePrompt, lang, mode, sessionId, setBusy, step],
   );
   const recorder = useRecorder({ mode, onInterruptedRecording: saveInterruptedDraft });
+  const recorderStatus = recorder.status;
+  const restoreRecording = recorder.restore;
   const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
-  const restoredDraftRef = useRef<string | null>(null);
   useEffect(() => {
+    const listenerGeneration = sessionGenerationRef.current;
     const refreshQueue = () =>
       void listRecordingQueue(getLearnerId() ?? undefined)
         .then(setQueuedItems)
@@ -244,6 +260,7 @@ function Practice() {
       ).detail;
       const belongsToThisSession =
         detail &&
+        listenerGeneration === sessionGenerationRef.current &&
         detail.learnerId === getLearnerId() &&
         (detail.sessionId === sessionId ||
           (clientSessionIdRef.current !== null &&
@@ -252,6 +269,7 @@ function Practice() {
       if (detail.sessionId) setSessionId(detail.sessionId);
       void getAttempt(detail.attemptId)
         .then((value) => {
+          if (listenerGeneration !== sessionGenerationRef.current) return;
           const attempt = toReadyAttempt(value);
           if (detail.attemptIndex === 1) {
             setFirst(attempt);
@@ -275,10 +293,23 @@ function Practice() {
     };
   }, [sessionId]);
   useEffect(() => {
-    if (mode !== "api" || recorder.status !== "idle") return;
-    const draft = queuedItems
-      .filter((item) => item.syncStatus === "recorded-unsent")
+    if (mode !== "api" || recorderStatus !== "idle") return;
+    const latestDraft = queuedItems
+      .filter(
+        (item) =>
+          item.syncStatus === "recorded-unsent" &&
+          !ignoredDraftIdsRef.current.has(item.clientAttemptId),
+      )
       .sort((a, b) => b.createdAt - a.createdAt)[0];
+    const draft = queuedItems
+      .filter(
+        (item) =>
+          item.syncStatus === "recorded-unsent" &&
+          item.lang === lang &&
+          !ignoredDraftIdsRef.current.has(item.clientAttemptId),
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!draft && latestDraft) return;
     if (!draft || restoredDraftRef.current === draft.clientAttemptId) return;
     restoredDraftRef.current = draft.clientAttemptId;
     interruptedAttemptIdRef.current = draft.clientAttemptId;
@@ -291,22 +322,34 @@ function Practice() {
       const offset =
         (draftPromptIndex - baseIndex + languagePrompts.length) % languagePrompts.length;
       setPromptOffset(offset);
+      setRestoredDraftPrompt(null);
+    } else {
+      setRestoredDraftPrompt({
+        id: draft.promptId,
+        lang: draft.lang,
+        scenario: "Restored recording",
+        situation: "Original prompt is no longer available.",
+        question: draft.promptText ?? "Original prompt is no longer available.",
+        hints: [],
+        seconds: Math.max(1, Math.ceil(draft.duration)),
+      });
     }
     setStep(draft.attemptIndex === 2 ? "record2" : "record");
-    recorder.restore({ blob: draft.blob, durationSec: draft.duration, mimeType: draft.mimeType });
+    restoreRecording({ blob: draft.blob, durationSec: draft.duration, mimeType: draft.mimeType });
     setInterruptedDraftPending(true);
     setError("Restored your unsubmitted recording from this device.");
-  }, [baseIndex, languagePrompts, mode, queuedItems, recorder.restore, recorder.status]);
+  }, [baseIndex, lang, languagePrompts, mode, queuedItems, recorderStatus, restoreRecording]);
   useEffect(() => {
     setBusy(
-      recorder.status === "recording" ||
-        recorder.status === "recorded" ||
+      recorderStatus === "recording" ||
+        recorderStatus === "saving-draft" ||
+        recorderStatus === "recorded" ||
         step === "processing" ||
         step === "processing2",
       "practice",
     );
     return () => setBusy(false, "practice");
-  }, [recorder.status, setBusy, step]);
+  }, [recorderStatus, setBusy, step]);
 
   if (!ready) {
     return (
@@ -319,7 +362,7 @@ function Practice() {
     );
   }
 
-  if (!state.onboarded || !state.lang || !prompt) {
+  if (!state.onboarded || !state.lang || !activePrompt) {
     return (
       <div className="min-h-screen">
         <AppHeader />
@@ -336,7 +379,7 @@ function Practice() {
 
   const beginSession = async () => {
     setError(null);
-    if (!prompt) {
+    if (!activePrompt) {
       setError("No prompts are available for this language yet.");
       return;
     }
@@ -345,7 +388,7 @@ function Practice() {
       const clientSessionId = clientSessionIdRef.current ?? crypto.randomUUID();
       clientSessionIdRef.current = clientSessionId;
       try {
-        const session = await createSession(prompt.id, clientSessionId);
+        const session = await createSession(activePrompt.id, clientSessionId);
         setSessionId(session.id);
       } catch (cause) {
         // Offline is not a blocker: the session is created from the same
@@ -369,7 +412,7 @@ function Practice() {
     setStep(index === 1 ? "processing" : "processing2");
     const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
     try {
-      if (!prompt) throw new Error("No prompt is selected.");
+      if (!activePrompt) throw new Error("No prompt is selected.");
       let attempt: Attempt;
       if (mode === "api") {
         if (!sessionId && !clientSessionIdRef.current) {
@@ -379,7 +422,7 @@ function Practice() {
           throw new Error("A real microphone recording is required in API mode.");
         }
         const resolvedSessionId =
-          sessionId ?? (await createSession(prompt.id, clientSessionIdRef.current!)).id;
+          sessionId ?? (await createSession(activePrompt.id, clientSessionIdRef.current!)).id;
         if (resolvedSessionId !== sessionId) setSessionId(resolvedSessionId);
         attempt = toReadyAttempt(
           await createAttempt(resolvedSessionId, {
@@ -391,7 +434,7 @@ function Practice() {
         );
       } else {
         // Demo feedback is deterministic sample data even if the browser captured a local blob.
-        attempt = await analyzeAttempt(prompt, index, recorder.seconds || 32, true);
+        attempt = await analyzeAttempt(activePrompt, index, recorder.seconds || 32, true);
       }
       const refreshAfterSuccess = () => {
         if (mode !== "api") return;
@@ -406,7 +449,7 @@ function Practice() {
           recordSession({
             id: sessionId ?? `s-${Date.now()}`,
             lang,
-            promptId: prompt.id,
+            promptId: activePrompt.id,
             date: todayIso(),
             first: attempt.feedback.overall,
             second: null,
@@ -421,7 +464,7 @@ function Practice() {
           recordSession({
             id: sessionId ?? `s-${Date.now()}`,
             lang,
-            promptId: prompt.id,
+            promptId: activePrompt.id,
             date: todayIso(),
             first: first?.feedback.overall ?? attempt.feedback.overall,
             second: attempt.feedback.overall,
@@ -435,7 +478,7 @@ function Practice() {
         mode === "api" &&
         isOfflineFailure(cause) &&
         clientSessionIdRef.current &&
-        prompt &&
+        activePrompt &&
         recorder.audioBlob
       ) {
         try {
@@ -446,7 +489,8 @@ function Practice() {
             clientAttemptId,
             sessionId,
             clientSessionId: clientSessionIdRef.current,
-            promptId: prompt.id,
+            promptId: activePrompt.id,
+            promptText: activePrompt.question,
             lang,
             attemptIndex: index,
             duration: recorder.seconds || 1,
@@ -471,6 +515,7 @@ function Practice() {
       return;
     }
     if (mode === "api") {
+      ignoredDraftIdsRef.current.add(clientAttemptId);
       await deleteRecording(clientAttemptId).catch(() => {
         setError("Feedback is ready, but the local recording could not be cleared yet.");
       });
@@ -499,6 +544,13 @@ function Practice() {
   const pendingQueueItems = queuedItems.filter((item) => item.syncStatus !== "ready");
   const failedQueueItems = queuedItems.filter((item) => item.syncStatus === "failed");
   const readyQueueItems = queuedItems.filter((item) => item.syncStatus === "ready");
+  const alternateDraftLangs = Array.from(
+    new Set(
+      queuedItems
+        .filter((item) => item.syncStatus === "recorded-unsent" && item.lang !== lang)
+        .map((item) => item.lang),
+    ),
+  );
 
   return (
     <div className="min-h-screen">
@@ -533,13 +585,28 @@ function Practice() {
                 Retry upload
               </Button>
             ) : null}
+            {step === "prompt"
+              ? alternateDraftLangs.map((draftLang) => (
+                  <Button
+                    key={draftLang}
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setError(null);
+                      setLang(draftLang);
+                    }}
+                  >
+                    Recover {draftLang === "ja" ? "Japanese" : "English"} draft
+                  </Button>
+                ))
+              : null}
           </div>
         ) : null}
 
         <div className="mt-6 space-y-6">
           {step === "prompt" ? (
             <>
-              <PromptCard prompt={prompt} mode={mode} />
+              <PromptCard prompt={activePrompt} mode={mode} />
               <div className="flex flex-wrap items-center gap-3">
                 <Button
                   size="lg"
@@ -551,7 +618,10 @@ function Practice() {
                 </Button>
                 <Button
                   variant="ghost"
-                  onClick={() => setPromptOffset((o) => o + 1)}
+                  onClick={() => {
+                    setRestoredDraftPrompt(null);
+                    setPromptOffset((o) => o + 1);
+                  }}
                   className="text-muted-foreground"
                 >
                   <RefreshCw className="size-4" aria-hidden />
@@ -563,7 +633,7 @@ function Practice() {
 
           {step === "record" || step === "record2" ? (
             <>
-              <PromptCard prompt={prompt} compact mode={mode} />
+              <PromptCard prompt={activePrompt} compact mode={mode} />
               {step === "record2" && first ? (
                 <div className="rounded-2xl border border-primary/40 bg-primary/8 px-4 py-3">
                   <p className="text-sm font-semibold">Second take — focus on this:</p>
@@ -576,7 +646,7 @@ function Practice() {
               ) : null}
               <RecordControls
                 recorder={recorder}
-                targetSeconds={prompt.seconds}
+                targetSeconds={activePrompt.seconds}
                 submitLabel={step === "record" ? "Get feedback" : "See my improvement"}
                 onSubmit={() => void submit(step === "record" ? 1 : 2)}
                 mode={mode}
@@ -584,6 +654,7 @@ function Practice() {
                 savedDraft={interruptedDraftPending}
                 onDiscardDraft={async () => {
                   const id = interruptedAttemptIdRef.current;
+                  if (id) ignoredDraftIdsRef.current.add(id);
                   if (id) await deleteRecording(id);
                   interruptedAttemptIdRef.current = null;
                   restoredDraftRef.current = null;
@@ -627,7 +698,13 @@ function Practice() {
                 Try again with these fixes
                 <ArrowRight className="size-5" aria-hidden />
               </Button>
-              <Button variant="outline" size="lg" className="h-14 rounded-full px-6" asChild>
+              <Button
+                variant="outline"
+                size="lg"
+                className="h-14 rounded-full px-6"
+                asChild
+                onClick={resetCurrentSession}
+              >
                 <Link to="/">Finish for now</Link>
               </Button>
             </div>
@@ -642,8 +719,7 @@ function Practice() {
                   setFirst(null);
                   setSecond(null);
                   setPromptOffset((o) => o + 1);
-                  setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
-                  interruptedAttemptIdRef.current = null;
+                  resetCurrentSession();
                   recorder.reset();
                   setStep("prompt");
                 }}

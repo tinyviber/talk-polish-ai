@@ -20,7 +20,8 @@ let alwaysInvalidFeedback = false;
 let tempDir = "";
 let realtimeServer: ReturnType<typeof Bun.serve>;
 let realtimeUrl = "";
-let transcriptionForm: FormData | undefined;
+let transcriptionForm:
+  { get: (name: string) => unknown; getAll: (name: string) => unknown[] } | undefined;
 let speechRequests = 0;
 
 beforeAll(async () => {
@@ -48,7 +49,16 @@ beforeAll(async () => {
         transcriptionForm = await request.formData();
         return Response.json({
           text: "real transcript",
-          segments: [{ id: 0, start: 0, end: 1, text: "real transcript", confidence: 0.8 }],
+          segments: [
+            {
+              id: "seg_0",
+              start: 0,
+              end: 1,
+              text: "real transcript",
+              speaker: "A",
+              confidence: 0.8,
+            },
+          ],
           words: [{ word: "real", start: 0, end: 0.4, confidence: 0.9 }],
           confidence: 0.8,
         });
@@ -180,7 +190,7 @@ describe("OpenAI-compatible HTTP fixtures", () => {
       {
         baseUrl,
         apiKey: "fixture-key",
-        model: "fixture-transcribe",
+        model: "gpt-4o-transcribe-diarize",
         timeoutMs: 2_000,
         maxAttempts: 2,
       },
@@ -196,7 +206,9 @@ describe("OpenAI-compatible HTTP fixtures", () => {
     expect(result.text).toBe("real transcript");
     expect(result.transcription?.confidence).toBe(0.8);
     expect(result.transcription?.wordTimestamps?.[0]?.word).toBe("real");
-    expect(transcriptionForm?.get("response_format")).toBe("json");
+    expect(result.transcription?.segments?.[0]).toMatchObject({ id: "seg_0", speaker: "A" });
+    expect(transcriptionForm?.get("response_format")).toBe("diarized_json");
+    expect(transcriptionForm?.get("chunking_strategy")).toBe("auto");
     expect(transcriptionForm?.getAll("timestamp_granularities[]")).toEqual([]);
   });
 
@@ -221,7 +233,7 @@ describe("OpenAI-compatible HTTP fixtures", () => {
       responseFormat: "json",
       timestampGranularities: [],
     });
-    expect(transcriptionCapability("custom", "diarized_json").responseFormat).toBe("diarized_json");
+    expect(transcriptionCapability("custom", "verbose_json").responseFormat).toBe("verbose_json");
   });
 
   test("caches TTS bytes in storage and returns stable object reference", async () => {

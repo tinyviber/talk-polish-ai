@@ -64,6 +64,9 @@ export function createOpenAICompatibleTranscriptionProvider(
           form.set("language", langCode(input.lang));
           const capability = transcriptionCapability(config.model!, config.responseFormat);
           form.set("response_format", capability.responseFormat);
+          if (capability.responseFormat === "diarized_json") {
+            form.set("chunking_strategy", "auto");
+          }
           for (const granularity of capability.timestampGranularities) {
             form.append("timestamp_granularities[]", granularity);
           }
@@ -157,10 +160,13 @@ function parseSegments(value: unknown) {
     const source = item as Record<string, unknown>;
     return [
       {
-        ...(typeof source.id === "number" ? { id: source.id } : {}),
+        ...(typeof source.id === "number" || typeof source.id === "string"
+          ? { id: source.id }
+          : {}),
         ...(typeof source.start === "number" ? { start: source.start } : {}),
         ...(typeof source.end === "number" ? { end: source.end } : {}),
         ...(typeof source.text === "string" ? { text: source.text } : {}),
+        ...(typeof source.speaker === "string" ? { speaker: source.speaker } : {}),
         ...(typeof source.confidence === "number"
           ? { confidence: clampConfidence(source.confidence) }
           : {}),

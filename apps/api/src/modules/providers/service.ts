@@ -1,13 +1,9 @@
-import { and, eq } from "drizzle-orm";
 import type { Env } from "../../env";
 import {
   type ProviderDiagnostics,
   type RealtimeSmokeResponse,
   type SynthesisRequest,
 } from "@kotoba/contracts";
-import { db } from "../../db/client";
-import { audioRecordings, speakingAttempts } from "../../db/schema";
-import { withDb } from "../../http/with-db";
 import { ApiError } from "../../http/errors";
 import { providers, type Providers } from "../../providers";
 import { diagnoseProviders } from "../../providers/diagnostics";
@@ -16,6 +12,7 @@ import { StorageError } from "../../providers/storage";
 import { issueAudioReference, resolveAudioReference } from "./audio-references";
 import { enforceProviderRateLimit } from "./rate-limit";
 import { removeOrQueueStorage } from "../../db/storage-cleanup";
+import { providerRepository } from "./repository";
 
 export type ProviderApplication = ReturnType<typeof createProviderApplication>;
 
@@ -26,7 +23,12 @@ export function createProviderApplication(config: Env, providerSet: Providers = 
       return diagnoseProviders(requestId, config.DIAGNOSTICS_ACTIVE_PROBE, config, providerSet);
     },
 
-    async synthesize(learnerId: string, input: SynthesisRequest, requestId: string, clientIp?: string) {
+    async synthesize(
+      learnerId: string,
+      input: SynthesisRequest,
+      requestId: string,
+      clientIp?: string,
+    ) {
       enforceProviderRateLimit(learnerId, "tts", clientIp);
       try {
         const result = await providerSet.tts.synthesize({ ...input, scope: learnerId });
@@ -57,22 +59,13 @@ export function createProviderApplication(config: Env, providerSet: Providers = 
             provider: result.provider,
           },
         };
-      } catch (error) {
-        throw ApiError.processingUnavailable(
-          `Text-to-speech is temporarily unavailable (${safeProviderError(error)}).`,
-        );
+      } catch {
+        throw ApiError.processingUnavailable("Text-to-speech is temporarily unavailable.");
       }
     },
 
     async playbackRecording(learnerId: string, audioId: string) {
-      const rows = await withDb("loadAudioForPlayback", () =>
-        db()
-          .select({ storageKey: audioRecordings.storageKey, mimeType: audioRecordings.mimeType })
-          .from(audioRecordings)
-          .innerJoin(speakingAttempts, eq(speakingAttempts.audioId, audioRecordings.id))
-          .where(and(eq(audioRecordings.id, audioId), eq(speakingAttempts.learnerId, learnerId))),
-      );
-      const audio = rows[0];
+      const audio = await providerRepository.findRecordingForLearner(learnerId, audioId);
       if (!audio) throw ApiError.notFound("Audio");
       return readAudio(providerSet, audio.storageKey, audio.mimeType);
     },

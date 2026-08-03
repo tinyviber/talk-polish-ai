@@ -3,26 +3,18 @@ import {
   MAX_AUDIO_BYTES,
   SUPPORTED_AUDIO_MIME_TYPES,
   feedbackSchema,
+  transcriptionMetadataSchema,
   type Attempt,
   type CreateAttemptFields,
 } from "@kotoba/contracts";
-import { and, eq } from "drizzle-orm";
-import { db } from "../../db/client";
-import {
-  attemptResults,
-  audioRecordings,
-  practiceSessions,
-  progressEvents,
-  speakingAttempts,
-} from "../../db/schema";
 import { ApiError } from "../../http/errors";
-import { withDb } from "../../http/with-db";
 import { providers } from "../../providers";
 import { StorageError } from "../../providers/storage";
 import { getAttempt } from "../sessions/service";
 import { requirePrompt } from "../prompts/service";
 import { enforceProviderRateLimit } from "../providers/rate-limit";
 import { removeOrQueueStorage } from "../../db/storage-cleanup";
+import { attemptRepository } from "./repository";
 
 export type UploadedAudio = {
   buffer: Buffer;
@@ -70,39 +62,21 @@ export async function createAttempt(
   audio: UploadedAudio | null,
   clientIp?: string,
 ): Promise<Attempt> {
-  const sessionRows = await withDb("loadSessionForAttempt", () =>
-    db().select().from(practiceSessions).where(eq(practiceSessions.id, sessionId)),
-  );
-  const session = sessionRows[0];
+  const session = await attemptRepository.findSession(sessionId);
   if (!session) throw ApiError.notFound("Practice session");
   if (session.learnerId !== learnerId) {
     throw ApiError.notFound("Practice session for this learner");
   }
-  if (!audio && !fields.mocked) throw ApiError.missingAudio();
+  // Demo mode is client-only. Never let an API caller fabricate a successful
+  // attempt by setting the legacy `mocked` form field without an audio Blob.
+  if (!audio) throw ApiError.missingAudio();
 
   const prompt = await requirePrompt(session.promptId);
   const attemptIndex = fields.attemptIndex === 2 ? 2 : 1;
   const attemptId = `att_${randomUUID()}`;
   const clientAttemptId = fields.clientAttemptId;
   if (clientAttemptId) {
-    const existingByClient = await withDb("findIdempotentAttempt", () =>
-      db()
-        .select({
-          id: speakingAttempts.id,
-          status: speakingAttempts.status,
-          sessionId: speakingAttempts.sessionId,
-          attemptIndex: speakingAttempts.attemptIndex,
-          createdAt: speakingAttempts.createdAt,
-        })
-        .from(speakingAttempts)
-        .where(
-          and(
-            eq(speakingAttempts.learnerId, learnerId),
-            eq(speakingAttempts.clientAttemptId, clientAttemptId),
-          ),
-        ),
-    );
-    const existing = existingByClient[0];
+    const existing = await attemptRepository.findByClientId(learnerId, clientAttemptId);
     if (existing && (existing.sessionId !== sessionId || existing.attemptIndex !== attemptIndex)) {
       throw ApiError.conflict("clientAttemptId is already used for another attempt.");
     }
@@ -116,14 +90,15 @@ export async function createAttempt(
       return getAttempt(existing.id, learnerId);
     }
   }
-  const { storage, transcription, assessment } = providers();
-  if (transcription.name !== "mock-transcription" || assessment.name !== "mock-assessment") {
-    enforceProviderRateLimit(learnerId, "attempt", clientIp);
-  }
+  const {
+    storage,
+    transcription: transcriptionProvider,
+    assessment: assessmentProvider,
+  } = providers();
+  enforceProviderRateLimit(learnerId, "attempt", clientIp);
 
   let audioId: string | null = null;
   let storageKey: string | null = null;
-  const reclaimedStorageKeys: string[] = [];
   if (audio) {
     const mime = assertSupportedAudio(audio);
     const ext = EXTENSIONS[mime] ?? "bin";
@@ -141,125 +116,53 @@ export async function createAttempt(
   }
 
   try {
-    await withDb("insertAttempt", () =>
-      db().transaction(async (tx) => {
-        const existing = await tx
-          .select({
-            id: speakingAttempts.id,
-            clientAttemptId: speakingAttempts.clientAttemptId,
-            attemptIndex: speakingAttempts.attemptIndex,
-            status: speakingAttempts.status,
-            createdAt: speakingAttempts.createdAt,
-            audioId: speakingAttempts.audioId,
-          })
-          .from(speakingAttempts)
-          .where(eq(speakingAttempts.sessionId, sessionId));
-        const sameIndex = existing.find((row) => row.attemptIndex === attemptIndex);
-        if (attemptIndex === 2) {
-          const firstAttempt = existing.find(
-            (row) => row.attemptIndex === 1 && row.status === "ready",
-          );
-          if (!firstAttempt) {
-            throw ApiError.conflict("Attempt 1 must be ready before recording attempt 2.");
-          }
-        }
-        if (sameIndex) {
-          const staleProcessing =
-            sameIndex.status === "processing" &&
-            Date.now() - sameIndex.createdAt.getTime() >= STALE_PROCESSING_MS;
-          const recoverable = sameIndex.status === "failed" || staleProcessing;
-          if (!recoverable) {
-            throw ApiError.conflict(`Attempt ${attemptIndex} already exists for this session.`);
-          }
-
-          if (sameIndex.audioId) {
-            const audioRows = await tx
-              .select({ storageKey: audioRecordings.storageKey })
-              .from(audioRecordings)
-              .where(eq(audioRecordings.id, sameIndex.audioId));
-            if (audioRows[0]) reclaimedStorageKeys.push(audioRows[0].storageKey);
-            await tx.delete(audioRecordings).where(eq(audioRecordings.id, sameIndex.audioId));
-          }
-          await tx.delete(speakingAttempts).where(eq(speakingAttempts.id, sameIndex.id));
-        }
-
-        if (storageKey && audio) {
-          audioId = `aud_${randomUUID()}`;
-          await tx.insert(audioRecordings).values({
-            id: audioId,
-            storageKey,
-            mimeType: audio.mimeType.split(";")[0]!.trim().toLowerCase(),
-            sizeBytes: audio.buffer.byteLength,
-            durationSec: fields.durationSec,
-          });
-        }
-        await tx.insert(speakingAttempts).values({
-          id: attemptId,
-          sessionId,
-          learnerId,
-          attemptIndex,
-          clientAttemptId,
-          status: "processing",
-          durationSec: fields.durationSec,
-          mocked: audio === null,
-          audioId,
-        });
-      }),
-    );
+    const inserted = await attemptRepository.insertProcessing({
+      attemptId,
+      sessionId,
+      learnerId,
+      attemptIndex,
+      clientAttemptId: clientAttemptId ?? null,
+      durationSec: fields.durationSec,
+      mocked: false,
+      storageKey,
+      audio: audio ? { buffer: audio.buffer, mimeType: audio.mimeType } : null,
+    });
+    audioId = inserted.audioId;
+    for (const reclaimedKey of inserted.reclaimedStorageKeys) {
+      await removeOrQueueStorage(storage, reclaimedKey, "reclaimed-attempt");
+    }
   } catch (error) {
     if (clientAttemptId) {
       try {
-        const raced = await withDb("recoverIdempotentAttemptRace", () =>
-          db()
-            .select({
-              id: speakingAttempts.id,
-              sessionId: speakingAttempts.sessionId,
-              attemptIndex: speakingAttempts.attemptIndex,
-            })
-            .from(speakingAttempts)
-            .where(
-              and(
-                eq(speakingAttempts.learnerId, learnerId),
-                eq(speakingAttempts.clientAttemptId, clientAttemptId),
-              ),
-            ),
-        );
-        if (raced[0]) {
-          if (raced[0].sessionId !== sessionId || raced[0].attemptIndex !== attemptIndex) {
+        const raced = await attemptRepository.findRaced(learnerId, clientAttemptId);
+        if (raced) {
+          if (raced.sessionId !== sessionId || raced.attemptIndex !== attemptIndex) {
             if (storageKey) await removeOrQueueStorage(storage, storageKey, "idempotent-mismatch");
             throw ApiError.conflict("clientAttemptId is already used for another attempt.");
           }
           if (storageKey) await removeOrQueueStorage(storage, storageKey, "idempotent-retry");
-          return getAttempt(raced[0].id, learnerId);
+          return getAttempt(raced.id, learnerId);
         }
       } catch (raceError) {
         if (raceError instanceof ApiError) throw raceError;
       }
     }
-    if (isUniqueViolation(error)) {
-      if (storageKey) await removeOrQueueStorage(storage, storageKey, "attempt-index-race");
-      throw ApiError.conflict(`Attempt ${attemptIndex} already exists for this session.`);
-    }
     if (storageKey) await removeOrQueueStorage(storage, storageKey, "attempt-db-failed");
     throw error;
-  }
-
-  for (const reclaimedKey of reclaimedStorageKeys) {
-    await removeOrQueueStorage(storage, reclaimedKey, "reclaimed-attempt");
   }
 
   try {
     const audioRef = audio
       ? { storageKey: storageKey!, mimeType: audio.mimeType, bytes: audio.buffer.byteLength }
       : null;
-    const transcript = await transcription.transcribe({
+    const transcript = await transcriptionProvider.transcribe({
       lang: prompt.lang,
       promptId: prompt.id,
       attemptIndex,
       durationSec: fields.durationSec,
       audio: audioRef,
     });
-    const assessed = await assessment.assess({
+    const assessed = await assessmentProvider.assess({
       transcript: transcript.text,
       prompt,
       lang: prompt.lang,
@@ -277,39 +180,28 @@ export async function createAttempt(
       throw ApiError.processingUnavailable("Speech assessment returned invalid feedback.");
     }
 
-    await withDb("persistAttemptResult", () =>
-      db().transaction(async (tx) => {
-        await tx.insert(attemptResults).values({
-          attemptId,
-          transcript: transcript.text,
-          transcriptionProvider: transcript.provider,
-          transcription: transcript.transcription,
-          assessmentProvider: assessed.provider,
-          overallScore: feedback.overall,
-          feedback,
-        });
-        await tx
-          .update(speakingAttempts)
-          .set({ status: "ready" })
-          .where(eq(speakingAttempts.id, attemptId));
-        await tx.insert(progressEvents).values({
-          id: `prg_${randomUUID()}`,
-          learnerId,
-          sessionId,
-          attemptIndex,
-          score: feedback.overall,
-          day: new Date().toISOString().slice(0, 10),
-        });
-      }),
-    );
+    const transcription =
+      transcript.transcription === undefined || transcript.transcription === null
+        ? null
+        : transcriptionMetadataSchema.safeParse(transcript.transcription);
+    if (transcription && !transcription.success) {
+      throw ApiError.processingUnavailable("Speech transcription returned invalid metadata.");
+    }
+    await attemptRepository.persistResult({
+      attemptId,
+      learnerId,
+      sessionId,
+      attemptIndex,
+      transcript: transcript.text,
+      transcriptionProvider: transcript.provider,
+      transcription: transcription ? transcription.data : null,
+      assessmentProvider: assessed.provider,
+      overallScore: feedback.overall,
+      feedback,
+    });
   } catch (error) {
     try {
-      await withDb("cleanupFailedAttempt", () =>
-        db().transaction(async (tx) => {
-          await tx.delete(speakingAttempts).where(eq(speakingAttempts.id, attemptId));
-          if (audioId) await tx.delete(audioRecordings).where(eq(audioRecordings.id, audioId));
-        }),
-      );
+      await attemptRepository.removeAttempt(attemptId, audioId);
     } catch (cleanupError) {
       // If the delete cannot run, a failed marker makes the unique attempt slot
       // reclaimable on the next request once PostgreSQL is back.
@@ -318,16 +210,9 @@ export async function createAttempt(
         cleanupError instanceof Error ? cleanupError.message : cleanupError,
       );
       try {
-        await withDb("markAttemptFailed", () =>
-          db()
-            .update(speakingAttempts)
-            .set({ status: "failed", audioId: null })
-            .where(eq(speakingAttempts.id, attemptId)),
-        );
+        await attemptRepository.markFailed(attemptId);
         if (audioId) {
-          await withDb("cleanupFailedAudioMetadata", () =>
-            db().delete(audioRecordings).where(eq(audioRecordings.id, audioId!)),
-          ).catch((metadataError) => {
+          await attemptRepository.removeAudioMetadata(audioId).catch((metadataError) => {
             console.error(
               "[db] failed-audio metadata cleanup deferred:",
               metadataError instanceof Error ? metadataError.message : metadataError,
@@ -351,10 +236,4 @@ export async function createAttempt(
   }
 
   return getAttempt(attemptId, learnerId);
-}
-
-function isUniqueViolation(error: unknown) {
-  if (typeof error !== "object" || error === null) return false;
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } };
-  return candidate.code === "23505" || candidate.cause?.code === "23505";
 }

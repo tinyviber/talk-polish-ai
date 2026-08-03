@@ -81,6 +81,15 @@ function errorMessage(error: unknown) {
     : "Something went wrong. Please try again.";
 }
 
+/** Network-level failures are recoverable offline; API 4xx/5xx are not. */
+function isOfflineFailure(error: unknown) {
+  return (
+    (error instanceof ApiClientError && error.status === 0) ||
+    (typeof navigator !== "undefined" && !navigator.onLine)
+  );
+}
+
+
 function Stepper({ step }: { step: Step }) {
   const active = STEP_INDEX[step];
   return (

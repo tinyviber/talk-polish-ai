@@ -1,12 +1,7 @@
 import type { Lang } from "./types";
 
 export type QueueStatus =
-  | "local-draft"
-  | "queued"
-  | "uploading"
-  | "processing"
-  | "ready"
-  | "failed";
+  "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed";
 export type RecordingQueueItem = {
   /** Learner namespace; prevents a later token/device from reading old blobs. */
   learnerId: string;
@@ -39,18 +34,29 @@ export function recoverQueueStatus(status: QueueStatus): QueueStatus {
 
 const DB_NAME = "kotoba-loop-offline";
 const STORE = "recordings";
-const DB_VERSION = 2;
+const LEASE_STORE = "syncLeases";
+const DB_VERSION = 3;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
+const LEASE_MS = 30_000;
 const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
 let queueChannel: BroadcastChannel | null = null;
+let syncOwnerId: string | null = null;
+
+function ensureQueueChannel() {
+  if (typeof BroadcastChannel === "undefined") return null;
+  queueChannel ??= new BroadcastChannel("kotoba-loop-recording-queue");
+  queueChannel.onmessage ??= () => {
+    listeners.forEach((listener) => listener());
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:queue-change"));
+  };
+  return queueChannel;
+}
 
 function broadcastChange() {
-  if (typeof BroadcastChannel === "undefined") return;
-  queueChannel ??= new BroadcastChannel("kotoba-loop-recording-queue");
-  queueChannel.postMessage({ type: "queue-change" });
+  ensureQueueChannel()?.postMessage({ type: "queue-change" });
 }
 
 function notify() {
@@ -87,10 +93,11 @@ function openDb(): Promise<IDBDatabase> {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const existed = request.result.objectStoreNames.contains(STORE);
-      if (!existed) {
-        request.result.createObjectStore(STORE, { keyPath: "clientAttemptId" });
-        return;
+      if (!existed) request.result.createObjectStore(STORE, { keyPath: "clientAttemptId" });
+      if (!request.result.objectStoreNames.contains(LEASE_STORE)) {
+        request.result.createObjectStore(LEASE_STORE, { keyPath: "learnerId" });
       }
+      if (!existed) return;
       // v1 items had no learner namespace. Keep their bytes isolated and
       // visible only to cleanup, rather than ever uploading them as another
       // learner after a token/device change.
@@ -209,7 +216,9 @@ export async function markRecordingReady(
   clientAttemptId: string,
   input: { sessionId?: string; attemptId: string },
 ) {
-  const item = (await allItems()).find((candidate) => candidate.clientAttemptId === clientAttemptId);
+  const item = (await allItems()).find(
+    (candidate) => candidate.clientAttemptId === clientAttemptId,
+  );
   if (!item) return;
   await put({
     ...item,
@@ -222,7 +231,9 @@ export async function markRecordingReady(
 }
 
 export async function markRecordingFailed(clientAttemptId: string, message: string) {
-  const item = (await allItems()).find((candidate) => candidate.clientAttemptId === clientAttemptId);
+  const item = (await allItems()).find(
+    (candidate) => candidate.clientAttemptId === clientAttemptId,
+  );
   if (!item) return;
   await put({ ...item, syncStatus: "failed", lastError: message });
 }
@@ -239,6 +250,7 @@ export async function listRecordingQueue(learnerId?: string) {
 
 export function subscribeRecordingQueue(listener: () => void) {
   listeners.add(listener);
+  ensureQueueChannel();
   return () => {
     listeners.delete(listener);
   };
@@ -265,6 +277,52 @@ export type QueueUploadResult = {
 };
 
 let syncInFlight: Promise<void> | null = null;
+
+function getSyncOwnerId() {
+  syncOwnerId ??=
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `sync-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+  return syncOwnerId;
+}
+
+async function acquireSyncLease(learnerId: string) {
+  const db = await openDb();
+  const ownerId = getSyncOwnerId();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(LEASE_STORE, "readwrite");
+    const store = tx.objectStore(LEASE_STORE);
+    let acquired = false;
+    const request = store.get(learnerId);
+    request.onsuccess = () => {
+      const current = request.result as
+        { learnerId: string; ownerId: string; expiresAt: number } | undefined;
+      if (current && current.ownerId !== ownerId && current.expiresAt > Date.now()) return;
+      store.put({ learnerId, ownerId, expiresAt: Date.now() + LEASE_MS });
+      acquired = true;
+    };
+    tx.oncomplete = () => resolve(acquired);
+    tx.onerror = () => reject(tx.error ?? new Error("Could not acquire recording sync lease."));
+    tx.onabort = () => reject(tx.error ?? new Error("Could not acquire recording sync lease."));
+  });
+}
+
+async function releaseSyncLease(learnerId: string) {
+  const db = await openDb();
+  const ownerId = getSyncOwnerId();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(LEASE_STORE, "readwrite");
+    const store = tx.objectStore(LEASE_STORE);
+    const request = store.get(learnerId);
+    request.onsuccess = () => {
+      const current = request.result as { ownerId?: string } | undefined;
+      if (current?.ownerId === ownerId) store.delete(learnerId);
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error("Could not release recording sync lease."));
+    tx.onabort = () => reject(tx.error ?? new Error("Could not release recording sync lease."));
+  });
+}
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -315,7 +373,10 @@ export async function syncRecordingQueue(
     );
     const readySessionKeys = new Set(
       (await allItems())
-        .filter((item) => item.learnerId === learnerId && item.attemptIndex === 1 && item.syncStatus === "ready")
+        .filter(
+          (item) =>
+            item.learnerId === learnerId && item.attemptIndex === 1 && item.syncStatus === "ready",
+        )
         .map((item) => item.clientSessionId),
     );
     for (const item of items) {
@@ -340,8 +401,10 @@ export async function syncRecordingQueue(
             ? { blob: new Blob([], { type: withoutError.mimeType }), blobDiscarded: true }
             : {}),
         });
-        if (attempt.status === "ready" && typeof window !== "undefined") {
+        if (attempt.status === "ready") {
           if (item.attemptIndex === 1) readySessionKeys.add(item.clientSessionId);
+        }
+        if (attempt.status === "ready" && typeof window !== "undefined") {
           window.dispatchEvent(
             new CustomEvent("kotoba:queue-ready", {
               detail: {
@@ -369,10 +432,20 @@ export async function syncRecordingQueue(
     }
   };
   const runWithCrossTabLease = async () => {
+    if (!learnerId || typeof indexedDB === "undefined") return run();
+    const acquired = await acquireSyncLease(learnerId);
+    if (!acquired) return;
+    const runWithRelease = async () => {
+      try {
+        return await run();
+      } finally {
+        await releaseSyncLease(learnerId);
+      }
+    };
     const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-    if (!locks) return run();
+    if (!locks) return runWithRelease();
     return locks.request("kotoba-loop-recording-sync", { ifAvailable: true }, (lock) =>
-      lock ? run() : undefined,
+      lock ? runWithRelease() : releaseSyncLease(learnerId),
     );
   };
   syncInFlight = runWithCrossTabLease().finally(() => {

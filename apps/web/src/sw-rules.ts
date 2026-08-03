@@ -13,11 +13,12 @@ export function isNetworkOnlyPath(url: URL) {
   return url.pathname.startsWith("/api/") || url.pathname.startsWith("/realtime/");
 }
 
-export function isPublicNavigationRequest(request: Request, url: URL) {
+export function isPublicNavigationRequest(request: Request, url: URL, origin = url.origin) {
   return (
     request.mode === "navigate" &&
     !request.headers.has("authorization") &&
     !request.headers.has("cookie") &&
+    url.origin === origin &&
     !isNetworkOnlyPath(url)
   );
 }

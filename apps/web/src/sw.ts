@@ -31,7 +31,7 @@ const navigation = new NetworkFirst({
 });
 
 registerRoute(
-  ({ request, url }) => isPublicNavigationRequest(request, url),
+  ({ request, url }) => isPublicNavigationRequest(request, url, self.location.origin),
   async ({ event, request }) => {
     try {
       const response = await navigation.handle({ event, request });

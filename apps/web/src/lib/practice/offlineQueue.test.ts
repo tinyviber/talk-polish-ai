@@ -40,9 +40,24 @@ describe("offline recording queue boundaries", () => {
       mimeType: "audio/webm",
       blob: new Blob(["audio"], { type: "audio/webm" }),
     };
-    const second = { ...base, clientAttemptId: "b", attemptIndex: 2 as const, createdAt: 2, syncStatus: "queued" as const };
-    const first = { ...base, clientAttemptId: "a", attemptIndex: 1 as const, createdAt: 1, syncStatus: "queued" as const };
-    expect(orderRecordingQueue([second, first]).map((item) => item.clientAttemptId)).toEqual(["a", "b"]);
+    const second = {
+      ...base,
+      clientAttemptId: "b",
+      attemptIndex: 2 as const,
+      createdAt: 2,
+      syncStatus: "queued" as const,
+    };
+    const first = {
+      ...base,
+      clientAttemptId: "a",
+      attemptIndex: 1 as const,
+      createdAt: 1,
+      syncStatus: "queued" as const,
+    };
+    expect(orderRecordingQueue([second, first]).map((item) => item.clientAttemptId)).toEqual([
+      "a",
+      "b",
+    ]);
     expect(canSyncAttempt(second, [first, second])).toBe(false);
     expect(canSyncAttempt(second, [{ ...first, syncStatus: "ready" }])).toBe(true);
   });

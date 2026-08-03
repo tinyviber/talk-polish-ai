@@ -22,7 +22,6 @@ import {
 } from "@kotoba/contracts";
 import { apiBaseUrl } from "./mode";
 
-const TOKEN_KEY = "kotoba.api.token.v1";
 const DEVICE_KEY = "kotoba.api.device.v1";
 
 function readStorage(key: string) {
@@ -61,7 +60,9 @@ function learnerIdFromToken(value: string | null) {
   }
 }
 
-let token: string | null = readStorage(TOKEN_KEY);
+// Bearer tokens stay in memory. A reload bootstraps the same anonymous learner
+// from the durable device id instead of exposing credentials to localStorage.
+let token: string | null = null;
 let deviceId: string | null = readStorage(DEVICE_KEY);
 let learnerId: string | null = learnerIdFromToken(token);
 let lastBootstrapLang: Lang | null = null;
@@ -217,7 +218,6 @@ async function bootstrapLearnerOnce(lang: Lang | null) {
   token = response.token;
   learnerId = response.learner.id;
   lastBootstrapLang = response.learner.lang;
-  writeStorage(TOKEN_KEY, token);
   if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:learner-ready"));
   return response.learner;
 }

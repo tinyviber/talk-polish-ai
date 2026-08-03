@@ -37,10 +37,7 @@ export const initialPracticeState: PracticeState = {
 };
 
 /** Pure practice workflow transition. Side effects stay in route/application adapters. */
-export function reducePracticeState(
-  state: PracticeState,
-  event: PracticeEvent,
-): PracticeState {
+export function reducePracticeState(state: PracticeState, event: PracticeEvent): PracticeState {
   switch (event.type) {
     case "begin":
       return { ...state, stage: "record", error: null };

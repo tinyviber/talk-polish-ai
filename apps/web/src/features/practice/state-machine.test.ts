@@ -1,9 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  initialPracticeState,
-  reducePracticeState,
-  transitionTo,
-} from "./state-machine";
+import { initialPracticeState, reducePracticeState, transitionTo } from "./state-machine";
 
 describe("practice state machine", () => {
   test("requires first ready attempt before second feedback state", () => {

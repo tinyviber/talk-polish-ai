@@ -26,7 +26,10 @@ type WakeLockSentinelLike = {
 
 /** MediaRecorder wrapper with mobile interruption-safe finalization. */
 export function useRecorder({ mode = "demo", onInterruptedRecording }: Options = {}) {
-  const [state, setState] = useState<RecorderState>({
+  /** iOS emits short mute/unmute pairs; wait before treating one as fatal. */
+const MUTE_GRACE_MS = 1500;
+
+const [state, setState] = useState<RecorderState>({
     status: "idle",
     seconds: 0,
     level: 0,
@@ -317,10 +320,24 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
           void stopRef.current("track-interrupted", true);
       };
       stream.getTracks().forEach((track) => {
-        track.addEventListener("mute", interrupt);
+        // iOS briefly mutes the track for notifications and route changes.
+        // Only a mute that persists is a real interruption; ending the take on
+        // the transient one truncated otherwise healthy recordings.
+        let muteTimer: ReturnType<typeof setTimeout> | undefined;
+        const onMute = () => {
+          clearTimeout(muteTimer);
+          muteTimer = setTimeout(() => {
+            if (track.muted) interrupt();
+          }, MUTE_GRACE_MS);
+        };
+        const onUnmute = () => clearTimeout(muteTimer);
+        track.addEventListener("mute", onMute);
+        track.addEventListener("unmute", onUnmute);
         track.addEventListener("ended", interrupt);
         trackCleanupRef.current.push(() => {
-          track.removeEventListener("mute", interrupt);
+          clearTimeout(muteTimer);
+          track.removeEventListener("mute", onMute);
+          track.removeEventListener("unmute", onUnmute);
           track.removeEventListener("ended", interrupt);
         });
       });
@@ -333,12 +350,10 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
           ctxRef.current = ctx;
           ctx.onstatechange = () => {
             const audioState = ctx.state as string;
-            if (
-              audioState === "interrupted" ||
-              audioState === "closed" ||
-              audioState === "suspended"
-            )
-              interrupt();
+            // `suspended` is a normal AudioContext state on mobile (autoplay
+            // policy, backgrounding) and does not stop the MediaRecorder, so
+            // it must not abort the take.
+            if (audioState === "interrupted" || audioState === "closed") interrupt();
           };
           // Analyser setup is only a level-meter enhancement. A suspended or
           // unavailable AudioContext must never cancel a valid MediaRecorder.

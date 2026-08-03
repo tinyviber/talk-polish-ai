@@ -7,13 +7,12 @@ import {
   validatorCompiler,
 } from "fastify-type-provider-zod";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { env } from "./env";
+import { env, type Env } from "./env";
 import { closeDatabase } from "./db/client";
 import { ApiError, toErrorResponse } from "./http/errors";
 import { registerRoutes } from "./routes";
 
-export async function buildApp() {
-  const config = env();
+export async function buildApp(config: Env = env()) {
   const app = Fastify({
     // Caddy/Nginx is the only trusted proxy in production. Enable this only
     // when the proxy overwrites X-Forwarded-For; never trust client headers.
@@ -95,7 +94,7 @@ export async function buildApp() {
     reply.status(internal.statusCode).send(toErrorResponse(internal, request.id));
   });
 
-  await registerRoutes(app);
+  await registerRoutes(app, config);
   app.addHook("onClose", async () => {
     await closeDatabase();
   });

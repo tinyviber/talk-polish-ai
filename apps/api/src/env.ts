@@ -6,6 +6,7 @@ import { z } from "zod";
  */
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  APP_VERSION: z.string().min(1).default("0.1.0"),
   PORT: z.coerce.number().int().positive().default(3333),
   HOST: z.string().default("0.0.0.0"),
   /** Enable only when a trusted reverse proxy overwrites forwarding headers. */
@@ -74,7 +75,10 @@ let cached: Env | undefined;
 
 export function env(): Env {
   if (!cached) {
-    const parsed = envSchema.safeParse(process.env);
+    const parsed = envSchema.safeParse({
+      ...process.env,
+      APP_VERSION: process.env.APP_VERSION ?? process.env.npm_package_version ?? "0.1.0",
+    });
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
       throw new Error(`Invalid API environment configuration:\n  ${issues.join("\n  ")}`);
@@ -137,6 +141,11 @@ export function env(): Env {
     cached = parsed.data;
   }
   return cached;
+}
+
+/** Test-only seam for processes that deliberately change configuration before boot. */
+export function resetEnvForTests() {
+  cached = undefined;
 }
 
 function assertProviderUrl(name: string, value: string, production: boolean) {

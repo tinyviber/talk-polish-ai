@@ -14,12 +14,13 @@ import { progressRoutes } from "./modules/progress/routes";
 import { promptRoutes } from "./modules/prompts/routes";
 import { sessionRoutes } from "./modules/sessions/routes";
 import { providerRoutes } from "./modules/providers/routes";
+import type { Env } from "./env";
 
-export async function registerRoutes(app: FastifyInstance) {
+export async function registerRoutes(app: FastifyInstance, config: Env) {
   const health = async (request: { id: string }) => ({
     status: "ok" as const,
     uptimeSec: Math.round(process.uptime() * 10) / 10,
-    version: process.env.npm_package_version ?? "0.1.0",
+    version: config.APP_VERSION,
     database: (await pingDatabase()) ? ("up" as const) : ("down" as const),
     requestId: request.id,
   });
@@ -27,7 +28,7 @@ export async function registerRoutes(app: FastifyInstance) {
   const liveness = async (request: { id: string }) => ({
     status: "ok" as const,
     uptimeSec: Math.round(process.uptime() * 10) / 10,
-    version: process.env.npm_package_version ?? "0.1.0",
+    version: config.APP_VERSION,
     requestId: request.id,
   });
 
@@ -75,5 +76,5 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(attemptRoutes);
   await app.register(expressionRoutes);
   await app.register(progressRoutes);
-  await app.register(providerRoutes);
+  await app.register(providerRoutes, { config });
 }

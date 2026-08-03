@@ -3,13 +3,15 @@ import { pingDatabase } from "../db/client";
 import { env } from "../env";
 import { safeProviderError } from "./http";
 import { providers } from "./index";
+import type { Providers } from "./index";
+import type { Env } from "../env";
 
 export async function diagnoseProviders(
   requestId: string,
   activeProbe = false,
+  config = env(),
+  current = providers(config),
 ): Promise<ProviderDiagnostics> {
-  const config = env();
-  const current = providers();
   const checkedAt = new Date().toISOString();
   const databaseUp = await pingDatabase();
   const database: ProviderCapability = {
@@ -58,7 +60,7 @@ export async function diagnoseProviders(
       checkedAt,
       current.tts.probe,
     ),
-    realtime: await realtimeCapability(current.realtime, activeProbe, checkedAt),
+    realtime: await realtimeCapability(current.realtime, activeProbe, checkedAt, config),
   };
 }
 
@@ -82,16 +84,17 @@ async function capability(
 }
 
 async function realtimeCapability(
-  realtime: ReturnType<typeof providers>["realtime"],
+  realtime: Providers["realtime"],
   activeProbe: boolean,
   checkedAt: string,
+  config: Env,
 ): Promise<ProviderCapability> {
   if (!realtime.configured) {
     return {
-      status: env().REALTIME_FEATURE_ENABLED ? "failed" : "unsupported",
+      status: config.REALTIME_FEATURE_ENABLED ? "failed" : "unsupported",
       provider: realtime.name,
       checkedAt,
-      ...(env().REALTIME_FEATURE_ENABLED ? { errorCode: "configuration" } : {}),
+      ...(config.REALTIME_FEATURE_ENABLED ? { errorCode: "configuration" } : {}),
     };
   }
   try {

@@ -1,11 +1,8 @@
 import type { Lang, Prompt } from "@kotoba/contracts";
-import { asc, eq } from "drizzle-orm";
-import { db } from "../../db/client";
-import { prompts } from "../../db/schema";
 import { ApiError } from "../../http/errors";
-import { withDb } from "../../http/with-db";
+import { promptRepository, type PromptRow } from "./repository";
 
-type Row = typeof prompts.$inferSelect;
+type Row = PromptRow;
 
 const toPrompt = (row: Row): Prompt => ({
   id: row.id,
@@ -19,19 +16,12 @@ const toPrompt = (row: Row): Prompt => ({
 });
 
 export async function listPrompts(lang?: Lang): Promise<Prompt[]> {
-  const rows = await withDb("listPrompts", () =>
-    lang
-      ? db().select().from(prompts).where(eq(prompts.lang, lang)).orderBy(asc(prompts.sortOrder))
-      : db().select().from(prompts).orderBy(asc(prompts.sortOrder)),
-  );
+  const rows = await promptRepository.list(lang);
   return rows.map(toPrompt);
 }
 
 export async function requirePrompt(id: string): Promise<Prompt> {
-  const rows = await withDb("requirePrompt", () =>
-    db().select().from(prompts).where(eq(prompts.id, id)),
-  );
-  const row = rows[0];
+  const row = await promptRepository.findById(id);
   if (!row) throw ApiError.notFound("Prompt");
   return toPrompt(row);
 }

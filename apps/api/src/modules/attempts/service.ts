@@ -6,7 +6,7 @@ import {
   type Attempt,
   type CreateAttemptFields,
 } from "@kotoba/contracts";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../../db/client";
 import {
   attemptResults,
@@ -83,6 +83,39 @@ export async function createAttempt(
   const prompt = await requirePrompt(session.promptId);
   const attemptIndex = fields.attemptIndex === 2 ? 2 : 1;
   const attemptId = `att_${randomUUID()}`;
+  const clientAttemptId = fields.clientAttemptId;
+  if (clientAttemptId) {
+    const existingByClient = await withDb("findIdempotentAttempt", () =>
+      db()
+        .select({
+          id: speakingAttempts.id,
+          status: speakingAttempts.status,
+          sessionId: speakingAttempts.sessionId,
+          attemptIndex: speakingAttempts.attemptIndex,
+          createdAt: speakingAttempts.createdAt,
+        })
+        .from(speakingAttempts)
+        .where(
+          and(
+            eq(speakingAttempts.learnerId, learnerId),
+            eq(speakingAttempts.clientAttemptId, clientAttemptId),
+          ),
+        ),
+    );
+    const existing = existingByClient[0];
+    if (existing && (existing.sessionId !== sessionId || existing.attemptIndex !== attemptIndex)) {
+      throw ApiError.conflict("clientAttemptId is already used for another attempt.");
+    }
+    // Network retries return the same processing/ready/failed record. A failed
+    // record is intentionally reclaimed below so an explicit retry can reuse
+    // the same durable client key without creating duplicates.
+    const staleProcessing =
+      existing?.status === "processing" &&
+      Date.now() - existing.createdAt.getTime() >= STALE_PROCESSING_MS;
+    if (existing && existing.status !== "failed" && !staleProcessing) {
+      return getAttempt(existing.id, learnerId);
+    }
+  }
   const { storage, transcription, assessment } = providers();
   if (transcription.name !== "mock-transcription" || assessment.name !== "mock-assessment") {
     enforceProviderRateLimit(learnerId, "attempt", clientIp);
@@ -113,6 +146,7 @@ export async function createAttempt(
         const existing = await tx
           .select({
             id: speakingAttempts.id,
+            clientAttemptId: speakingAttempts.clientAttemptId,
             attemptIndex: speakingAttempts.attemptIndex,
             status: speakingAttempts.status,
             createdAt: speakingAttempts.createdAt,
@@ -164,6 +198,7 @@ export async function createAttempt(
           sessionId,
           learnerId,
           attemptIndex,
+          clientAttemptId,
           status: "processing",
           durationSec: fields.durationSec,
           mocked: audio === null,
@@ -172,6 +207,39 @@ export async function createAttempt(
       }),
     );
   } catch (error) {
+    if (clientAttemptId) {
+      try {
+        const raced = await withDb("recoverIdempotentAttemptRace", () =>
+          db()
+            .select({
+              id: speakingAttempts.id,
+              sessionId: speakingAttempts.sessionId,
+              attemptIndex: speakingAttempts.attemptIndex,
+            })
+            .from(speakingAttempts)
+            .where(
+              and(
+                eq(speakingAttempts.learnerId, learnerId),
+                eq(speakingAttempts.clientAttemptId, clientAttemptId),
+              ),
+            ),
+        );
+        if (raced[0]) {
+          if (raced[0].sessionId !== sessionId || raced[0].attemptIndex !== attemptIndex) {
+            if (storageKey) await removeOrQueueStorage(storage, storageKey, "idempotent-mismatch");
+            throw ApiError.conflict("clientAttemptId is already used for another attempt.");
+          }
+          if (storageKey) await removeOrQueueStorage(storage, storageKey, "idempotent-retry");
+          return getAttempt(raced[0].id, learnerId);
+        }
+      } catch (raceError) {
+        if (raceError instanceof ApiError) throw raceError;
+      }
+    }
+    if (isUniqueViolation(error)) {
+      if (storageKey) await removeOrQueueStorage(storage, storageKey, "attempt-index-race");
+      throw ApiError.conflict(`Attempt ${attemptIndex} already exists for this session.`);
+    }
     if (storageKey) await removeOrQueueStorage(storage, storageKey, "attempt-db-failed");
     throw error;
   }
@@ -283,4 +351,10 @@ export async function createAttempt(
   }
 
   return getAttempt(attemptId, learnerId);
+}
+
+function isUniqueViolation(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; cause?: { code?: unknown } };
+  return candidate.code === "23505" || candidate.cause?.code === "23505";
 }

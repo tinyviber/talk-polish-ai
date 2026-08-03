@@ -90,7 +90,8 @@ describe("persisted practice journey", () => {
     const session = sessionResponse.json().session;
 
     const audio = Buffer.from("deterministic integration audio");
-    const firstUpload = multipart({ attemptIndex: "1", durationSec: "12" }, audio);
+    const clientAttemptId = `client-${crypto.randomUUID()}`;
+    const firstUpload = multipart({ clientAttemptId, attemptIndex: "1", durationSec: "12" }, audio);
     const firstResponse = await app.inject({
       method: "POST",
       url: `/api/sessions/${session.id}/attempts`,
@@ -106,6 +107,32 @@ describe("persisted practice journey", () => {
     expect(first.audio.playbackUrl).toBe(`/api/audio/recordings/${first.audio.id}`);
     expect(first.audio).not.toHaveProperty("storageKey");
     expect(first.feedback).toBeTruthy();
+
+    // A lost response followed by the same multipart upload must return the
+    // existing attempt, not create another audio object or progress event.
+    const replayUpload = multipart(
+      { clientAttemptId, attemptIndex: "1", durationSec: "12" },
+      audio,
+    );
+    const replayResponse = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/attempts`,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": replayUpload.contentType,
+      },
+      payload: replayUpload.body,
+    });
+    expect(replayResponse.statusCode).toBe(200);
+    expect(replayResponse.json().attempt.id).toBe(first.id);
+
+    const recoveredSession = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${session.id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(recoveredSession.statusCode).toBe(200);
+    expect(recoveredSession.json().session.attempts).toHaveLength(1);
 
     const secondUpload = multipart({ attemptIndex: "2", durationSec: "12" }, audio);
     const secondResponse = await app.inject({

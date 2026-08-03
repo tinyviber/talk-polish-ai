@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, RefreshCw, ArrowRight, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,9 +17,26 @@ import { ImprovementCard } from "@/components/practice/ImprovementCard";
 import { ExpressionRow } from "@/components/practice/ExpressionRow";
 import { ScoreBar, ScoreDial } from "@/components/practice/ScoreDial";
 import { usePracticeStore, todayIso } from "@/lib/practice/store";
-import { useRecorder } from "@/lib/practice/useRecorder";
+import { useRecorder, type RecorderDraft } from "@/lib/practice/useRecorder";
 import { analyzeAttempt } from "@/lib/practice/mockServices";
-import { createAttempt, createSession, toReadyAttempt } from "@/lib/practice/api";
+import {
+  ApiClientError,
+  createAttempt,
+  createSession,
+  getAttempt,
+  getLearnerId,
+  toReadyAttempt,
+  uploadQueuedAttempt,
+} from "@/lib/practice/api";
+import {
+  enqueueRecording,
+  listRecordingQueue,
+  retryQueuedRecordings,
+  subscribeRecordingQueue,
+  syncRecordingQueue,
+  type RecordingQueueItem,
+} from "@/lib/practice/offlineQueue";
+import { usePwa } from "@/lib/pwa";
 import type { Attempt, ScoreKey } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
 
@@ -127,7 +144,6 @@ function Practice() {
     refresh,
     switchToDemo,
   } = usePracticeStore();
-  const recorder = useRecorder({ mode });
   const [step, setStep] = useState<Step>("prompt");
   const [first, setFirst] = useState<Attempt | null>(null);
   const [second, setSecond] = useState<Attempt | null>(null);
@@ -137,6 +153,9 @@ function Practice() {
   const [promptOffset, setPromptOffset] = useState(0);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [interruptedDraftPending, setInterruptedDraftPending] = useState(false);
+  const { setBusy } = usePwa();
+  const interruptedAttemptIdRef = useRef<string | null>(null);
 
   const lang = state.lang ?? "en";
   const languagePrompts = useMemo(
@@ -147,6 +166,93 @@ function Practice() {
   const [baseIndex] = useState(() => state.sessions.filter((s) => s.lang === lang).length);
   const prompt = languagePrompts[(baseIndex + promptOffset) % Math.max(1, languagePrompts.length)];
   const jp = lang === "ja";
+  const saveInterruptedDraft = useCallback(
+    async (draft: RecorderDraft) => {
+      if (mode !== "api" || !sessionId || !prompt) return;
+      const learnerId = getLearnerId();
+      if (!learnerId) {
+        setError("Your learner session is not ready; the interrupted take was not queued.");
+        return;
+      }
+      const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
+      interruptedAttemptIdRef.current = clientAttemptId;
+      // Keep this separate from recorder.status: the latter becomes recorded
+      // before the asynchronous IndexedDB write finishes.
+      setBusy(true, "draft-save");
+      try {
+        await enqueueRecording({
+          learnerId,
+          clientAttemptId,
+          sessionId,
+          promptId: prompt.id,
+          lang,
+          attemptIndex: step === "record2" ? 2 : 1,
+          duration: draft.durationSec,
+          mimeType: draft.mimeType,
+          blob: draft.blob,
+          createdAt: Date.now(),
+        });
+        setInterruptedDraftPending(true);
+        setError(
+          "Your interrupted recording was saved on this device and will upload when you reconnect.",
+        );
+      } finally {
+        setBusy(false, "draft-save");
+      }
+    },
+    [lang, mode, prompt, sessionId, setBusy, step],
+  );
+  const recorder = useRecorder({ mode, onInterruptedRecording: saveInterruptedDraft });
+  const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
+  useEffect(() => {
+    const refreshQueue = () =>
+      void listRecordingQueue(getLearnerId() ?? undefined)
+        .then(setQueuedItems)
+        .catch(() => {});
+    refreshQueue();
+    const unsubscribe = subscribeRecordingQueue(refreshQueue);
+    const onLearnerReady = () => refreshQueue();
+    const onQueueReady = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          learnerId: string;
+          sessionId: string;
+          attemptIndex: 1 | 2;
+          attemptId: string;
+        }>
+      ).detail;
+      if (!detail || detail.learnerId !== getLearnerId() || detail.sessionId !== sessionId) return;
+      void getAttempt(detail.attemptId)
+        .then((value) => {
+          const attempt = toReadyAttempt(value);
+          if (detail.attemptIndex === 1) {
+            setFirst(attempt);
+            setStep("feedback");
+          } else {
+            setSecond(attempt);
+            setStep("result");
+          }
+          interruptedAttemptIdRef.current = null;
+          setInterruptedDraftPending(false);
+          setError(null);
+        })
+        .catch((cause) => setError(errorMessage(cause)));
+    };
+    window.addEventListener("kotoba:learner-ready", onLearnerReady);
+    window.addEventListener("kotoba:queue-ready", onQueueReady);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("kotoba:learner-ready", onLearnerReady);
+      window.removeEventListener("kotoba:queue-ready", onQueueReady);
+    };
+  }, [sessionId]);
+  useEffect(() => {
+    setBusy(
+      recorder.status === "recording" || step === "processing" || step === "processing2",
+      "practice",
+    );
+    return () => setBusy(false, "practice");
+  }, [recorder.status, setBusy, step]);
 
   if (!ready) {
     return (
@@ -198,6 +304,7 @@ function Practice() {
   const submit = async (index: 1 | 2) => {
     setError(null);
     setStep(index === 1 ? "processing" : "processing2");
+    const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
     try {
       if (!prompt) throw new Error("No prompt is selected.");
       let attempt: Attempt;
@@ -208,6 +315,7 @@ function Practice() {
         }
         attempt = toReadyAttempt(
           await createAttempt(sessionId, {
+            clientAttemptId,
             index,
             durationSec: recorder.seconds || 1,
             audio: recorder.audioBlob,
@@ -255,14 +363,69 @@ function Practice() {
         }
       }
     } catch (cause) {
+      if (
+        mode === "api" &&
+        ((cause instanceof ApiClientError && cause.status === 0) ||
+          (typeof navigator !== "undefined" && !navigator.onLine)) &&
+        sessionId &&
+        prompt &&
+        recorder.audioBlob
+      ) {
+        try {
+          const learnerId = getLearnerId();
+          if (!learnerId) throw new Error("Learner session is unavailable.");
+          await enqueueRecording({
+            learnerId,
+            clientAttemptId,
+            sessionId,
+            promptId: prompt.id,
+            lang,
+            attemptIndex: index,
+            duration: recorder.seconds || 1,
+            mimeType: recorder.audioBlob.type || "audio/webm",
+            blob: recorder.audioBlob,
+            createdAt: Date.now(),
+          });
+          setError(
+            "Offline: recording saved on this device. It will upload automatically when online.",
+          );
+          interruptedAttemptIdRef.current = clientAttemptId;
+          setInterruptedDraftPending(true);
+          setStep(index === 1 ? "record" : "record2");
+          recorder.reset();
+          return;
+        } catch {
+          /* surface the original error below */
+        }
+      }
       setError(errorMessage(cause));
       setStep(index === 1 ? "record" : "record2");
       return;
     }
+    interruptedAttemptIdRef.current = null;
+    setInterruptedDraftPending(false);
     recorder.reset();
   };
 
+  const retryOffline = async () => {
+    const learnerId = getLearnerId();
+    if (!learnerId) return;
+    await retryQueuedRecordings(learnerId);
+    setBusy(true, "queue");
+    try {
+      await syncRecordingQueue(async (item) => {
+        const attempt = await uploadQueuedAttempt(item);
+        return { id: attempt.id, status: attempt.status };
+      }, learnerId);
+    } finally {
+      setBusy(false, "queue");
+    }
+  };
+
   const current = second ?? first;
+  const pendingQueueItems = queuedItems.filter((item) => item.syncStatus !== "ready");
+  const failedQueueItems = queuedItems.filter((item) => item.syncStatus === "failed");
+  const readyQueueItems = queuedItems.filter((item) => item.syncStatus === "ready");
 
   return (
     <div className="min-h-screen">
@@ -274,6 +437,28 @@ function Practice() {
           <p className="mt-4 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {error ?? storeError}
           </p>
+        ) : null}
+        {queuedItems.length > 0 ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
+            <span className="flex-1">
+              {pendingQueueItems.length > 0
+                ? `${pendingQueueItems.length} recording(s) ${
+                    pendingQueueItems.some((item) => item.syncStatus === "uploading")
+                      ? "uploading"
+                      : pendingQueueItems.some((item) => item.syncStatus === "processing")
+                        ? "processing"
+                        : pendingQueueItems.some((item) => item.syncStatus === "queued")
+                          ? "waiting to upload"
+                          : "failed and ready to retry"
+                  }.`
+                : `${readyQueueItems.length} recording(s) uploaded successfully.`}
+            </span>
+            {failedQueueItems.length > 0 ? (
+              <Button size="sm" variant="outline" onClick={() => void retryOffline()}>
+                Retry upload
+              </Button>
+            ) : null}
+          </div>
         ) : null}
 
         <div className="mt-6 space-y-6">
@@ -321,6 +506,7 @@ function Practice() {
                 onSubmit={() => void submit(step === "record" ? 1 : 2)}
                 mode={mode}
                 onUseDemo={switchToDemo}
+                savedDraft={interruptedDraftPending}
               />
             </>
           ) : null}
@@ -350,6 +536,7 @@ function Practice() {
                 size="lg"
                 className="h-14 rounded-full px-7 text-base shadow-tactile"
                 onClick={() => {
+                  interruptedAttemptIdRef.current = null;
                   recorder.reset();
                   setStep("record2");
                 }}
@@ -373,6 +560,7 @@ function Practice() {
                   setSecond(null);
                   setPromptOffset((o) => o + 1);
                   setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
+                  interruptedAttemptIdRef.current = null;
                   recorder.reset();
                   setStep("prompt");
                 }}

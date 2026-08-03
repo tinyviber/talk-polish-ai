@@ -42,16 +42,45 @@ function writeStorage(key: string, value: string) {
   }
 }
 
+// The learner id is only a local queue namespace. API authorization still
+// relies on the signed token and server verification below.
+function learnerIdFromToken(value: string | null) {
+  if (typeof window === "undefined" || !value) return null;
+  try {
+    const encoded = value.split(".")[1];
+    if (!encoded) return null;
+    const payload = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/"))) as unknown;
+    return payload &&
+      typeof payload === "object" &&
+      "sub" in payload &&
+      typeof payload.sub === "string"
+      ? payload.sub
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 let token: string | null = readStorage(TOKEN_KEY);
 let deviceId: string | null = readStorage(DEVICE_KEY);
+let learnerId: string | null = learnerIdFromToken(token);
 let lastBootstrapLang: Lang | null = null;
 const bootstrapInFlight = new Map<Lang | null, Promise<Learner>>();
 const REQUEST_TIMEOUT_MS = 30_000;
 const READ_RETRY_LIMIT = 2;
 
+/** Current learner namespace for local offline recordings. Never trust this as API auth. */
+export function getLearnerId() {
+  return learnerId;
+}
+
 /** Build same-origin API URLs; never attach bearer tokens to arbitrary origins. */
 export function apiUrl(path: string) {
-  const base = new URL(`${apiBaseUrl}/`);
+  const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  // Empty VITE_API_URL is same-origin. An explicit URL (including local
+  // development's http://localhost:3333) must stay absolute and is never
+  // accidentally prefixed with the current browser origin.
+  const base = apiBaseUrl ? new URL(`${apiBaseUrl}/`) : new URL("/", origin);
   const target = new URL(path, base);
   if (target.origin !== base.origin)
     throw new ApiClientError("Invalid API URL.", 0, "internal_error");
@@ -127,6 +156,7 @@ async function fetchWithRetry(
       });
       if (response.status === 401 && authenticated && !refreshAttempted) {
         token = null;
+        learnerId = null;
         await bootstrapLearner(lastBootstrapLang);
         return fetchWithRetry(path, init, authenticated, true);
       }
@@ -185,8 +215,10 @@ async function bootstrapLearnerOnce(lang: Lang | null) {
     false,
   );
   token = response.token;
+  learnerId = response.learner.id;
   lastBootstrapLang = response.learner.lang;
   writeStorage(TOKEN_KEY, token);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:learner-ready"));
   return response.learner;
 }
 
@@ -213,13 +245,14 @@ export async function getSession(id: string): Promise<PracticeSession> {
 
 export async function createAttempt(
   sessionId: string,
-  input: { index: 1 | 2; durationSec: number; audio: Blob | null },
+  input: { clientAttemptId: string; index: 1 | 2; durationSec: number; audio: Blob | null },
 ) {
   if (!token) await bootstrapLearner(null);
   const form = new FormData();
+  form.set("clientAttemptId", input.clientAttemptId);
   form.set("attemptIndex", String(input.index));
   form.set("durationSec", String(input.durationSec));
-  if (input.audio) form.set("audio", input.audio, "recording.webm");
+  if (input.audio) form.set("audio", input.audio, `recording.${audioExtension(input.audio.type)}`);
   else form.set("mocked", "true");
   return (
     await request(
@@ -228,6 +261,34 @@ export async function createAttempt(
       { method: "POST", body: form },
     )
   ).attempt;
+}
+
+export async function uploadQueuedAttempt(item: {
+  clientAttemptId: string;
+  sessionId: string;
+  attemptIndex: 1 | 2;
+  duration: number;
+  mimeType: string;
+  blob: Blob;
+  attemptId?: string;
+  syncStatus?: "queued" | "uploading" | "processing" | "ready" | "failed";
+}) {
+  if (item.syncStatus === "processing" && item.attemptId) return getAttempt(item.attemptId);
+  return createAttempt(item.sessionId, {
+    clientAttemptId: item.clientAttemptId,
+    index: item.attemptIndex,
+    durationSec: item.duration,
+    audio: item.blob,
+  });
+}
+
+function audioExtension(mimeType: string) {
+  const mime = mimeType.split(";")[0]?.toLowerCase();
+  if (mime === "audio/mp4" || mime === "audio/m4a") return "m4a";
+  if (mime === "audio/ogg") return "ogg";
+  if (mime === "audio/wav" || mime === "audio/x-wav") return "wav";
+  if (mime === "audio/mpeg") return "mp3";
+  return "webm";
 }
 
 export async function getAttempt(id: string) {

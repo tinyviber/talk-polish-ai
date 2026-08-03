@@ -13,6 +13,10 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { PracticeStoreProvider } from "../lib/practice/store";
 import { Toaster } from "../components/ui/sonner";
+import { PwaProvider, usePwa } from "../lib/pwa";
+import { getLearnerId } from "../lib/practice/api";
+import { syncRecordingQueue } from "../lib/practice/offlineQueue";
+import { uploadQueuedAttempt } from "../lib/practice/api";
 
 function NotFoundComponent() {
   return (
@@ -78,7 +82,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
   head: () => ({
     meta: [
       { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
       { title: "Kotoba Loop — speaking practice" },
       {
         name: "description",
@@ -90,6 +94,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         content: "Practice speaking English and Japanese out loud with instant, focused coaching.",
       },
       { property: "og:type", content: "website" },
+      { name: "theme-color", content: "#f7f1e5" },
+      { name: "application-name", content: "Kotoba Loop" },
+      { name: "apple-mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-status-bar-style", content: "default" },
+      { name: "apple-mobile-web-app-title", content: "Kotoba Loop" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Lovable" },
     ],
@@ -99,11 +108,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         href: appCss,
       },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
-      { rel: "preconnect", href: "https://fonts.googleapis.com" },
-      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
+      { rel: "manifest", href: "/manifest.webmanifest" },
       {
-        rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap",
+        rel: "apple-touch-icon",
+        href: "/apple-touch-icon-180.png",
+        sizes: "180x180",
+        type: "image/png",
       },
     ],
   }),
@@ -131,12 +141,45 @@ function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <PracticeStoreProvider>
-        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-        <Outlet />
-        <Toaster position="top-center" />
-      </PracticeStoreProvider>
-    </QueryClientProvider>
+    <PwaProvider>
+      <OfflineQueueSync />
+      <QueryClientProvider client={queryClient}>
+        <PracticeStoreProvider>
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+          <Toaster position="top-center" />
+        </PracticeStoreProvider>
+      </QueryClientProvider>
+    </PwaProvider>
   );
+}
+
+function OfflineQueueSync() {
+  const { setBusy } = usePwa();
+  useEffect(() => {
+    const sync = () => {
+      const learnerId = getLearnerId();
+      if (!learnerId) return;
+      setBusy(true, "queue");
+      void syncRecordingQueue(async (item) => {
+        const attempt = await uploadQueuedAttempt(item);
+        return { id: attempt.id, status: attempt.status };
+      }, learnerId).finally(() => setBusy(false, "queue"));
+    };
+    sync();
+    window.addEventListener("online", sync);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") sync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("kotoba:retry-queue", sync);
+    window.addEventListener("kotoba:learner-ready", sync);
+    return () => {
+      window.removeEventListener("online", sync);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("kotoba:retry-queue", sync);
+      window.removeEventListener("kotoba:learner-ready", sync);
+    };
+  }, [setBusy]);
+  return null;
 }

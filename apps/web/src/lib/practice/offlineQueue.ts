@@ -1,0 +1,282 @@
+import type { Lang } from "./types";
+
+export type QueueStatus = "queued" | "uploading" | "processing" | "ready" | "failed";
+export type RecordingQueueItem = {
+  /** Learner namespace; prevents a later token/device from reading old blobs. */
+  learnerId: string;
+  clientAttemptId: string;
+  sessionId: string;
+  promptId: string;
+  lang: Lang;
+  attemptIndex: 1 | 2;
+  duration: number;
+  mimeType: string;
+  blob: Blob;
+  createdAt: number;
+  syncStatus: QueueStatus;
+  attemptId?: string;
+  lastError?: string;
+};
+
+export function isQueueSyncCandidate(status: QueueStatus) {
+  return status === "queued" || status === "processing";
+}
+
+export function recoverQueueStatus(status: QueueStatus): QueueStatus {
+  return status === "uploading" ? "queued" : status;
+}
+
+const DB_NAME = "kotoba-loop-offline";
+const STORE = "recordings";
+const DB_VERSION = 2;
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_BYTES = 100 * 1024 * 1024;
+const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
+const listeners = new Set<() => void>();
+let dbPromise: Promise<IDBDatabase> | null = null;
+
+function notify() {
+  listeners.forEach((listener) => listener());
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:queue-change"));
+}
+
+function openDb(): Promise<IDBDatabase> {
+  if (typeof indexedDB === "undefined") {
+    return Promise.reject(new Error("IndexedDB unavailable"));
+  }
+  const existing = dbPromise;
+  if (existing) return existing;
+
+  const promise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const existed = request.result.objectStoreNames.contains(STORE);
+      if (!existed) {
+        request.result.createObjectStore(STORE, { keyPath: "clientAttemptId" });
+        return;
+      }
+      // v1 items had no learner namespace. Keep their bytes isolated and
+      // visible only to cleanup, rather than ever uploading them as another
+      // learner after a token/device change.
+      const store = request.transaction?.objectStore(STORE);
+      if (!store) return;
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+        const value = cursor.value as Record<string, unknown>;
+        if (!value["learnerId"]) {
+          cursor.update({
+            ...value,
+            learnerId: "legacy",
+            syncStatus: "failed",
+            lastError: "This recording needs to be re-recorded after the app update.",
+          });
+        }
+        cursor.continue();
+      };
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      // Let a newer tab upgrade the database instead of keeping the old
+      // connection open and blocking the migration forever.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      dbPromise = null;
+      reject(request.error ?? new Error("IndexedDB unavailable"));
+    };
+    request.onblocked = () => {
+      // Existing connections close themselves through onversionchange.
+      // Keep the request pending so the browser can complete the upgrade.
+    };
+  }).catch((error) => {
+    if (dbPromise === promise) dbPromise = null;
+    throw error;
+  });
+  dbPromise = promise;
+  return promise;
+}
+
+async function allItems() {
+  if (typeof indexedDB === "undefined") return [] as RecordingQueueItem[];
+  const db = await openDb();
+  return new Promise<RecordingQueueItem[]>((resolve, reject) => {
+    const request = db.transaction(STORE, "readonly").objectStore(STORE).getAll();
+    request.onsuccess = () => resolve(request.result as RecordingQueueItem[]);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function put(item: RecordingQueueItem) {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const request = db.transaction(STORE, "readwrite").objectStore(STORE).put(item);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  notify();
+}
+
+async function remove(clientAttemptId: string) {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const request = db.transaction(STORE, "readwrite").objectStore(STORE).delete(clientAttemptId);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  notify();
+}
+
+export async function cleanupRecordingQueue(now = Date.now()) {
+  const items = await allItems();
+  // Never silently delete a recording that still needs upload or processing.
+  const expired = items.filter(
+    (item) =>
+      now - item.createdAt > TTL_MS &&
+      (item.syncStatus === "ready" || item.syncStatus === "failed"),
+  );
+  for (const item of expired) await remove(item.clientAttemptId);
+}
+
+/** Recover a tab that was suspended after marking an item uploading. */
+export async function recoverInterruptedUploads() {
+  const items = await allItems();
+  for (const item of items.filter((candidate) => candidate.syncStatus === "uploading")) {
+    const { lastError: _lastError, ...withoutError } = item;
+    await put({ ...withoutError, syncStatus: recoverQueueStatus(item.syncStatus) });
+  }
+}
+
+export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStatus">) {
+  if (!input.learnerId || input.learnerId === "legacy") {
+    throw new Error("Learner session is unavailable; recording was not queued.");
+  }
+  await cleanupRecordingQueue();
+  const existing = await allItems();
+  const totalBytes = existing.reduce((sum, item) => sum + item.blob.size, 0);
+  if (totalBytes + input.blob.size > MAX_BYTES) {
+    throw new Error("Offline recording storage is full. Retry or remove an older recording first.");
+  }
+  await put({ ...input, syncStatus: "queued" });
+  return input.clientAttemptId;
+}
+
+export async function listRecordingQueue(learnerId?: string) {
+  if (!learnerId) return [] as RecordingQueueItem[];
+  return (await allItems()).filter((item) => item.learnerId === learnerId);
+}
+
+export function subscribeRecordingQueue(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export async function retryQueuedRecordings(learnerId?: string) {
+  if (!learnerId) return;
+  const items = (await allItems()).filter((item) => item.learnerId === learnerId);
+  await Promise.all(
+    items
+      .filter((item) => item.syncStatus === "failed")
+      .map((item) => {
+        const { lastError: _lastError, ...withoutError } = item;
+        return put({ ...withoutError, syncStatus: "queued" });
+      }),
+  );
+}
+
+let syncInFlight: Promise<void> | null = null;
+
+function wait(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientUploadError(error: unknown) {
+  const status =
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    typeof error.status === "number"
+      ? error.status
+      : undefined;
+  if (status === 0 || status === 408 || status === 429 || (status !== undefined && status >= 500))
+    return true;
+  const message = error instanceof Error ? error.message : "";
+  return error instanceof TypeError || /network|reach|offline|timeout|aborted/i.test(message);
+}
+
+async function uploadWithProcessingPoll(
+  item: RecordingQueueItem,
+  upload: (item: RecordingQueueItem) => Promise<{ id: string; status: QueueStatus }>,
+) {
+  let current = await upload(item);
+  for (const delay of PROCESSING_POLL_DELAYS_MS) {
+    if (current.status !== "processing") return current;
+    await wait(delay);
+    current = await upload({
+      ...item,
+      attemptId: current.id,
+      syncStatus: "processing",
+    });
+  }
+  return current;
+}
+
+export async function syncRecordingQueue(
+  upload: (item: RecordingQueueItem) => Promise<{ id: string; status: QueueStatus }>,
+  learnerId?: string,
+) {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = (async () => {
+    if (!learnerId || (typeof navigator !== "undefined" && !navigator.onLine)) return;
+    await recoverInterruptedUploads();
+    await cleanupRecordingQueue();
+    const items = (await allItems()).filter(
+      (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
+    );
+    for (const item of items) {
+      try {
+        const syncing = {
+          ...item,
+          syncStatus: item.syncStatus === "processing" ? "processing" : "uploading",
+        } as RecordingQueueItem;
+        await put(syncing);
+        const attempt = await uploadWithProcessingPoll(syncing, upload);
+        const { lastError: _lastError, ...withoutError } = syncing;
+        await put({ ...withoutError, attemptId: attempt.id, syncStatus: attempt.status });
+        if (attempt.status === "ready" && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("kotoba:queue-ready", {
+              detail: {
+                learnerId: item.learnerId,
+                clientAttemptId: item.clientAttemptId,
+                sessionId: item.sessionId,
+                attemptIndex: item.attemptIndex,
+                attemptId: attempt.id,
+              },
+            }),
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Upload failed";
+        // Network/5xx failures can resume automatically. Permanent 4xx and
+        // validation failures stay failed until the user explicitly retries.
+        await put({
+          ...item,
+          syncStatus: isTransientUploadError(error) ? "queued" : "failed",
+          lastError: message,
+        });
+        if (isTransientUploadError(error)) break;
+      }
+    }
+  })().finally(() => {
+    syncInFlight = null;
+  });
+  return syncInFlight;
+}

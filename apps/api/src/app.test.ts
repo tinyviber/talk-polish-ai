@@ -30,6 +30,8 @@ describe("API boundary", () => {
     const response = await app.inject({ method: "GET", url: "/api/progress" });
     expect(response.statusCode).toBe(401);
     expect(response.json().error.code).toBe("unauthorized");
+    expect(response.headers["cache-control"]).toBe("private, no-store");
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   test("returns a health response even when local postgres is down", async () => {

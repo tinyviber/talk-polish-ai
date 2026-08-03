@@ -41,6 +41,25 @@ docker compose --profile cleanup up -d storage-cleanup
 
 For demo mode, keep `VITE_APP_MODE=demo`. For the full flow, set `VITE_APP_MODE=api` and `VITE_API_URL=http://localhost:3333` before starting the web dev server. Vite variables are build-time values, so restart Vite after changing them.
 
+## PWA and production topology
+
+The web build uses one `vite-plugin-pwa` instance in `injectManifest` mode. It precaches hashed app assets, local fonts, icons, the manifest, and `offline.html`. Navigation is network-first with the app-owned offline page as fallback. Only unauthenticated `GET /api/prompts` has a bounded runtime cache; all other `/api` requests, every `Authorization` request, POST/multipart uploads, learner/session/attempt/progress/saved/TTS/audio/diagnostics/provider paths, and future `/realtime/*` traffic are network-only. Browser Cache Storage never receives recordings, feedback, or authenticated audio.
+
+In development, different ports are supported with `VITE_APP_MODE=api VITE_API_URL=http://localhost:3333`. In production, build with `VITE_APP_MODE=api` and leave `VITE_API_URL` empty so the client uses relative `/api` URLs. Put the TanStack Start server and Fastify behind one HTTPS origin:
+
+```text
+https://app.example.com/
+  /              -> TanStack Start web :3000
+  /api/*         -> Fastify :3333
+  /realtime/*    -> future WebSocket gateway
+```
+
+Use [`deploy/Caddyfile`](deploy/Caddyfile) or [`deploy/nginx.conf`](deploy/nginx.conf) as examples. The web build uses Nitro's `node-server` preset: run `bun run build:web`, then `bun --filter @kotoba/web start` on `:3000`; Nginx's `map` must be placed in `http {}`. HTTPS is required for microphone access, service workers, and iPhone installation. Keep `sw.js`, `manifest.webmanifest`, and `offline.html` revalidated; hashed assets, local fonts, and icons may be immutable. Apply migration `0006_client_attempt_idempotency.sql` before serving API traffic.
+
+Recordings use an IndexedDB outbox scoped by `learnerId`, with a client-generated `clientAttemptId`, prompt/session/language/attempt metadata, Blob, timestamp, and sync state. Startup after learner bootstrap, `online`, restored page visibility, and manual retry trigger foreground sync; Background Sync is intentionally not required. The API makes `(learnerId, clientAttemptId)` idempotent, so a lost response can be retried without creating another attempt or progress event. Pending recordings are bounded and never silently evicted; terminal metadata expires after seven days.
+
+On iPhone, use Safari Share → Add to Home Screen. The app ends a foreground recording when visibility, page, microphone-track, MediaRecorder, or AudioContext interruption occurs and best-effort saves the captured Blob as a recoverable draft; force-kill or OS suspension can still lose in-memory chunks. It does not claim reliable background or lock-screen recording. Wake Lock is best-effort. PWA updates are prompted and never auto-reload while recording, uploading, or processing. Web Push is not implemented yet.
+
 ## API
 
 The API is Fastify with one route registry in `apps/api/src/routes.ts`. All request and response shapes are Zod schemas from `packages/contracts`.

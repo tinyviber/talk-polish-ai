@@ -8,6 +8,8 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3333),
   HOST: z.string().default("0.0.0.0"),
+  /** Enable only when a trusted reverse proxy overwrites forwarding headers. */
+  TRUST_PROXY: envBoolean(false),
   DATABASE_URL: z.string().default("postgres://kotoba:kotoba@localhost:5432/kotoba"),
   /** Comma-separated list, or `*` for local development. */
   CORS_ORIGIN: z.string().default("*"),

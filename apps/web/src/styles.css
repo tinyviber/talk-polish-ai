@@ -2,6 +2,18 @@
 @source "../src";
 @import "tw-animate-css";
 
+@font-face {
+  font-family: "Kotoba Sans";
+  src: url("/fonts/KotobaSans.ttf") format("truetype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Kotoba Display";
+  src: url("/fonts/KotobaDisplay.ttf") format("truetype");
+  font-display: swap;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 /*
@@ -65,9 +77,10 @@
   --color-warn-foreground: var(--warn-foreground);
   --color-ink: var(--ink);
   --color-paper: var(--paper);
-  --font-display: "Fraunces", ui-serif, Georgia, serif;
-  --font-sans: "Plus Jakarta Sans", "Noto Sans JP", ui-sans-serif, system-ui, sans-serif;
-  --font-jp: "Noto Sans JP", "Plus Jakarta Sans", sans-serif;
+  --font-display: "Kotoba Display", "Fraunces", ui-serif, Georgia, serif;
+  --font-sans:
+    "Kotoba Sans", "Plus Jakarta Sans", "Noto Sans JP", ui-sans-serif, system-ui, sans-serif;
+  --font-jp: "Kotoba Sans", "Noto Sans JP", sans-serif;
   --shadow-tactile: 0 2px 0 0 var(--edge), 0 6px 18px -8px oklch(0.35 0.06 55 / 0.35);
   --shadow-lift: 0 1px 0 0 var(--edge), 0 18px 40px -24px oklch(0.35 0.06 55 / 0.45);
 }
@@ -160,6 +173,8 @@
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
   }
 }
 

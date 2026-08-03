@@ -12,8 +12,18 @@ describe("shared contracts", () => {
       createAnonymousLearnerRequestSchema.parse({ deviceId: "device-123456", lang: "ja" }),
     ).toEqual({ deviceId: "device-123456", lang: "ja" });
     expect(
-      createAttemptFieldsSchema.parse({ attemptIndex: "2", durationSec: "12", mocked: "false" }),
-    ).toEqual({ attemptIndex: 2, durationSec: 12, mocked: false });
+      createAttemptFieldsSchema.parse({
+        clientAttemptId: "client-attempt-123",
+        attemptIndex: "2",
+        durationSec: "12",
+        mocked: "false",
+      }),
+    ).toEqual({
+      clientAttemptId: "client-attempt-123",
+      attemptIndex: 2,
+      durationSec: 12,
+      mocked: false,
+    });
   });
 
   test("rejects invalid values and keeps error codes closed", () => {
@@ -41,6 +51,15 @@ describe("shared contracts", () => {
         stats: { words: 10, wpm: 80, fillers: 1, longestPause: "1s" },
       }),
     );
+  });
+
+  test("keeps the client attempt id stable in the multipart contract", () => {
+    const parsed = createAttemptFieldsSchema.parse({
+      clientAttemptId: "offline-client-attempt-1",
+      attemptIndex: "1",
+      durationSec: "4",
+    });
+    expect(parsed.clientAttemptId).toBe("offline-client-attempt-1");
   });
 
   test("rejects fractional feedback scores that cannot fit PostgreSQL integer columns", () => {

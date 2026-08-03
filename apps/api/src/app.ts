@@ -15,6 +15,9 @@ import { registerRoutes } from "./routes";
 export async function buildApp() {
   const config = env();
   const app = Fastify({
+    // Caddy/Nginx is the only trusted proxy in production. Enable this only
+    // when the proxy overwrites X-Forwarded-For; never trust client headers.
+    trustProxy: config.TRUST_PROXY ? true : ["127.0.0.1", "::1"],
     logger: {
       redact: {
         paths: [
@@ -32,6 +35,24 @@ export async function buildApp() {
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
+
+  app.addHook("onSend", async (request, reply) => {
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
+    reply.header("Permissions-Policy", "microphone=(self), camera=(), geolocation=()");
+    reply.header("Cross-Origin-Opener-Policy", "same-origin");
+    // Service Worker rules are the primary boundary, but the browser's HTTP
+    // cache must not retain learner-scoped JSON if the worker is bypassed.
+    const path = request.url.split("?", 1)[0] ?? request.url;
+    if (path.startsWith("/api/") || path.startsWith("/realtime/")) {
+      const publicPrompts =
+        request.method === "GET" && path === "/api/prompts" && !request.headers.authorization;
+      reply.header(
+        "Cache-Control",
+        publicPrompts ? "public, max-age=300, stale-while-revalidate=3600" : "private, no-store",
+      );
+    }
+  });
 
   await app.register(cors, {
     origin:

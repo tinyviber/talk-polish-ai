@@ -111,6 +111,7 @@ export function composeAttempt(
   }
   return {
     id: attempt.id,
+    ...(attempt.clientAttemptId ? { clientAttemptId: attempt.clientAttemptId } : {}),
     sessionId: attempt.sessionId,
     index: attempt.attemptIndex === 2 ? 2 : 1,
     status: attempt.status as AttemptStatus,

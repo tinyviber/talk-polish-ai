@@ -14,6 +14,7 @@
     "build": "bun --filter @kotoba/contracts build && bun --filter @kotoba/web build && bun --filter @kotoba/api build",
     "build:dev": "bun --filter @kotoba/web build:dev",
     "build:web": "bun --filter @kotoba/web build",
+    "start:web": "bun --filter @kotoba/web start",
     "build:api": "bun --filter @kotoba/api build",
     "lint": "eslint .",
     "typecheck": "bun --filter '*' typecheck",

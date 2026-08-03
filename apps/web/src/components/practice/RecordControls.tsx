@@ -38,6 +38,7 @@ export function RecordControls({
   submitLabel,
   mode,
   onUseDemo,
+  savedDraft = false,
 }: {
   recorder: RecorderState & {
     start: () => Promise<void>;
@@ -50,6 +51,7 @@ export function RecordControls({
   submitLabel: string;
   mode: AppMode;
   onUseDemo: () => void;
+  savedDraft?: boolean;
 }) {
   const { status, seconds, level, audioUrl, error } = recorder;
 
@@ -87,15 +89,21 @@ export function RecordControls({
 
           <div className="mt-4 flex flex-col items-center gap-3">
             {status === "idle" || status === "requesting" ? (
-              <Button
-                size="lg"
-                className="h-16 rounded-full px-8 text-base shadow-tactile"
-                onClick={() => void recorder.start()}
-                disabled={status === "requesting"}
-              >
-                <Mic className="size-5" aria-hidden />
-                {status === "requesting" ? "Waiting for mic…" : "Start recording"}
-              </Button>
+              savedDraft ? (
+                <p className="max-w-sm text-center text-sm text-muted-foreground">
+                  A saved take is waiting for upload. Retry it below before recording another take.
+                </p>
+              ) : (
+                <Button
+                  size="lg"
+                  className="h-16 rounded-full px-8 text-base shadow-tactile"
+                  onClick={() => void recorder.start()}
+                  disabled={status === "requesting"}
+                >
+                  <Mic className="size-5" aria-hidden />
+                  {status === "requesting" ? "Waiting for mic…" : "Start recording"}
+                </Button>
+              )
             ) : null}
 
             {status === "recording" ? (
@@ -114,10 +122,17 @@ export function RecordControls({
               <div className="flex w-full flex-col items-center gap-3">
                 <AudioPreview url={audioUrl} seconds={seconds} />
                 <div className="flex flex-wrap justify-center gap-2">
-                  <Button variant="outline" onClick={recorder.reset}>
-                    <RotateCcw className="size-4" aria-hidden />
-                    Record again
-                  </Button>
+                  {savedDraft ? (
+                    <p className="max-w-sm text-center text-xs text-muted-foreground">
+                      This interrupted take is saved with one upload ID. Submit it to avoid a
+                      duplicate attempt.
+                    </p>
+                  ) : (
+                    <Button variant="outline" onClick={recorder.reset}>
+                      <RotateCcw className="size-4" aria-hidden />
+                      Record again
+                    </Button>
+                  )}
                   <Button className="shadow-tactile" onClick={onSubmit}>
                     {submitLabel}
                   </Button>
@@ -144,6 +159,9 @@ export function AudioPreview({ url, seconds }: { url: string | null; seconds: nu
   const ref = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [t, setT] = useState(0);
+  const [previewError, setPreviewError] = useState(false);
+
+  useEffect(() => setPreviewError(false), [url]);
 
   useEffect(() => {
     if (url || !playing) return;
@@ -162,7 +180,11 @@ export function AudioPreview({ url, seconds }: { url: string | null; seconds: nu
   const toggle = () => {
     if (url && ref.current) {
       if (playing) ref.current.pause();
-      else void ref.current.play();
+      else
+        void ref.current.play().catch(() => {
+          setPlaying(false);
+          setPreviewError(true);
+        });
       return;
     }
     setPlaying((p) => !p);
@@ -193,7 +215,11 @@ export function AudioPreview({ url, seconds }: { url: string | null; seconds: nu
           />
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          {url ? "Your recording" : "Simulated playback (no audio captured)"}
+          {previewError
+            ? "This recording format cannot be played here. You can still submit it."
+            : url
+              ? "Your recording"
+              : "Simulated playback (no audio captured)"}
         </p>
       </div>
       {url ? (
@@ -202,6 +228,10 @@ export function AudioPreview({ url, seconds }: { url: string | null; seconds: nu
           src={url}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
+          onError={() => {
+            setPlaying(false);
+            setPreviewError(true);
+          }}
           onTimeUpdate={(e) => setT(Math.floor(e.currentTarget.currentTime))}
           onEnded={() => {
             setPlaying(false);

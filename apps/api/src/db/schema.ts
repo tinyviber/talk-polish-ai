@@ -73,6 +73,7 @@ export const speakingAttempts = pgTable(
       .notNull()
       .references(() => learners.id, { onDelete: "cascade" }),
     attemptIndex: integer("attempt_index").notNull(),
+    clientAttemptId: varchar("client_attempt_id", { length: 128 }),
     status: varchar("status", { length: 24 }).notNull().default("processing"),
     durationSec: real("duration_sec").notNull().default(0),
     mocked: boolean("mocked").notNull().default(false),
@@ -83,7 +84,9 @@ export const speakingAttempts = pgTable(
   },
   (t) => [
     index("speaking_attempts_session_idx").on(t.sessionId),
+    index("speaking_attempts_client_attempt_idx").on(t.learnerId, t.clientAttemptId),
     uniqueIndex("speaking_attempts_session_index_key").on(t.sessionId, t.attemptIndex),
+    uniqueIndex("speaking_attempts_learner_client_attempt_key").on(t.learnerId, t.clientAttemptId),
   ],
 );
 

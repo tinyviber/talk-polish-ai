@@ -199,6 +199,8 @@ export type AttemptStatus = z.infer<typeof attemptStatusSchema>;
 
 export const attemptSchema = z.object({
   id: z.string(),
+  /** Client-generated idempotency key used by offline uploads. */
+  clientAttemptId: z.string().optional(),
   sessionId: z.string(),
   index: z.union([z.literal(1), z.literal(2)]),
   status: attemptStatusSchema,
@@ -273,6 +275,7 @@ export type CreatePracticeSessionRequest = z.infer<typeof createPracticeSessionR
 
 /** Multipart text fields that accompany the uploaded audio part. */
 export const createAttemptFieldsSchema = z.object({
+  clientAttemptId: z.string().min(8).max(128).optional(),
   attemptIndex: z.coerce.number().int().min(1).max(2),
   durationSec: z.coerce
     .number()

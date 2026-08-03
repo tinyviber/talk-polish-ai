@@ -20,6 +20,7 @@
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun --filter '*' test",
     "test:integration": "bun --filter @kotoba/api test:integration",
+    "format:check": "prettier --check README.md package.json docker-compose.yml \"apps/**/*.{ts,tsx,json,md,yml,yaml}\" \"packages/**/*.{ts,tsx,json,md,yml,yaml}\"",
     "format": "prettier --write README.md package.json docker-compose.yml \"apps/**/*.{ts,tsx,json,md,yml,yaml}\" \"packages/**/*.{ts,tsx,json,md,yml,yaml}\"",
     "db:migrate": "bun --filter @kotoba/api db:migrate",
     "db:seed": "bun --filter @kotoba/api db:seed",

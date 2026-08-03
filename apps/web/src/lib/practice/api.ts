@@ -285,8 +285,7 @@ export async function uploadQueuedAttempt(item: {
     return { attempt, sessionId: attempt.sessionId };
   }
   // A recording captured while offline may have no server session yet.
-  const sessionId =
-    item.sessionId ?? (await createSession(item.promptId, item.clientSessionId)).id;
+  const sessionId = item.sessionId ?? (await createSession(item.promptId, item.clientSessionId)).id;
   const attempt = await createAttempt(sessionId, {
     clientAttemptId: item.clientAttemptId,
     index: item.attemptIndex,

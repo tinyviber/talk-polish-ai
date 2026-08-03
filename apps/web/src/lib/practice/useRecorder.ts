@@ -27,9 +27,9 @@ type WakeLockSentinelLike = {
 /** MediaRecorder wrapper with mobile interruption-safe finalization. */
 export function useRecorder({ mode = "demo", onInterruptedRecording }: Options = {}) {
   /** iOS emits short mute/unmute pairs; wait before treating one as fatal. */
-const MUTE_GRACE_MS = 1500;
+  const MUTE_GRACE_MS = 1500;
 
-const [state, setState] = useState<RecorderState>({
+  const [state, setState] = useState<RecorderState>({
     status: "idle",
     seconds: 0,
     level: 0,

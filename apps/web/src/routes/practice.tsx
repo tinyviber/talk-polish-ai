@@ -89,7 +89,6 @@ function isOfflineFailure(error: unknown) {
   );
 }
 
-
 function Stepper({ step }: { step: Step }) {
   const active = STEP_INDEX[step];
   return (

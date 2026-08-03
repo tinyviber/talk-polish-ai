@@ -3,6 +3,7 @@ export function isPublicPromptsRequest(url: URL, request: Request, origin = url.
   return (
     request.method === "GET" &&
     !request.headers.has("authorization") &&
+    !request.headers.has("cookie") &&
     url.origin === origin &&
     url.pathname === "/api/prompts"
   );

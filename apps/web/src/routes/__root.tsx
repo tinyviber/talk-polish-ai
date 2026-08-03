@@ -162,8 +162,8 @@ function OfflineQueueSync() {
       if (!learnerId) return;
       setBusy(true, "queue");
       void syncRecordingQueue(async (item) => {
-        const attempt = await uploadQueuedAttempt(item);
-        return { id: attempt.id, status: attempt.status };
+        const { attempt, sessionId } = await uploadQueuedAttempt(item);
+        return { id: attempt.id, status: attempt.status, sessionId };
       }, learnerId).finally(() => setBusy(false, "queue"));
     };
     sync();

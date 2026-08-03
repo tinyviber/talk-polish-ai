@@ -81,6 +81,14 @@ function errorMessage(error: unknown) {
     : "Something went wrong. Please try again.";
 }
 
+/** Network-level failures are recoverable offline; API 4xx/5xx are not. */
+function isOfflineFailure(error: unknown) {
+  return (
+    (error instanceof ApiClientError && error.status === 0) ||
+    (typeof navigator !== "undefined" && !navigator.onLine)
+  );
+}
+
 function Stepper({ step }: { step: Step }) {
   const active = STEP_INDEX[step];
   return (
@@ -156,6 +164,9 @@ function Practice() {
   const [interruptedDraftPending, setInterruptedDraftPending] = useState(false);
   const { setBusy } = usePwa();
   const interruptedAttemptIdRef = useRef<string | null>(null);
+  // Generated when a session starts so recordings captured with no network can
+  // still be attached to one practice session once the device reconnects.
+  const clientSessionIdRef = useRef<string | null>(null);
 
   const lang = state.lang ?? "en";
   const languagePrompts = useMemo(
@@ -168,7 +179,9 @@ function Practice() {
   const jp = lang === "ja";
   const saveInterruptedDraft = useCallback(
     async (draft: RecorderDraft) => {
-      if (mode !== "api" || !sessionId || !prompt) return;
+      if (mode !== "api" || !prompt) return;
+      const clientSessionId = clientSessionIdRef.current;
+      if (!clientSessionId) return;
       const learnerId = getLearnerId();
       if (!learnerId) {
         setError("Your learner session is not ready; the interrupted take was not queued.");
@@ -184,6 +197,7 @@ function Practice() {
           learnerId,
           clientAttemptId,
           sessionId,
+          clientSessionId,
           promptId: prompt.id,
           lang,
           attemptIndex: step === "record2" ? 2 : 1,
@@ -216,12 +230,20 @@ function Practice() {
       const detail = (
         event as CustomEvent<{
           learnerId: string;
-          sessionId: string;
+          sessionId: string | null;
+          clientSessionId?: string;
           attemptIndex: 1 | 2;
           attemptId: string;
         }>
       ).detail;
-      if (!detail || detail.learnerId !== getLearnerId() || detail.sessionId !== sessionId) return;
+      const belongsToThisSession =
+        detail &&
+        detail.learnerId === getLearnerId() &&
+        (detail.sessionId === sessionId ||
+          (clientSessionIdRef.current !== null &&
+            detail.clientSessionId === clientSessionIdRef.current));
+      if (!belongsToThisSession) return;
+      if (detail.sessionId) setSessionId(detail.sessionId);
       void getAttempt(detail.attemptId)
         .then((value) => {
           const attempt = toReadyAttempt(value);
@@ -288,13 +310,22 @@ function Practice() {
     }
     if (mode === "api") {
       setStarting(true);
+      const clientSessionId = clientSessionIdRef.current ?? crypto.randomUUID();
+      clientSessionIdRef.current = clientSessionId;
       try {
-        const session = await createSession(prompt.id);
+        const session = await createSession(prompt.id, clientSessionId);
         setSessionId(session.id);
       } catch (cause) {
-        setError(errorMessage(cause));
-        setStarting(false);
-        return;
+        // Offline is not a blocker: the session is created from the same
+        // idempotency key when the queued recording uploads.
+        if (isOfflineFailure(cause)) {
+          setSessionId(null);
+          setError("You are offline. Record now — this session uploads when you reconnect.");
+        } else {
+          setError(errorMessage(cause));
+          setStarting(false);
+          return;
+        }
       }
       setStarting(false);
     }
@@ -309,12 +340,17 @@ function Practice() {
       if (!prompt) throw new Error("No prompt is selected.");
       let attempt: Attempt;
       if (mode === "api") {
-        if (!sessionId) throw new Error("The practice session is missing. Start again.");
+        if (!sessionId && !clientSessionIdRef.current) {
+          throw new Error("The practice session is missing. Start again.");
+        }
         if (!recorder.audioBlob) {
           throw new Error("A real microphone recording is required in API mode.");
         }
+        const resolvedSessionId =
+          sessionId ?? (await createSession(prompt.id, clientSessionIdRef.current!)).id;
+        if (resolvedSessionId !== sessionId) setSessionId(resolvedSessionId);
         attempt = toReadyAttempt(
-          await createAttempt(sessionId, {
+          await createAttempt(resolvedSessionId, {
             clientAttemptId,
             index,
             durationSec: recorder.seconds || 1,
@@ -365,9 +401,8 @@ function Practice() {
     } catch (cause) {
       if (
         mode === "api" &&
-        ((cause instanceof ApiClientError && cause.status === 0) ||
-          (typeof navigator !== "undefined" && !navigator.onLine)) &&
-        sessionId &&
+        isOfflineFailure(cause) &&
+        clientSessionIdRef.current &&
         prompt &&
         recorder.audioBlob
       ) {
@@ -378,6 +413,7 @@ function Practice() {
             learnerId,
             clientAttemptId,
             sessionId,
+            clientSessionId: clientSessionIdRef.current,
             promptId: prompt.id,
             lang,
             attemptIndex: index,
@@ -414,8 +450,8 @@ function Practice() {
     setBusy(true, "queue");
     try {
       await syncRecordingQueue(async (item) => {
-        const attempt = await uploadQueuedAttempt(item);
-        return { id: attempt.id, status: attempt.status };
+        const { attempt, sessionId } = await uploadQueuedAttempt(item);
+        return { id: attempt.id, status: attempt.status, sessionId };
       }, learnerId);
     } finally {
       setBusy(false, "queue");

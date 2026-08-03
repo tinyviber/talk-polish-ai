@@ -59,6 +59,7 @@ export function providers(): Providers {
     baseUrl: config.TRANSCRIPTION_BASE_URL,
     apiKey: config.TRANSCRIPTION_API_KEY,
     model: config.TRANSCRIPTION_MODEL ?? localLlmConfig("transcription").model,
+    responseFormat: config.TRANSCRIPTION_RESPONSE_FORMAT,
     timeoutMs: config.TRANSCRIPTION_TIMEOUT_MS,
     maxAttempts: config.HTTP_MAX_ATTEMPTS,
   };

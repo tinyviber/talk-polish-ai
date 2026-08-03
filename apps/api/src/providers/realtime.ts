@@ -37,7 +37,7 @@ export function createRealtimeProvider(config: RealtimeConfig): RealtimeProvider
     async smokeTest(requestId?: string) {
       this.checkConfiguration();
       const traceId: string = requestId ?? randomUUID();
-      const socket = new WebSocket(config.url!, {
+      const socket = new WebSocket(realtimeHandshakeUrl(config.url!, config.model!), {
         headers: {
           Authorization: `Bearer ${config.apiKey}`,
           "OpenAI-Beta": "realtime=v1",
@@ -56,10 +56,13 @@ export function createRealtimeProvider(config: RealtimeConfig): RealtimeProvider
             code: "response",
             retryCount: 0,
           });
+        // The model is selected during the handshake; session.update only
+        // carries session options, and sending `model` there is rejected by
+        // OpenAI-compatible Realtime servers.
         socket.send(
           JSON.stringify({
             type: "session.update",
-            session: { model: config.model },
+            session: { modalities: ["text"] },
           }),
         );
         const updated = await waitForEvent(socket, "session.updated", config.timeoutMs);
@@ -74,6 +77,13 @@ export function createRealtimeProvider(config: RealtimeConfig): RealtimeProvider
       }
     },
   };
+}
+
+/** Realtime servers select the model from the handshake query string. */
+export function realtimeHandshakeUrl(url: string, model: string) {
+  const target = new URL(url);
+  if (!target.searchParams.has("model")) target.searchParams.set("model", model);
+  return target.toString();
 }
 
 function waitForOpen(socket: WebSocket, timeoutMs: number) {

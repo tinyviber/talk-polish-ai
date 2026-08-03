@@ -28,7 +28,7 @@ export async function sessionRoutes(app: FastifyInstance) {
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const body = createPracticeSessionRequestSchema.parse(request.body);
-      const session = await createPracticeSession(learner.id, body.promptId);
+      const session = await createPracticeSession(learner.id, body.promptId, body.clientSessionId);
       return { session, requestId: request.id };
     },
   );

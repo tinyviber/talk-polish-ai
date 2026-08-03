@@ -15,6 +15,8 @@ export type OpenAITranscriptionConfig = {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  /** `json` for servers that do not implement verbose transcription payloads. */
+  responseFormat?: "json" | "verbose_json";
   timeoutMs: number;
   maxAttempts: number;
 };
@@ -60,7 +62,7 @@ export function createOpenAICompatibleTranscriptionProvider(
           form.append("file", new Blob([body], { type: mimeType }), extensionForMime(mimeType));
           form.set("model", config.model!);
           form.set("language", langCode(input.lang));
-          form.set("response_format", "verbose_json");
+          form.set("response_format", config.responseFormat ?? "verbose_json");
           return form;
         },
       });

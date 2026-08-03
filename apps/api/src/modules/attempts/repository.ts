@@ -77,10 +77,7 @@ export const attemptRepository = {
             throw ApiError.conflict("Attempt 1 must be ready before recording attempt 2.");
         }
         if (sameIndex) {
-          const staleProcessing =
-            sameIndex.status === "processing" &&
-            Date.now() - sameIndex.createdAt.getTime() >= 5 * 60 * 1000;
-          const recoverable = sameIndex.status === "failed" || staleProcessing;
+          const recoverable = sameIndex.status === "failed";
           if (!recoverable)
             throw ApiError.conflict(
               `Attempt ${input.attemptIndex} already exists for this session.`,
@@ -188,7 +185,7 @@ export const attemptRepository = {
     await withDb("markAttemptFailed", () =>
       db()
         .update(speakingAttempts)
-        .set({ status: "failed", audioId: null })
+        .set({ status: "failed" })
         .where(eq(speakingAttempts.id, attemptId)),
     );
   },

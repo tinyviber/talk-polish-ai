@@ -32,9 +32,6 @@ const EXTENSIONS: Record<string, string> = {
   "audio/m4a": "m4a",
 };
 
-/** A synchronous mock pipeline should never remain processing for this long. */
-const STALE_PROCESSING_MS = 5 * 60 * 1000;
-
 export function assertSupportedAudio(audio: UploadedAudio, maxBytes = MAX_AUDIO_BYTES) {
   const mime = audio.mimeType.split(";")[0]!.trim().toLowerCase();
   if (!(SUPPORTED_AUDIO_MIME_TYPES as readonly string[]).includes(mime)) {
@@ -80,13 +77,11 @@ export async function createAttempt(
     if (existing && (existing.sessionId !== sessionId || existing.attemptIndex !== attemptIndex)) {
       throw ApiError.conflict("clientAttemptId is already used for another attempt.");
     }
-    // Network retries return the same processing/ready/failed record. A failed
-    // record is intentionally reclaimed below so an explicit retry can reuse
-    // the same durable client key without creating duplicates.
-    const staleProcessing =
-      existing?.status === "processing" &&
-      Date.now() - existing.createdAt.getTime() >= STALE_PROCESSING_MS;
-    if (existing && existing.status !== "failed" && !staleProcessing) {
+    // Network retries return the same processing/ready record. A failed record
+    // is intentionally reclaimed below. Never reclaim a live processing row:
+    // doing so could invoke transcription/assessment twice when the original
+    // provider call is merely slow.
+    if (existing && existing.status !== "failed") {
       return getAttempt(existing.id, learnerId);
     }
   }

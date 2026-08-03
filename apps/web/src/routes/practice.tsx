@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, RefreshCw, ArrowRight, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -44,9 +44,8 @@ import type { Attempt, ScoreKey } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
 import {
   initialPracticeState,
-  transitionTo,
+  reducePracticeState,
   type PracticeStage,
-  type PracticeState,
 } from "@/features/practice/state-machine";
 
 export const Route = createFileRoute("/practice")({
@@ -166,10 +165,10 @@ function Practice() {
     refresh,
     switchToDemo,
   } = usePracticeStore();
-  const [practiceState, setPracticeState] = useState<PracticeState>(initialPracticeState);
+  const [practiceState, dispatchPractice] = useReducer(reducePracticeState, initialPracticeState);
   const step = practiceState.stage;
   const setStep = useCallback((next: Step) => {
-    setPracticeState((current) => transitionTo(current, next));
+    dispatchPractice({ type: "stage", stage: next });
   }, []);
   const [first, setFirst] = useState<Attempt | null>(null);
   const [second, setSecond] = useState<Attempt | null>(null);

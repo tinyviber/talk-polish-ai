@@ -26,4 +26,10 @@ describe("practice state machine", () => {
       attemptIndex: 2,
     });
   });
+
+  test("route stage commands use the same reducer as workflow events", () => {
+    expect(
+      reducePracticeState(initialPracticeState, { type: "stage", stage: "processing2" }),
+    ).toMatchObject({ stage: "processing2", attemptIndex: 2 });
+  });
 });

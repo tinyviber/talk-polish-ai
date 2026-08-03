@@ -28,7 +28,8 @@ export type PracticeEvent =
   | { type: "offline"; attemptIndex: 1 | 2 }
   | { type: "retry"; attemptIndex: 1 | 2 }
   | { type: "failed"; message: string; attemptIndex: 1 | 2 }
-  | { type: "next-prompt" };
+  | { type: "next-prompt" }
+  | { type: "stage"; stage: PracticeStage };
 
 export const initialPracticeState: PracticeState = {
   stage: "prompt",
@@ -89,6 +90,8 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
       };
     case "next-prompt":
       return initialPracticeState;
+    case "stage":
+      return transitionTo(state, event.stage);
   }
 }
 

@@ -270,6 +270,8 @@ export type ListPromptsQuery = z.infer<typeof listPromptsQuerySchema>;
 
 export const createPracticeSessionRequestSchema = z.object({
   promptId: z.string().min(1),
+  /** Client-generated idempotency key so offline devices can create a session on reconnect. */
+  clientSessionId: z.string().min(8).max(128).optional(),
 });
 export type CreatePracticeSessionRequest = z.infer<typeof createPracticeSessionRequestSchema>;
 

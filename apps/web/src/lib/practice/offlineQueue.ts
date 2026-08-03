@@ -1,6 +1,12 @@
 import type { Lang } from "./types";
 
-export type QueueStatus = "queued" | "uploading" | "processing" | "ready" | "failed";
+export type QueueStatus =
+  | "local-draft"
+  | "queued"
+  | "uploading"
+  | "processing"
+  | "ready"
+  | "failed";
 export type RecordingQueueItem = {
   /** Learner namespace; prevents a later token/device from reading old blobs. */
   learnerId: string;
@@ -39,10 +45,35 @@ const MAX_BYTES = 100 * 1024 * 1024;
 const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
+let queueChannel: BroadcastChannel | null = null;
+
+function broadcastChange() {
+  if (typeof BroadcastChannel === "undefined") return;
+  queueChannel ??= new BroadcastChannel("kotoba-loop-recording-queue");
+  queueChannel.postMessage({ type: "queue-change" });
+}
 
 function notify() {
   listeners.forEach((listener) => listener());
   if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:queue-change"));
+  broadcastChange();
+}
+
+export function orderRecordingQueue(items: RecordingQueueItem[]) {
+  return [...items].sort(
+    (a, b) => a.createdAt - b.createdAt || a.clientAttemptId.localeCompare(b.clientAttemptId),
+  );
+}
+
+export function canSyncAttempt(item: RecordingQueueItem, items: RecordingQueueItem[]) {
+  if (item.attemptIndex === 1) return true;
+  return items.some(
+    (candidate) =>
+      candidate.learnerId === item.learnerId &&
+      candidate.clientSessionId === item.clientSessionId &&
+      candidate.attemptIndex === 1 &&
+      candidate.syncStatus === "ready",
+  );
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -112,7 +143,7 @@ async function allItems() {
   const db = await openDb();
   return new Promise<RecordingQueueItem[]>((resolve, reject) => {
     const request = db.transaction(STORE, "readonly").objectStore(STORE).getAll();
-    request.onsuccess = () => resolve(request.result as RecordingQueueItem[]);
+    request.onsuccess = () => resolve(orderRecordingQueue(request.result as RecordingQueueItem[]));
     request.onerror = () => reject(request.error);
   });
 }
@@ -174,6 +205,33 @@ export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStat
   return input.clientAttemptId;
 }
 
+export async function markRecordingReady(
+  clientAttemptId: string,
+  input: { sessionId?: string; attemptId: string },
+) {
+  const item = (await allItems()).find((candidate) => candidate.clientAttemptId === clientAttemptId);
+  if (!item) return;
+  await put({
+    ...item,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    attemptId: input.attemptId,
+    syncStatus: "ready",
+    blob: new Blob([], { type: item.mimeType }),
+    blobDiscarded: true,
+  });
+}
+
+export async function markRecordingFailed(clientAttemptId: string, message: string) {
+  const item = (await allItems()).find((candidate) => candidate.clientAttemptId === clientAttemptId);
+  if (!item) return;
+  await put({ ...item, syncStatus: "failed", lastError: message });
+}
+
+export async function removeQueuedRecording(clientAttemptId: string) {
+  if (typeof indexedDB === "undefined") return;
+  await remove(clientAttemptId);
+}
+
 export async function listRecordingQueue(learnerId?: string) {
   if (!learnerId) return [] as RecordingQueueItem[];
   return (await allItems()).filter((item) => item.learnerId === learnerId);
@@ -201,7 +259,7 @@ export async function retryQueuedRecordings(learnerId?: string) {
 
 export type QueueUploadResult = {
   id: string;
-  status: QueueStatus;
+  status: Exclude<QueueStatus, "local-draft">;
   /** Returned when the session had to be created during the upload. */
   sessionId?: string;
 };
@@ -248,14 +306,20 @@ export async function syncRecordingQueue(
   learnerId?: string,
 ) {
   if (syncInFlight) return syncInFlight;
-  syncInFlight = (async () => {
+  const run = async () => {
     if (!learnerId || (typeof navigator !== "undefined" && !navigator.onLine)) return;
     await recoverInterruptedUploads();
     await cleanupRecordingQueue();
     const items = (await allItems()).filter(
       (item) => item.learnerId === learnerId && isQueueSyncCandidate(item.syncStatus),
     );
+    const readySessionKeys = new Set(
+      (await allItems())
+        .filter((item) => item.learnerId === learnerId && item.attemptIndex === 1 && item.syncStatus === "ready")
+        .map((item) => item.clientSessionId),
+    );
     for (const item of items) {
+      if (item.attemptIndex === 2 && !readySessionKeys.has(item.clientSessionId)) continue;
       try {
         const syncing = {
           ...item,
@@ -277,6 +341,7 @@ export async function syncRecordingQueue(
             : {}),
         });
         if (attempt.status === "ready" && typeof window !== "undefined") {
+          if (item.attemptIndex === 1) readySessionKeys.add(item.clientSessionId);
           window.dispatchEvent(
             new CustomEvent("kotoba:queue-ready", {
               detail: {
@@ -302,7 +367,15 @@ export async function syncRecordingQueue(
         if (isTransientUploadError(error)) break;
       }
     }
-  })().finally(() => {
+  };
+  const runWithCrossTabLease = async () => {
+    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+    if (!locks) return run();
+    return locks.request("kotoba-loop-recording-sync", { ifAvailable: true }, (lock) =>
+      lock ? run() : undefined,
+    );
+  };
+  syncInFlight = runWithCrossTabLease().finally(() => {
     syncInFlight = null;
   });
   return syncInFlight;

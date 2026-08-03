@@ -56,4 +56,24 @@ describe("API boundary", () => {
       expect(ready.json().error.code).toBe("database_failure");
     }
   });
+
+  test("maps malformed JSON and unsupported content type to safe client errors", async () => {
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/api/learners/anonymous",
+      headers: { "content-type": "application/json" },
+      payload: "{broken",
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json().error.code).toBe("bad_request");
+
+    const unsupported = await app.inject({
+      method: "POST",
+      url: "/api/learners/anonymous",
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.from("deviceId=x"),
+    });
+    expect(unsupported.statusCode).toBe(400);
+    expect(unsupported.json().error.code).toBe("bad_request");
+  });
 });

@@ -25,8 +25,13 @@ export type {
 
 export type ScoreKey = keyof Scores;
 
-/** UI only consumes completed attempts; the API contract remains nullable while processing. */
+/** UI view of completed attempts, retaining server identity for recovery/playback. */
 export type Attempt = Pick<ContractAttempt, "index" | "durationSec" | "mocked"> & {
+  id?: string;
+  clientAttemptId?: string;
+  sessionId?: string;
+  status?: ContractAttempt["status"];
+  audio?: ContractAttempt["audio"];
   transcript: string;
   feedback: Feedback;
 };

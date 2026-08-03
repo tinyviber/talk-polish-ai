@@ -89,6 +89,9 @@ export function env(): Env {
     ) {
       throw new Error("ANON_TOKEN_SECRET must be changed in production.");
     }
+    if (parsed.data.NODE_ENV === "production") {
+      assertProductionSecret(parsed.data.ANON_TOKEN_SECRET);
+    }
     if (parsed.data.NODE_ENV === "production" && parsed.data.CORS_ORIGIN === "*") {
       throw new Error("CORS_ORIGIN must be explicit in production.");
     }
@@ -146,6 +149,15 @@ export function env(): Env {
 /** Test-only seam for processes that deliberately change configuration before boot. */
 export function resetEnvForTests() {
   cached = undefined;
+}
+
+export function assertProductionSecret(secret: string) {
+  if (
+    secret.length < 32 ||
+    /(?:replace[-_ ]?with|change[-_ ]?me|example|local-development|test-secret)/i.test(secret)
+  ) {
+    throw new Error("ANON_TOKEN_SECRET must be a unique random secret of at least 32 characters in production.");
+  }
 }
 
 function assertProviderUrl(name: string, value: string, production: boolean) {

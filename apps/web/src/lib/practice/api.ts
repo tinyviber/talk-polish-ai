@@ -278,7 +278,7 @@ export async function uploadQueuedAttempt(item: {
   mimeType: string;
   blob: Blob;
   attemptId?: string;
-  syncStatus?: "queued" | "uploading" | "processing" | "ready" | "failed";
+  syncStatus?: "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed";
 }) {
   if (item.syncStatus === "processing" && item.attemptId) {
     const attempt = await getAttempt(item.attemptId);
@@ -370,6 +370,11 @@ export function toReadyAttempt(value: Awaited<ReturnType<typeof createAttempt>>)
     );
   }
   return {
+    id: value.id,
+    ...(value.clientAttemptId ? { clientAttemptId: value.clientAttemptId } : {}),
+    sessionId: value.sessionId,
+    status: value.status,
+    audio: value.audio,
     index: value.index,
     transcript: value.transcript,
     feedback: value.feedback as Feedback,

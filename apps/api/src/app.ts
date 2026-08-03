@@ -83,6 +83,12 @@ export async function buildApp(config: Env = env()) {
       return;
     }
 
+    const clientError = fastifyClientError(error);
+    if (clientError) {
+      reply.status(clientError.statusCode).send(toErrorResponse(clientError, request.id));
+      return;
+    }
+
     if (isPayloadTooLarge(error)) {
       const tooLarge = ApiError.tooLarge("The request payload is too large.");
       reply.status(tooLarge.statusCode).send(toErrorResponse(tooLarge, request.id));
@@ -108,4 +114,13 @@ function isPayloadTooLarge(error: unknown) {
     "code" in error &&
     (error.code === "FST_ERR_CTP_BODY_TOO_LARGE" || error.code === "FST_REQ_BODY_TOO_LARGE")
   );
+}
+
+function fastifyClientError(error: unknown) {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = error.code;
+  if (code === "FST_ERR_CTP_INVALID_JSON_BODY") return ApiError.badRequest("Request body is not valid JSON.");
+  if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") return ApiError.badRequest("Unsupported content type.");
+  if (code === "FST_ERR_CTP_BODY_TOO_LARGE" || code === "FST_REQ_BODY_TOO_LARGE") return null;
+  return null;
 }

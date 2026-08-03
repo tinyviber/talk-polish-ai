@@ -31,6 +31,8 @@ import {
 import {
   enqueueRecording,
   listRecordingQueue,
+  markRecordingFailed,
+  markRecordingReady,
   retryQueuedRecordings,
   subscribeRecordingQueue,
   syncRecordingQueue,
@@ -39,6 +41,12 @@ import {
 import { usePwa } from "@/lib/pwa";
 import type { Attempt, ScoreKey } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
+import {
+  initialPracticeState,
+  transitionTo,
+  type PracticeStage,
+  type PracticeState,
+} from "@/features/practice/state-machine";
 
 export const Route = createFileRoute("/practice")({
   head: () => ({
@@ -58,16 +66,21 @@ export const Route = createFileRoute("/practice")({
   component: Practice,
 });
 
-type Step = "prompt" | "record" | "processing" | "feedback" | "record2" | "processing2" | "result";
+type Step = PracticeStage;
 
 const STEP_INDEX: Record<Step, number> = {
   prompt: 1,
   record: 1,
+  recording: 1,
+  recorded: 1,
+  uploading: 2,
   processing: 2,
   feedback: 2,
   record2: 3,
   processing2: 3,
   result: 4,
+  "offline-recovery": 2,
+  retry: 2,
 };
 
 const STEP_LABELS = ["Prompt", "Feedback", "Second take", "Result"];
@@ -152,7 +165,11 @@ function Practice() {
     refresh,
     switchToDemo,
   } = usePracticeStore();
-  const [step, setStep] = useState<Step>("prompt");
+  const [practiceState, setPracticeState] = useState<PracticeState>(initialPracticeState);
+  const step = practiceState.stage;
+  const setStep = useCallback((next: Step) => {
+    setPracticeState((current) => transitionTo(current, next));
+  }, []);
   const [first, setFirst] = useState<Attempt | null>(null);
   const [second, setSecond] = useState<Attempt | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(() =>
@@ -339,6 +356,7 @@ function Practice() {
     try {
       if (!prompt) throw new Error("No prompt is selected.");
       let attempt: Attempt;
+      let durableQueued = false;
       if (mode === "api") {
         if (!sessionId && !clientSessionIdRef.current) {
           throw new Error("The practice session is missing. Start again.");
@@ -349,6 +367,26 @@ function Practice() {
         const resolvedSessionId =
           sessionId ?? (await createSession(prompt.id, clientSessionIdRef.current!)).id;
         if (resolvedSessionId !== sessionId) setSessionId(resolvedSessionId);
+        // Persist before network mutation. A page kill after this point leaves
+        // an idempotent durable record instead of an in-memory Blob only.
+        try {
+          await enqueueRecording({
+            learnerId: getLearnerId() ?? "",
+            clientAttemptId,
+            sessionId: resolvedSessionId,
+            clientSessionId: clientSessionIdRef.current!,
+            promptId: prompt.id,
+            lang,
+            attemptIndex: index,
+            duration: recorder.seconds || 1,
+            mimeType: recorder.audioBlob.type || "audio/webm",
+            blob: recorder.audioBlob,
+            createdAt: Date.now(),
+          });
+          durableQueued = true;
+        } catch {
+          // Private browsing/disabled IndexedDB must not break online capture.
+        }
         attempt = toReadyAttempt(
           await createAttempt(resolvedSessionId, {
             clientAttemptId,
@@ -357,6 +395,12 @@ function Practice() {
             audio: recorder.audioBlob,
           }),
         );
+        if (durableQueued && attempt.id) {
+          await markRecordingReady(clientAttemptId, {
+            sessionId: resolvedSessionId,
+            attemptId: attempt.id,
+          }).catch(() => {});
+        }
       } else {
         // Demo feedback is deterministic sample data even if the browser captured a local blob.
         attempt = await analyzeAttempt(prompt, index, recorder.seconds || 32, true);
@@ -399,6 +443,9 @@ function Practice() {
         }
       }
     } catch (cause) {
+      if (mode === "api" && !isOfflineFailure(cause)) {
+        await markRecordingFailed(clientAttemptId, errorMessage(cause)).catch(() => {});
+      }
       if (
         mode === "api" &&
         isOfflineFailure(cause) &&
@@ -596,6 +643,7 @@ function Practice() {
                   setSecond(null);
                   setPromptOffset((o) => o + 1);
                   setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
+                  clientSessionIdRef.current = null;
                   interruptedAttemptIdRef.current = null;
                   recorder.reset();
                   setStep("prompt");

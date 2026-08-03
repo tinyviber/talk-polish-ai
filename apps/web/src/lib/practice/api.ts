@@ -227,12 +227,17 @@ export async function listPrompts(lang?: Lang): Promise<Prompt[]> {
   return (await request(`/api/prompts${query}`, promptsResponseSchema, {}, false)).prompts;
 }
 
-export async function createSession(promptId: string): Promise<PracticeSession> {
+export async function createSession(
+  promptId: string,
+  clientSessionId?: string,
+): Promise<PracticeSession> {
   if (!token) await bootstrapLearner(null);
   return (
     await request("/api/sessions", practiceSessionResponseSchema, {
       method: "POST",
-      body: JSON.stringify({ promptId }),
+      // The key is idempotent server-side, so a replayed offline session
+      // resolves to the same practice session instead of a duplicate.
+      body: JSON.stringify({ promptId, ...(clientSessionId ? { clientSessionId } : {}) }),
     })
   ).session;
 }
@@ -265,7 +270,9 @@ export async function createAttempt(
 
 export async function uploadQueuedAttempt(item: {
   clientAttemptId: string;
-  sessionId: string;
+  sessionId: string | null;
+  clientSessionId?: string;
+  promptId: string;
   attemptIndex: 1 | 2;
   duration: number;
   mimeType: string;
@@ -273,13 +280,20 @@ export async function uploadQueuedAttempt(item: {
   attemptId?: string;
   syncStatus?: "queued" | "uploading" | "processing" | "ready" | "failed";
 }) {
-  if (item.syncStatus === "processing" && item.attemptId) return getAttempt(item.attemptId);
-  return createAttempt(item.sessionId, {
+  if (item.syncStatus === "processing" && item.attemptId) {
+    const attempt = await getAttempt(item.attemptId);
+    return { attempt, sessionId: attempt.sessionId };
+  }
+  // A recording captured while offline may have no server session yet.
+  const sessionId =
+    item.sessionId ?? (await createSession(item.promptId, item.clientSessionId)).id;
+  const attempt = await createAttempt(sessionId, {
     clientAttemptId: item.clientAttemptId,
     index: item.attemptIndex,
     durationSec: item.duration,
     audio: item.blob,
   });
+  return { attempt, sessionId };
 }
 
 function audioExtension(mimeType: string) {

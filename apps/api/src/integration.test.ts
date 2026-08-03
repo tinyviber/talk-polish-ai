@@ -183,6 +183,44 @@ describe("persisted practice journey", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("minioadmin");
   });
 
+  integration("replays an offline session key without duplicating sessions", async () => {
+    const deviceId = `offline-${crypto.randomUUID()}`;
+    const learnerResponse = await app.inject({
+      method: "POST",
+      url: "/api/learners/anonymous",
+      payload: { deviceId, lang: "en" },
+    });
+    const { token } = learnerResponse.json();
+    const prompt = (await app.inject({ method: "GET", url: "/api/prompts?lang=en" })).json()
+      .prompts[0];
+    const clientSessionId = `offline-session-${crypto.randomUUID()}`;
+
+    const create = () =>
+      app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        headers: { authorization: `Bearer ${token}` },
+        payload: { promptId: prompt.id, clientSessionId },
+      });
+
+    const firstCreate = await create();
+    const replayCreate = await create();
+    expect(firstCreate.statusCode).toBe(200);
+    expect(replayCreate.statusCode).toBe(200);
+    expect(replayCreate.json().session.id).toBe(firstCreate.json().session.id);
+
+    // The same key must never be reused across prompts.
+    const otherPrompt = (await app.inject({ method: "GET", url: "/api/prompts?lang=en" })).json()
+      .prompts[1];
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { promptId: otherPrompt.id, clientSessionId },
+    });
+    expect(conflict.statusCode).toBe(409);
+  });
+
   ttsIntegration("generates, stores, and plays authenticated TTS audio", async () => {
     const deviceId = `tts-integration-${crypto.randomUUID()}`;
     const learnerResponse = await app.inject({

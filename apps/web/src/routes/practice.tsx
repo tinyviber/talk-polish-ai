@@ -284,7 +284,7 @@ function Practice() {
       window.removeEventListener("kotoba:learner-ready", onLearnerReady);
       window.removeEventListener("kotoba:queue-ready", onQueueReady);
     };
-  }, [sessionId]);
+  }, [sessionId, setStep]);
   useEffect(() => {
     setBusy(
       recorder.status === "recording" || step === "processing" || step === "processing2",
@@ -364,16 +364,13 @@ function Practice() {
         if (!recorder.audioBlob) {
           throw new Error("A real microphone recording is required in API mode.");
         }
-        const resolvedSessionId =
-          sessionId ?? (await createSession(prompt.id, clientSessionIdRef.current!)).id;
-        if (resolvedSessionId !== sessionId) setSessionId(resolvedSessionId);
-        // Persist before network mutation. A page kill after this point leaves
-        // an idempotent durable record instead of an in-memory Blob only.
+        // Persist before any network mutation. A page kill after this point
+        // leaves an idempotent durable record instead of an in-memory Blob only.
         try {
           await enqueueRecording({
             learnerId: getLearnerId() ?? "",
             clientAttemptId,
-            sessionId: resolvedSessionId,
+            sessionId,
             clientSessionId: clientSessionIdRef.current!,
             promptId: prompt.id,
             lang,
@@ -385,8 +382,13 @@ function Practice() {
           });
           durableQueued = true;
         } catch {
-          // Private browsing/disabled IndexedDB must not break online capture.
+          throw new Error(
+            "This browser cannot safely save recordings for upload. Enable site storage and try again.",
+          );
         }
+        const resolvedSessionId =
+          sessionId ?? (await createSession(prompt.id, clientSessionIdRef.current!)).id;
+        if (resolvedSessionId !== sessionId) setSessionId(resolvedSessionId);
         attempt = toReadyAttempt(
           await createAttempt(resolvedSessionId, {
             clientAttemptId,

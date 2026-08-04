@@ -30,7 +30,29 @@ export type RecordingQueueItem = {
   transientRetryIndex?: number | undefined;
   /** Attempt 1 was confirmed ready before this attempt was queued offline. */
   prerequisiteSatisfied?: boolean | undefined;
+  /**
+   * Durable feedback-delivery state for a server-side ready attempt.
+   * `pending` — the server has the attempt but this device has not rendered
+   * its feedback yet; `error` — a feedback read failed and must be retried;
+   * `delivered` — feedback reached the UI and the slot is finished.
+   */
+  feedbackState?: FeedbackState | undefined;
+  feedbackLastError?: string | undefined;
+  feedbackUpdatedAt?: number | undefined;
 };
+
+export type FeedbackState = "pending" | "delivered" | "error";
+
+/** A ready attempt whose feedback has not yet been shown on any tab. */
+export function isFeedbackOutstanding(item: RecordingQueueItem) {
+  return (
+    item.syncStatus === "ready" &&
+    typeof item.attemptId === "string" &&
+    item.attemptId.length > 0 &&
+    (item.feedbackState ?? "pending") !== "delivered"
+  );
+}
+
 
 export function isQueueSyncCandidate(status: QueueStatus) {
   return status === "queued" || status === "uploading" || status === "processing";

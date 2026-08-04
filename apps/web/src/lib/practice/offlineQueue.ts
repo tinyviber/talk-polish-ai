@@ -226,9 +226,15 @@ function openDb(): Promise<IDBDatabase> {
             syncStatus: "failed",
             lastError: "This recording needs to be re-recorded after the app update.",
           });
+        } else if (value["syncStatus"] === "ready" && value["feedbackState"] === undefined) {
+          // v3 rows predate durable feedback tracking. A ready row from that
+          // era may or may not have been shown; treat it as outstanding so the
+          // learner can still recover the feedback instead of losing it.
+          cursor.update({ ...value, feedbackState: "pending" });
         }
         cursor.continue();
       };
+
     };
     request.onsuccess = () => {
       const db = request.result;

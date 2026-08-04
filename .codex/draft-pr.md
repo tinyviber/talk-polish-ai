@@ -73,13 +73,15 @@ All code checks below used fixed Bun `1.2.17` via `PATH=/tmp/kotoba-bun-1.2.17/b
 - `bun run format:check` — pass.
 - `bun run lint` — pass, 0 errors and 10 existing Fast Refresh warnings.
 - `bun run typecheck` — pass for contracts, API, and web.
-- `bun run test` — pass: contracts 6, web 20, API 30; 5 integration/storage tests skipped by their existing environment gates.
+- `bun run test` — pass: contracts 6, web 22, API 30; 5 integration/storage tests skipped by their existing environment gates.
 - `bun run build` — pass: contracts, production web/PWA, and API build.
 - `bun run test:integration` — blocked: PostgreSQL was not available; migration connection failed before integration tests.
 - `bun run build:docker` — blocked: Docker daemon unavailable at `unix:///Users/wj/.orbstack/run/docker.sock`.
 - `git diff --check` — pass.
 
-GitHub Actions run [`30909872155`](https://github.com/tinyviber/talk-polish-ai/actions/runs/30909872155) for head `a04bfa1a47951e941cc9f38caabd396deba83cc8` — pass. Its `checks` job passed `bun install --frozen-lockfile`, `bun run format:check`, `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`, and `bun run build:docker`; its PostgreSQL `integration` job passed `bun install --frozen-lockfile` and `bun run test:integration`, including stale-attempt cleanup coverage.
+GitHub Actions run [`30916161136`](https://github.com/tinyviber/talk-polish-ai/actions/runs/30916161136) for head `553032573432abf0b7c49300ce2419063fd6edce` — pass. Its `checks` job passed `bun install --frozen-lockfile`, `bun run format:check`, `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`, and `bun run build:docker`; its PostgreSQL `integration` job passed `bun install --frozen-lockfile` and `bun run test:integration`.
+
+Latest follow-up local commands: `bunx vitest run apps/web/src/lib/practice/offlineQueue.test.ts apps/web/src/lib/practice/offlineQueue.sync.test.ts apps/web/src/lib/practice/offlineQueueSync.test.ts` — pass (14 tests); `git diff --check` — pass; `bun run test:integration` — blocked before migration because local PostgreSQL is unavailable; `bun run build:docker` — blocked because the local Docker daemon is unavailable. The pushed CI run above is the authoritative frozen-install, PostgreSQL integration, and Docker result.
 
 The local environment could not run PostgreSQL or Docker, but the same frozen install, integration, and Docker steps now pass in CI. The PR remains draft for human review and PR #1 integration; the engineering validation matrix is green.
 

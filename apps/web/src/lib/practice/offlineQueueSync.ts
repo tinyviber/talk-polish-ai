@@ -119,7 +119,8 @@ export function startOfflineQueueSyncLoop({
     runSync();
   }
 
-  const handleQueueChange = () => {
+  const handleQueueChange = (event: Event) => {
+    if (event instanceof CustomEvent && event.detail?.internal === true) return;
     void scheduleNextSync();
   };
   const handleVisible = () => {

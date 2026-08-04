@@ -21,7 +21,6 @@ import { useRecorder, type RecorderDraft } from "@/lib/practice/useRecorder";
 import { analyzeAttempt } from "@/lib/practice/mockServices";
 import {
   ApiClientError,
-  createAttempt,
   createSession,
   getAttempt,
   getQueueLearnerId,
@@ -32,8 +31,6 @@ import {
 import {
   enqueueRecording,
   listRecordingQueue,
-  markRecordingFailed,
-  markRecordingReady,
   retryQueuedRecordings,
   subscribeRecordingQueue,
   syncRecordingQueue,
@@ -206,19 +203,22 @@ function Practice() {
       // before the asynchronous IndexedDB write finishes.
       setBusy(true, "draft-save");
       try {
-        await enqueueRecording({
-          learnerId,
-          clientAttemptId,
-          sessionId,
-          clientSessionId,
-          promptId: prompt.id,
-          lang,
-          attemptIndex: step === "record2" ? 2 : 1,
-          duration: draft.durationSec,
-          mimeType: draft.mimeType,
-          blob: draft.blob,
-          createdAt: Date.now(),
-        });
+        await enqueueRecording(
+          {
+            learnerId,
+            clientAttemptId,
+            sessionId,
+            clientSessionId,
+            promptId: prompt.id,
+            lang,
+            attemptIndex: step === "record2" ? 2 : 1,
+            duration: draft.durationSec,
+            mimeType: draft.mimeType,
+            blob: draft.blob,
+            createdAt: Date.now(),
+          },
+          getQueueLearnerIds(),
+        );
         setInterruptedDraftPending(true);
         setError(
           "Your interrupted recording was saved on this device and will upload when you reconnect.",
@@ -352,7 +352,6 @@ function Practice() {
     try {
       if (!prompt) throw new Error("No prompt is selected.");
       let attempt: Attempt;
-      let durableQueued = false;
       if (mode === "api") {
         if (!sessionId && !clientSessionIdRef.current) {
           throw new Error("The practice session is missing. Start again.");
@@ -360,45 +359,73 @@ function Practice() {
         if (!recorder.audioBlob) {
           throw new Error("A real microphone recording is required in API mode.");
         }
+        const queueLearnerIds = getQueueLearnerIds();
         // Persist before any network mutation. A page kill after this point
         // leaves an idempotent durable record instead of an in-memory Blob only.
         try {
-          await enqueueRecording({
-            learnerId: getQueueLearnerId(),
-            clientAttemptId,
-            sessionId,
-            clientSessionId: clientSessionIdRef.current!,
-            promptId: prompt.id,
-            lang,
-            attemptIndex: index,
-            duration: recorder.seconds || 1,
-            mimeType: recorder.audioBlob.type || "audio/webm",
-            blob: recorder.audioBlob,
-            createdAt: Date.now(),
-          });
-          durableQueued = true;
+          await enqueueRecording(
+            {
+              learnerId: getQueueLearnerId(),
+              clientAttemptId,
+              sessionId,
+              clientSessionId: clientSessionIdRef.current!,
+              promptId: prompt.id,
+              lang,
+              attemptIndex: index,
+              duration: recorder.seconds || 1,
+              mimeType: recorder.audioBlob.type || "audio/webm",
+              blob: recorder.audioBlob,
+              createdAt: Date.now(),
+            },
+            queueLearnerIds,
+          );
         } catch {
           throw new Error(
             "This browser cannot safely save recordings for upload. Enable site storage and try again.",
           );
         }
-        const resolvedSessionId =
-          sessionId ?? (await createSession(prompt.id, clientSessionIdRef.current!)).id;
-        if (resolvedSessionId !== sessionId) setSessionId(resolvedSessionId);
-        attempt = toReadyAttempt(
-          await createAttempt(resolvedSessionId, {
-            clientAttemptId,
-            index,
-            durationSec: recorder.seconds || 1,
-            audio: recorder.audioBlob,
-          }),
-        );
-        if (durableQueued && attempt.id) {
-          await markRecordingReady(clientAttemptId, {
-            sessionId: resolvedSessionId,
-            attemptId: attempt.id,
-          }).catch(() => {});
+        const syncResult = await syncRecordingQueue(async (item) => {
+          const { attempt: queuedAttempt, sessionId: queuedSessionId } =
+            await uploadQueuedAttempt(item);
+          return {
+            id: queuedAttempt.id,
+            status: queuedAttempt.status,
+            sessionId: queuedSessionId,
+          };
+        }, queueLearnerIds);
+        if (!syncResult.acquired) {
+          throw new ApiClientError(
+            "Another tab is uploading this recording. It will continue automatically.",
+            503,
+            "queue_busy",
+          );
         }
+        const queued = (await listRecordingQueue(queueLearnerIds)).find(
+          (item) => item.clientAttemptId === clientAttemptId,
+        );
+        if (!queued || queued.syncStatus === "queued" || queued.syncStatus === "uploading") {
+          throw new ApiClientError(
+            queued?.lastError ?? "The recording is waiting for a retry.",
+            0,
+            "offline_queue_pending",
+          );
+        }
+        if (queued.syncStatus === "processing") {
+          throw new ApiClientError(
+            "The recording is still being processed.",
+            503,
+            "processing_unavailable",
+          );
+        }
+        if (queued.syncStatus === "failed" || !queued.attemptId) {
+          throw new ApiClientError(
+            queued.lastError ?? "The recording could not be uploaded.",
+            400,
+            "attempt_failed",
+          );
+        }
+        attempt = toReadyAttempt(await getAttempt(queued.attemptId));
+        if (queued.sessionId !== sessionId) setSessionId(queued.sessionId);
       } else {
         // Demo feedback is deterministic sample data even if the browser captured a local blob.
         attempt = await analyzeAttempt(prompt, index, recorder.seconds || 32, true);
@@ -441,9 +468,6 @@ function Practice() {
         }
       }
     } catch (cause) {
-      if (mode === "api" && !isOfflineFailure(cause)) {
-        await markRecordingFailed(clientAttemptId, errorMessage(cause)).catch(() => {});
-      }
       if (
         mode === "api" &&
         isOfflineFailure(cause) &&
@@ -453,19 +477,22 @@ function Practice() {
       ) {
         try {
           const learnerId = getQueueLearnerId();
-          await enqueueRecording({
-            learnerId,
-            clientAttemptId,
-            sessionId,
-            clientSessionId: clientSessionIdRef.current,
-            promptId: prompt.id,
-            lang,
-            attemptIndex: index,
-            duration: recorder.seconds || 1,
-            mimeType: recorder.audioBlob.type || "audio/webm",
-            blob: recorder.audioBlob,
-            createdAt: Date.now(),
-          });
+          await enqueueRecording(
+            {
+              learnerId,
+              clientAttemptId,
+              sessionId,
+              clientSessionId: clientSessionIdRef.current,
+              promptId: prompt.id,
+              lang,
+              attemptIndex: index,
+              duration: recorder.seconds || 1,
+              mimeType: recorder.audioBlob.type || "audio/webm",
+              blob: recorder.audioBlob,
+              createdAt: Date.now(),
+            },
+            getQueueLearnerIds(),
+          );
           setError(
             "Offline: recording saved on this device. It will upload automatically when online.",
           );

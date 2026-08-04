@@ -42,6 +42,10 @@ This is a maintainability refactor, not a UI or product redesign.
 - Made IndexedDB queue writes resolve only after transaction completion and added abort-after-request-success coverage.
 - Lease misses now return a jittered `retryAt`; the scheduler persists that cooldown across queue, online, and visibility events, with a true two-module/two-tab regression test.
 - Offline attempt 2 records a durable `prerequisiteSatisfied` marker, protects an incoming attempt 2's attempt 1 during TTL cleanup, and has an eight-day offline recovery test.
+- Cold-start `uploading` rows now wake the scheduler and are recovered before polling; internal IndexedDB writes carry an internal notification marker so the scheduler ignores its own writes and cannot spin.
+- Practice API submit is outbox-only: it explicitly wakes the shared queue owner and reads the ready result; direct `createAttempt`/ready/failure mutations were removed from the route.
+- Queue enqueue is non-regressive for an existing `queued`, `uploading`, `processing`, or `ready` `clientAttemptId`, preventing a read-after-upload failure from re-queuing a completed recording.
+- Attempt dependency and TTL protection use stable `clientSessionId` keys while prerequisite checks remain restricted to the active device/server learner namespace set; added old-learner/new-device upgrade coverage.
 - Stale attempt recovery now clears old audio metadata and inserts a 24-hour delayed storage cleanup intent in the same database transaction; PostgreSQL integration covers the complete path.
 - Tightened new regression fixtures to repository-derived types; no production behavior is hidden behind `any`.
 

@@ -33,7 +33,7 @@ export type RecordingQueueItem = {
 };
 
 export function isQueueSyncCandidate(status: QueueStatus) {
-  return status === "queued" || status === "processing";
+  return status === "queued" || status === "uploading" || status === "processing";
 }
 
 export function recoverQueueStatus(status: QueueStatus): QueueStatus {
@@ -62,7 +62,9 @@ function ensureQueueChannel() {
   queueChannel ??= new BroadcastChannel("kotoba-loop-recording-queue");
   queueChannel.onmessage ??= () => {
     listeners.forEach((listener) => listener());
-    if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:queue-change"));
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("kotoba:queue-change", { detail: { internal: false } }));
+    }
   };
   return queueChannel;
 }
@@ -71,9 +73,11 @@ function broadcastChange() {
   ensureQueueChannel()?.postMessage({ type: "queue-change" });
 }
 
-function notify() {
+function notify(internal = false) {
   listeners.forEach((listener) => listener());
-  if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:queue-change"));
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("kotoba:queue-change", { detail: { internal } }));
+  }
   broadcastChange();
 }
 
@@ -83,12 +87,17 @@ export function orderRecordingQueue(items: RecordingQueueItem[]) {
   );
 }
 
-export function canSyncAttempt(item: RecordingQueueItem, items: RecordingQueueItem[]) {
+export function canSyncAttempt(
+  item: RecordingQueueItem,
+  items: RecordingQueueItem[],
+  learnerIds?: string | string[],
+) {
   if (item.attemptIndex === 1) return true;
   if (item.prerequisiteSatisfied) return true;
+  const allowedLearnerIds = normalizeLearnerIds(learnerIds ?? item.learnerId);
   return items.some(
     (candidate) =>
-      candidate.learnerId === item.learnerId &&
+      learnerMatches(candidate, allowedLearnerIds) &&
       candidate.clientSessionId === item.clientSessionId &&
       candidate.attemptIndex === 1 &&
       candidate.syncStatus === "ready",
@@ -112,8 +121,8 @@ function clearDeferredSyncState(item: RecordingQueueItem): RecordingQueueItem {
   };
 }
 
-function sessionDependencyKey(learnerId: string, clientSessionId: string) {
-  return `${learnerId}\u0000${clientSessionId}`;
+function sessionDependencyKey(clientSessionId: string) {
+  return clientSessionId;
 }
 
 function scheduleProcessingPoll(item: RecordingQueueItem, now = Date.now()): RecordingQueueItem {
@@ -152,24 +161,13 @@ function queueSchedulableItems(
 ): RecordingQueueItem[] {
   const queueLearnerIds = normalizeLearnerIds(learnerIds);
   if (queueLearnerIds.length === 0) return [];
-  const readySessionKeys = new Set(
-    items
-      .filter(
-        (item) =>
-          learnerMatches(item, queueLearnerIds) &&
-          item.attemptIndex === 1 &&
-          item.syncStatus === "ready",
-      )
-      .map((item) => item.clientSessionId),
-  );
   return orderRecordingQueue(items).filter((item) => {
     if (!learnerMatches(item, queueLearnerIds) || !isQueueSyncCandidate(item.syncStatus))
       return false;
-    return (
-      item.attemptIndex === 1 ||
-      item.prerequisiteSatisfied === true ||
-      readySessionKeys.has(item.clientSessionId)
-    );
+    // An interrupted upload must wake the scheduler even if its attempt-two
+    // prerequisite is not currently visible; sync will recover it first.
+    if (item.syncStatus === "uploading") return true;
+    return canSyncAttempt(item, items, queueLearnerIds);
   });
 }
 
@@ -264,31 +262,32 @@ function waitForTransactionWrite<T>(request: IDBRequest<T>, tx: IDBTransaction) 
   });
 }
 
-async function put(item: RecordingQueueItem) {
+async function put(item: RecordingQueueItem, internal = false) {
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
   const request = tx.objectStore(STORE).put(item);
   await waitForTransactionWrite(request, tx);
-  notify();
+  notify(internal);
 }
 
-async function remove(clientAttemptId: string) {
+async function remove(clientAttemptId: string, internal = false) {
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
   const request = tx.objectStore(STORE).delete(clientAttemptId);
   await waitForTransactionWrite(request, tx);
-  notify();
+  notify(internal);
 }
 
 export async function cleanupRecordingQueue(
   now = Date.now(),
   protectedSessionKeys: ReadonlySet<string> = new Set(),
+  internal = false,
 ) {
   const items = await allItems();
   const pendingSecondSessionKeys = new Set(
     items
       .filter((item) => item.attemptIndex === 2 && item.syncStatus !== "ready")
-      .map((item) => sessionDependencyKey(item.learnerId, item.clientSessionId)),
+      .map((item) => sessionDependencyKey(item.clientSessionId)),
   );
   for (const key of protectedSessionKeys) pendingSecondSessionKeys.add(key);
   // Never silently delete a recording that still needs upload or processing.
@@ -299,34 +298,51 @@ export async function cleanupRecordingQueue(
       !(
         item.attemptIndex === 1 &&
         item.syncStatus === "ready" &&
-        pendingSecondSessionKeys.has(sessionDependencyKey(item.learnerId, item.clientSessionId))
+        pendingSecondSessionKeys.has(sessionDependencyKey(item.clientSessionId))
       ),
   );
-  for (const item of expired) await remove(item.clientAttemptId);
+  for (const item of expired) await remove(item.clientAttemptId, internal);
 }
 
 /** Recover a tab that was suspended after marking an item uploading. */
-export async function recoverInterruptedUploads() {
+export async function recoverInterruptedUploads(internal = false) {
   const items = await allItems();
   for (const item of items.filter((candidate) => candidate.syncStatus === "uploading")) {
-    await put({
-      ...clearDeferredSyncState(item),
-      syncStatus: recoverQueueStatus(item.syncStatus),
-      lastError: undefined,
-    });
+    await put(
+      {
+        ...clearDeferredSyncState(item),
+        syncStatus: recoverQueueStatus(item.syncStatus),
+        lastError: undefined,
+      },
+      internal,
+    );
   }
 }
 
-export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStatus">) {
+export async function enqueueRecording(
+  input: Omit<RecordingQueueItem, "syncStatus">,
+  learnerIds?: string | string[],
+) {
   if (!input.learnerId || input.learnerId === "legacy") {
     throw new Error("Learner session is unavailable; recording was not queued.");
   }
   const incomingPrerequisite =
     input.attemptIndex === 2
-      ? new Set([sessionDependencyKey(input.learnerId, input.clientSessionId)])
+      ? new Set([sessionDependencyKey(input.clientSessionId)])
       : new Set<string>();
   await cleanupRecordingQueue(Date.now(), incomingPrerequisite);
   const existing = await allItems();
+  const existingItem = existing.find((item) => item.clientAttemptId === input.clientAttemptId);
+  if (
+    existingItem &&
+    (existingItem.syncStatus === "queued" ||
+      existingItem.syncStatus === "uploading" ||
+      existingItem.syncStatus === "processing" ||
+      existingItem.syncStatus === "ready")
+  ) {
+    return input.clientAttemptId;
+  }
+  const allowedLearnerIds = normalizeLearnerIds(learnerIds ?? input.learnerId);
   // Synced recordings keep only metadata, so they never consume the quota.
   const totalBytes = existing
     .filter((item) => item.syncStatus !== "ready")
@@ -339,7 +355,7 @@ export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStat
     (input.prerequisiteSatisfied === true ||
       existing.some(
         (item) =>
-          item.learnerId === input.learnerId &&
+          learnerMatches(item, allowedLearnerIds) &&
           item.clientSessionId === input.clientSessionId &&
           item.attemptIndex === 1 &&
           item.syncStatus === "ready",
@@ -553,8 +569,8 @@ export async function syncRecordingQueue(
     )
       return;
     const queueLearnerIds = normalizeLearnerIds(learnerIds);
-    await recoverInterruptedUploads();
-    await cleanupRecordingQueue();
+    await recoverInterruptedUploads(true);
+    await cleanupRecordingQueue(Date.now(), new Set(), true);
     const queueItems = orderRecordingQueue(await allItems());
     const items = queueItems.filter(
       (item) => learnerMatches(item, queueLearnerIds) && isQueueSyncCandidate(item.syncStatus),
@@ -570,8 +586,9 @@ export async function syncRecordingQueue(
       if (item.nextPollAt !== undefined && item.nextPollAt > now) continue;
       if (
         item.attemptIndex === 2 &&
-        item.prerequisiteSatisfied !== true &&
-        !readySessionKeys.has(item.clientSessionId)
+        !item.prerequisiteSatisfied &&
+        !readySessionKeys.has(item.clientSessionId) &&
+        !canSyncAttempt(item, queueItems, queueLearnerIds)
       )
         continue;
       try {
@@ -583,7 +600,7 @@ export async function syncRecordingQueue(
                 syncStatus: "uploading",
                 lastError: undefined,
               } as RecordingQueueItem);
-        if (syncing !== item) await put(syncing);
+        if (syncing !== item) await put(syncing, true);
         const attempt = await upload(syncing);
         const synced = attempt.status === "ready";
         const nextItem =
@@ -605,9 +622,12 @@ export async function syncRecordingQueue(
                   ? { blob: new Blob([], { type: syncing.mimeType }), blobDiscarded: true }
                   : {}),
               };
-        await put({
-          ...nextItem,
-        });
+        await put(
+          {
+            ...nextItem,
+          },
+          true,
+        );
         if (attempt.status === "ready") {
           if (item.attemptIndex === 1) readySessionKeys.add(item.clientSessionId);
         }
@@ -646,6 +666,7 @@ export async function syncRecordingQueue(
                 syncStatus: "failed",
                 lastError: message,
               },
+          true,
         );
         if (isTransientUploadError(error)) break;
       }

@@ -12,6 +12,8 @@ import type { Env } from "../../env";
 import { createProviderApplication } from "./service";
 import { z } from "zod";
 
+const providerDiagnosticsQuerySchema = z.object({ probe: z.enum(["true", "false"]).optional() });
+
 export async function providerRoutes(
   app: FastifyInstance,
   options: FastifyPluginOptions & { config: Env },
@@ -24,7 +26,7 @@ export async function providerRoutes(
       schema: {
         tags: ["providers"],
         summary: "Authenticated provider capability diagnostics",
-        querystring: z.object({ probe: z.enum(["true", "false"]).optional() }),
+        querystring: providerDiagnosticsQuerySchema,
         response: {
           200: providerDiagnosticsSchema,
           401: errorResponseSchema,
@@ -34,8 +36,9 @@ export async function providerRoutes(
       },
     },
     async (request) => {
-      await requireLearnerAuth(request);
-      return service.diagnose(request.id);
+      const learner = await requireLearnerAuth(request);
+      const { probe } = providerDiagnosticsQuerySchema.parse(request.query);
+      return service.diagnose(learner.id, request.id, request.ip, probe === "true");
     },
   );
 

@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { audioRecordings, speakingAttempts } from "../../db/schema";
+import { audioPlaybackReferences, audioRecordings, speakingAttempts } from "../../db/schema";
 import { withDb } from "../../http/with-db";
 
 export const providerRepository = {
@@ -13,5 +13,16 @@ export const providerRepository = {
         .where(and(eq(audioRecordings.id, audioId), eq(speakingAttempts.learnerId, learnerId))),
     );
     return rows[0];
+  },
+
+  async hasPlaybackReferenceForStorageKey(storageKey: string) {
+    const rows = await withDb("findAudioPlaybackReferenceByStorageKey", () =>
+      db()
+        .select({ id: audioPlaybackReferences.id })
+        .from(audioPlaybackReferences)
+        .where(eq(audioPlaybackReferences.storageKey, storageKey))
+        .limit(1),
+    );
+    return rows.length > 0;
   },
 };

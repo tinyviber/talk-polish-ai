@@ -17,6 +17,22 @@ export type SynthesisResult = {
   provider: string;
 };
 
+export type SynthesisStorageDisposition = "cache-hit" | "created";
+
+const synthesisStorageDisposition = new WeakMap<SynthesisResult, SynthesisStorageDisposition>();
+
+export function withSynthesisStorageDisposition<T extends SynthesisResult>(
+  result: T,
+  disposition: SynthesisStorageDisposition,
+) {
+  synthesisStorageDisposition.set(result, disposition);
+  return result;
+}
+
+export function getSynthesisStorageDisposition(result: SynthesisResult) {
+  return synthesisStorageDisposition.get(result);
+}
+
 export interface TextToSpeechProvider {
   readonly name: string;
   synthesize(input: SynthesisInput): Promise<SynthesisResult>;

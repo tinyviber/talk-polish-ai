@@ -9,18 +9,54 @@ import { providers, type Providers } from "../../providers";
 import { diagnoseProviders } from "../../providers/diagnostics";
 import { safeProviderError } from "../../providers/http";
 import { StorageError } from "../../providers/storage";
+import {
+  getSynthesisStorageDisposition,
+  type SynthesisResult,
+} from "../../providers/tts";
 import { issueAudioReference, resolveAudioReference } from "./audio-references";
 import { enforceProviderRateLimit } from "./rate-limit";
 import { removeOrQueueStorage } from "../../db/storage-cleanup";
 import { providerRepository } from "./repository";
 
 export type ProviderApplication = ReturnType<typeof createProviderApplication>;
+type ProviderApplicationDependencies = {
+  diagnoseProviders: typeof diagnoseProviders;
+  enforceProviderRateLimit: typeof enforceProviderRateLimit;
+  issueAudioReference: typeof issueAudioReference;
+  resolveAudioReference: typeof resolveAudioReference;
+  removeOrQueueStorage: typeof removeOrQueueStorage;
+  providerRepository: Pick<
+    typeof providerRepository,
+    "findRecordingForLearner" | "hasPlaybackReferenceForStorageKey"
+  >;
+};
 
 /** Application boundary for provider capability, TTS, audio, and realtime use cases. */
-export function createProviderApplication(config: Env, providerSet: Providers = providers(config)) {
+export function createProviderApplication(
+  config: Env,
+  providerSet: Providers = providers(config),
+  overrides: Partial<ProviderApplicationDependencies> = {},
+) {
+  const deps: ProviderApplicationDependencies = {
+    diagnoseProviders,
+    enforceProviderRateLimit,
+    issueAudioReference,
+    resolveAudioReference,
+    removeOrQueueStorage,
+    providerRepository,
+    ...overrides,
+  };
+
   return {
-    diagnose(requestId: string) {
-      return diagnoseProviders(requestId, config.DIAGNOSTICS_ACTIVE_PROBE, config, providerSet);
+    diagnose(
+      learnerId: string,
+      requestId: string,
+      clientIp?: string,
+      activeProbeRequested = false,
+    ) {
+      const activeProbe = config.DIAGNOSTICS_ACTIVE_PROBE && activeProbeRequested;
+      if (activeProbe) deps.enforceProviderRateLimit(learnerId, "diagnostics", clientIp);
+      return deps.diagnoseProviders(requestId, activeProbe, config, providerSet);
     },
 
     async synthesize(
@@ -29,21 +65,24 @@ export function createProviderApplication(config: Env, providerSet: Providers = 
       requestId: string,
       clientIp?: string,
     ) {
-      enforceProviderRateLimit(learnerId, "tts", clientIp);
+      deps.enforceProviderRateLimit(learnerId, "tts", clientIp);
       try {
         const result = await providerSet.tts.synthesize({ ...input, scope: learnerId });
         let reference: string | null = null;
         try {
           reference = result.storageKey
-            ? await issueAudioReference(
+            ? await deps.issueAudioReference(
                 learnerId,
                 result.storageKey,
                 result.contentType ?? "audio/mpeg",
               )
             : null;
         } catch (error) {
-          if (result.storageKey) {
-            await removeOrQueueStorage(
+          if (
+            result.storageKey &&
+            (await shouldCleanupTtsObjectAfterReferenceFailure(result, deps.providerRepository))
+          ) {
+            await deps.removeOrQueueStorage(
               providerSet.storage,
               result.storageKey,
               "tts-reference-failed",
@@ -65,13 +104,13 @@ export function createProviderApplication(config: Env, providerSet: Providers = 
     },
 
     async playbackRecording(learnerId: string, audioId: string) {
-      const audio = await providerRepository.findRecordingForLearner(learnerId, audioId);
+      const audio = await deps.providerRepository.findRecordingForLearner(learnerId, audioId);
       if (!audio) throw ApiError.notFound("Audio");
       return readAudio(providerSet, audio.storageKey, audio.mimeType);
     },
 
     async playbackReference(learnerId: string, referenceId: string) {
-      const audio = await resolveAudioReference(referenceId, learnerId);
+      const audio = await deps.resolveAudioReference(referenceId, learnerId);
       if (!audio) throw ApiError.notFound("Audio");
       return readAudio(providerSet, audio.storageKey, audio.mimeType);
     },
@@ -91,7 +130,7 @@ export function createProviderApplication(config: Env, providerSet: Providers = 
         };
       }
       try {
-        enforceProviderRateLimit(learnerId, "realtime", clientIp);
+        deps.enforceProviderRateLimit(learnerId, "realtime", clientIp);
         await providerSet.realtime.smokeTest(requestId);
         return {
           capability: "realtime",
@@ -112,6 +151,23 @@ export function createProviderApplication(config: Env, providerSet: Providers = 
       }
     },
   };
+}
+
+async function shouldCleanupTtsObjectAfterReferenceFailure(
+  result: SynthesisResult,
+  repository: Pick<typeof providerRepository, "hasPlaybackReferenceForStorageKey">,
+) {
+  if (!result.storageKey) return false;
+  if (getSynthesisStorageDisposition(result) === "cache-hit") return false;
+  try {
+    return !(await repository.hasPlaybackReferenceForStorageKey(result.storageKey));
+  } catch (error) {
+    console.warn("[providers] skipped TTS cleanup after reference failure", {
+      storageKey: result.storageKey,
+      error: error instanceof Error ? error.message : "database_error",
+    });
+    return false;
+  }
 }
 
 async function readAudio(providerSet: Providers, storageKey: string, mimeType: string) {

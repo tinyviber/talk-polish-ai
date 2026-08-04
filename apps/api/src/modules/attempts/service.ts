@@ -22,6 +22,12 @@ export type UploadedAudio = {
   filename: string;
 };
 
+type RecoverableAttemptRow = {
+  id: string;
+  status: string;
+  createdAt: Date;
+};
+
 const EXTENSIONS: Record<string, string> = {
   "audio/webm": "webm",
   "audio/ogg": "ogg",
@@ -31,6 +37,10 @@ const EXTENSIONS: Record<string, string> = {
   "audio/mp4": "m4a",
   "audio/m4a": "m4a",
 };
+
+export const ATTEMPT_PROCESSING_STALE_MS = 10 * 60 * 1000;
+const STALE_PROCESSING_RETRY_MESSAGE =
+  "A previous processing attempt expired before completion. Please retry the upload.";
 
 export function assertSupportedAudio(audio: UploadedAudio, maxBytes = MAX_AUDIO_BYTES) {
   const mime = audio.mimeType.split(";")[0]!.trim().toLowerCase();
@@ -47,10 +57,34 @@ export function assertSupportedAudio(audio: UploadedAudio, maxBytes = MAX_AUDIO_
   return mime;
 }
 
+export function isAttemptProcessingStale(createdAt: Date, now = Date.now()) {
+  return now - createdAt.getTime() >= ATTEMPT_PROCESSING_STALE_MS;
+}
+
+async function recoverStaleProcessingAttempt(
+  row: RecoverableAttemptRow | undefined,
+  learnerId: string,
+) {
+  if (!row || row.status !== "processing" || !isAttemptProcessingStale(row.createdAt)) {
+    return false;
+  }
+  if (await attemptRepository.markFailedIfProcessing(row.id)) return true;
+  try {
+    const current = await getAttempt(row.id, learnerId);
+    return current.status === "failed";
+  } catch (error) {
+    if (error instanceof ApiError && error.statusCode === 404) return true;
+    throw error;
+  }
+}
+
 /**
  * Full attempt pipeline: store audio -> transcribe -> assess -> persist.
  * Processing is synchronous today; the attempt row still carries a status so a
  * queued implementation can flip to `processing` + polling without API changes.
+ * If a server dies after inserting `processing`, we fail the stale row first
+ * and require an explicit retry so a fresh upload never starts provider work
+ * in the same request that decided the old worker was gone.
  */
 export async function createAttempt(
   sessionId: string,
@@ -68,14 +102,18 @@ export async function createAttempt(
   // attempt by setting the legacy `mocked` form field without an audio Blob.
   if (!audio) throw ApiError.missingAudio();
 
-  const prompt = await requirePrompt(session.promptId);
   const attemptIndex = fields.attemptIndex === 2 ? 2 : 1;
   const attemptId = `att_${randomUUID()}`;
   const clientAttemptId = fields.clientAttemptId;
+  const existing = clientAttemptId
+    ? await attemptRepository.findByClientId(learnerId, clientAttemptId)
+    : undefined;
   if (clientAttemptId) {
-    const existing = await attemptRepository.findByClientId(learnerId, clientAttemptId);
     if (existing && (existing.sessionId !== sessionId || existing.attemptIndex !== attemptIndex)) {
       throw ApiError.conflict("clientAttemptId is already used for another attempt.");
+    }
+    if (await recoverStaleProcessingAttempt(existing, learnerId)) {
+      throw ApiError.processingUnavailable(STALE_PROCESSING_RETRY_MESSAGE);
     }
     // Network retries return the same processing/ready record. A failed record
     // is intentionally reclaimed below. Never reclaim a live processing row:
@@ -85,6 +123,14 @@ export async function createAttempt(
       return getAttempt(existing.id, learnerId);
     }
   }
+  const slotAttempt = await attemptRepository.findBySessionAndIndex(sessionId, attemptIndex);
+  if (slotAttempt && slotAttempt.id !== existing?.id) {
+    if (await recoverStaleProcessingAttempt(slotAttempt, learnerId)) {
+      throw ApiError.processingUnavailable(STALE_PROCESSING_RETRY_MESSAGE);
+    }
+  }
+
+  const prompt = await requirePrompt(session.promptId);
   const {
     storage,
     transcription: transcriptionProvider,

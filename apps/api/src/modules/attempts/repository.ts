@@ -31,6 +31,7 @@ export const attemptRepository = {
           status: speakingAttempts.status,
           sessionId: speakingAttempts.sessionId,
           attemptIndex: speakingAttempts.attemptIndex,
+          clientAttemptId: speakingAttempts.clientAttemptId,
           createdAt: speakingAttempts.createdAt,
         })
         .from(speakingAttempts)
@@ -40,6 +41,28 @@ export const attemptRepository = {
             eq(speakingAttempts.clientAttemptId, clientAttemptId),
           ),
         ),
+    );
+    return rows[0];
+  },
+  async findBySessionAndIndex(sessionId: string, attemptIndex: 1 | 2) {
+    const rows = await withDb("findAttemptSlot", () =>
+      db()
+        .select({
+          id: speakingAttempts.id,
+          status: speakingAttempts.status,
+          sessionId: speakingAttempts.sessionId,
+          attemptIndex: speakingAttempts.attemptIndex,
+          clientAttemptId: speakingAttempts.clientAttemptId,
+          createdAt: speakingAttempts.createdAt,
+        })
+        .from(speakingAttempts)
+        .where(
+          and(
+            eq(speakingAttempts.sessionId, sessionId),
+            eq(speakingAttempts.attemptIndex, attemptIndex),
+          ),
+        )
+        .limit(1),
     );
     return rows[0];
   },
@@ -149,6 +172,19 @@ export const attemptRepository = {
   }) {
     await withDb("persistAttemptResult", () =>
       db().transaction(async (tx) => {
+        const claimed = await tx
+          .update(speakingAttempts)
+          .set({ status: "ready" })
+          .where(
+            and(
+              eq(speakingAttempts.id, input.attemptId),
+              eq(speakingAttempts.status, "processing"),
+            ),
+          )
+          .returning({ id: speakingAttempts.id });
+        if (claimed.length === 0) {
+          throw ApiError.conflict("Attempt processing was already recovered. Please retry.");
+        }
         await tx.insert(attemptResults).values({
           attemptId: input.attemptId,
           transcript: input.transcript,
@@ -158,10 +194,6 @@ export const attemptRepository = {
           overallScore: input.overallScore,
           feedback: input.feedback,
         });
-        await tx
-          .update(speakingAttempts)
-          .set({ status: "ready" })
-          .where(eq(speakingAttempts.id, input.attemptId));
         await tx.insert(progressEvents).values({
           id: `prg_${randomUUID()}`,
           learnerId: input.learnerId,
@@ -188,6 +220,16 @@ export const attemptRepository = {
         .set({ status: "failed" })
         .where(eq(speakingAttempts.id, attemptId)),
     );
+  },
+  async markFailedIfProcessing(attemptId: string) {
+    const rows = await withDb("markAttemptFailedIfProcessing", () =>
+      db()
+        .update(speakingAttempts)
+        .set({ status: "failed" })
+        .where(and(eq(speakingAttempts.id, attemptId), eq(speakingAttempts.status, "processing")))
+        .returning({ id: speakingAttempts.id }),
+    );
+    return rows.length > 0;
   },
   async removeAudioMetadata(audioId: string) {
     await withDb("cleanupFailedAudioMetadata", () =>

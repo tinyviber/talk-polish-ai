@@ -72,7 +72,9 @@ All code checks below used fixed Bun `1.2.17` via `PATH=/tmp/kotoba-bun-1.2.17/b
 - `bun run build:docker` — blocked: Docker daemon unavailable at `unix:///Users/wj/.orbstack/run/docker.sock`.
 - `git diff --check` — pass.
 
-Therefore this remains a draft/WIP PR. It must not be called fully verified until frozen install, PostgreSQL integration, and Docker build pass in CI or a supplied environment.
+GitHub Actions run [`30893498914`](https://github.com/tinyviber/talk-polish-ai/actions/runs/30893498914) for head `012f89f8d7255989d6bf59afce749b86a3fe1522` — pass. Its `checks` job passed `bun install --frozen-lockfile`, `bun run format:check`, `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`, and `bun run build:docker`; its PostgreSQL `integration` job passed `bun install --frozen-lockfile` and `bun run test:integration`.
+
+The local environment could not run PostgreSQL or Docker, but the same frozen install, integration, and Docker steps now pass in CI. The PR remains draft for human review and PR #1 integration; the engineering validation matrix is green.
 
 Not verified here: real iPhone MediaRecorder/Wake Lock/PWA update behavior, real OpenAI-compatible provider, real WebSocket provider, real object storage, multi-device browser smoke flow, and production secret injection.
 

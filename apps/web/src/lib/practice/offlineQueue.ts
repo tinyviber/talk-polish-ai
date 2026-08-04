@@ -30,7 +30,29 @@ export type RecordingQueueItem = {
   transientRetryIndex?: number | undefined;
   /** Attempt 1 was confirmed ready before this attempt was queued offline. */
   prerequisiteSatisfied?: boolean | undefined;
+  /**
+   * Durable feedback-delivery state for a server-side ready attempt.
+   * `pending` — the server has the attempt but this device has not rendered
+   * its feedback yet; `error` — a feedback read failed and must be retried;
+   * `delivered` — feedback reached the UI and the slot is finished.
+   */
+  feedbackState?: FeedbackState | undefined;
+  feedbackLastError?: string | undefined;
+  feedbackUpdatedAt?: number | undefined;
 };
+
+export type FeedbackState = "pending" | "delivered" | "error";
+
+/** A ready attempt whose feedback has not yet been shown on any tab. */
+export function isFeedbackOutstanding(item: RecordingQueueItem) {
+  return (
+    item.syncStatus === "ready" &&
+    typeof item.attemptId === "string" &&
+    item.attemptId.length > 0 &&
+    (item.feedbackState ?? "pending") !== "delivered"
+  );
+}
+
 
 export function isQueueSyncCandidate(status: QueueStatus) {
   return status === "queued" || status === "uploading" || status === "processing";
@@ -43,7 +65,7 @@ export function recoverQueueStatus(status: QueueStatus): QueueStatus {
 const DB_NAME = "kotoba-loop-offline";
 const STORE = "recordings";
 const LEASE_STORE = "syncLeases";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
 const LEASE_MS = 30_000;
@@ -204,9 +226,15 @@ function openDb(): Promise<IDBDatabase> {
             syncStatus: "failed",
             lastError: "This recording needs to be re-recorded after the app update.",
           });
+        } else if (value["syncStatus"] === "ready" && value["feedbackState"] === undefined) {
+          // v3 rows predate durable feedback tracking. A ready row from that
+          // era may or may not have been shown; treat it as outstanding so the
+          // learner can still recover the feedback instead of losing it.
+          cursor.update({ ...value, feedbackState: "pending" });
         }
         cursor.continue();
       };
+
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -300,17 +328,20 @@ export async function cleanupRecordingQueue(
       .map((item) => sessionDependencyKey(item.clientSessionId)),
   );
   for (const key of protectedSessionKeys) pendingSecondSessionKeys.add(key);
-  // Never silently delete a recording that still needs upload or processing.
+  // Never silently delete a recording that still needs upload or processing,
+  // nor one whose feedback has never been delivered to the learner.
   const expired = items.filter(
     (item) =>
       now - item.createdAt > TTL_MS &&
       (item.syncStatus === "ready" || item.syncStatus === "failed") &&
+      !isFeedbackOutstanding(item) &&
       !(
         item.attemptIndex === 1 &&
         item.syncStatus === "ready" &&
         pendingSecondSessionKeys.has(sessionDependencyKey(item.clientSessionId))
       ),
   );
+
   for (const item of expired) await remove(item.clientAttemptId, internal);
 }
 
@@ -353,6 +384,19 @@ export async function enqueueRecording(
     return input.clientAttemptId;
   }
   const allowedLearnerIds = normalizeLearnerIds(learnerIds ?? input.learnerId);
+  // The server already holds a ready attempt for this slot whose feedback was
+  // never delivered. Re-recording would orphan it and create a duplicate
+  // attempt for the same (session, index); hand the caller that row instead.
+  const outstanding = existing.find(
+    (item) =>
+      learnerMatches(item, allowedLearnerIds) &&
+      item.clientSessionId === input.clientSessionId &&
+      item.attemptIndex === input.attemptIndex &&
+      item.clientAttemptId !== input.clientAttemptId &&
+      isFeedbackOutstanding(item),
+  );
+  if (outstanding) return outstanding.clientAttemptId;
+
   // Synced recordings keep only metadata, so they never consume the quota.
   const totalBytes = existing
     .filter((item) => item.syncStatus !== "ready")
@@ -394,8 +438,41 @@ export async function markRecordingReady(
     lastError: undefined,
     blob: new Blob([], { type: item.mimeType }),
     blobDiscarded: true,
+    feedbackState: item.feedbackState === "delivered" ? "delivered" : "pending",
+    feedbackUpdatedAt: Date.now(),
   });
 }
+
+/** Durably record that a feedback read failed, so any tab can retry it later. */
+export async function markFeedbackError(clientAttemptId: string, message: string) {
+  await updateFeedbackState(clientAttemptId, "error", message);
+}
+
+/** Durably record that feedback reached the learner; releases the slot. */
+export async function markFeedbackDelivered(clientAttemptId: string) {
+  await updateFeedbackState(clientAttemptId, "delivered");
+}
+
+async function updateFeedbackState(
+  clientAttemptId: string,
+  feedbackState: FeedbackState,
+  feedbackLastError?: string,
+) {
+  if (typeof indexedDB === "undefined") return;
+  const item = (await allItems()).find(
+    (candidate) => candidate.clientAttemptId === clientAttemptId,
+  );
+  if (!item || item.feedbackState === "delivered") return;
+  // `put` refuses to overwrite ready rows, so write feedback state directly.
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  const request = tx
+    .objectStore(STORE)
+    .put({ ...item, feedbackState, feedbackLastError, feedbackUpdatedAt: Date.now() });
+  await waitForTransactionWrite(request, tx);
+  notify();
+}
+
 
 export async function markRecordingFailed(clientAttemptId: string, message: string) {
   const item = (await allItems()).find(

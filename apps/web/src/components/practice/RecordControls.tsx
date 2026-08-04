@@ -38,6 +38,7 @@ export function RecordControls({
   submitLabel,
   mode,
   onUseDemo,
+  onStartRecording,
   savedDraft = false,
 }: {
   recorder: RecorderState & {
@@ -51,6 +52,7 @@ export function RecordControls({
   submitLabel: string;
   mode: AppMode;
   onUseDemo: () => void;
+  onStartRecording?: () => void;
   savedDraft?: boolean;
 }) {
   const { status, seconds, level, audioUrl, error } = recorder;
@@ -97,7 +99,10 @@ export function RecordControls({
                 <Button
                   size="lg"
                   className="h-16 rounded-full px-8 text-base shadow-tactile"
-                  onClick={() => void recorder.start()}
+                  onClick={() => {
+                    onStartRecording?.();
+                    void recorder.start();
+                  }}
                   disabled={status === "requesting"}
                 >
                   <Mic className="size-5" aria-hidden />

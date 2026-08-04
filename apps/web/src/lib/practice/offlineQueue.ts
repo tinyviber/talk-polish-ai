@@ -265,9 +265,19 @@ function waitForTransactionWrite<T>(request: IDBRequest<T>, tx: IDBTransaction) 
 async function put(item: RecordingQueueItem, internal = false) {
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
-  const request = tx.objectStore(STORE).put(item);
+  const store = tx.objectStore(STORE);
+  let wrote = false;
+  const request = store.get(item.clientAttemptId);
+  request.onsuccess = () => {
+    const current = request.result as RecordingQueueItem | undefined;
+    // A late worker must never move a completed attempt back to an
+    // in-flight/error state after another tab has finished it.
+    if (current?.syncStatus === "ready") return;
+    store.put(item);
+    wrote = true;
+  };
   await waitForTransactionWrite(request, tx);
-  notify(internal);
+  if (wrote) notify(internal);
 }
 
 async function remove(clientAttemptId: string, internal = false) {

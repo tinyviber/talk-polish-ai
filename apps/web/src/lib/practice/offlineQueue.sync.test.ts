@@ -5,9 +5,13 @@ import {
   enqueueRecording,
   getNextRecordingQueuePollAt,
   getRecordingQueueLeaseKey,
+  listDurablePracticeWorkflows,
   listRecordingQueue,
+  markFeedbackDelivered,
+  markFeedbackError,
   markRecordingFailed,
   markRecordingReady,
+  abandonPracticeWorkflow,
   removeQueuedRecording,
   syncRecordingQueue,
 } from "./offlineQueue";
@@ -185,6 +189,43 @@ describe("offline queue sync behavior", () => {
 
     await markRecordingFailed(input.clientAttemptId, "late worker error");
     expect((await listRecordingQueue(input.learnerId))[0]?.syncStatus).toBe("ready");
+  });
+
+  test("persists feedback recovery states across reload-like reads", async () => {
+    const input = createRecording("attempt-feedback-recovery");
+    await enqueueRecording(input);
+    await markRecordingReady(input.clientAttemptId, {
+      attemptId: "server-feedback-recovery",
+      sessionId: "session-1",
+    });
+
+    expect(
+      (await listDurablePracticeWorkflows(input.learnerId)).map((item) => item.clientAttemptId),
+    ).toEqual([input.clientAttemptId]);
+
+    await markFeedbackError(input.clientAttemptId, "feedback request failed");
+    const failed = (await listRecordingQueue(input.learnerId))[0]!;
+    expect(failed.feedbackState).toBe("error");
+    expect(failed.workflowState).toBe("awaiting-feedback");
+    expect(failed.feedbackLastError).toBe("feedback request failed");
+
+    await markFeedbackDelivered(input.clientAttemptId);
+    expect(await listDurablePracticeWorkflows(input.learnerId)).toEqual([]);
+    expect((await listRecordingQueue(input.learnerId))[0]?.workflowState).toBe("consumed");
+
+    const abandoned = createRecording("attempt-feedback-abandoned");
+    await enqueueRecording(abandoned);
+    await markRecordingReady(abandoned.clientAttemptId, {
+      attemptId: "server-feedback-abandoned",
+      sessionId: "session-1",
+    });
+    await abandonPracticeWorkflow(abandoned.clientAttemptId);
+    expect(await listDurablePracticeWorkflows(input.learnerId)).toEqual([]);
+    expect(
+      (await listRecordingQueue(input.learnerId)).find(
+        (item) => item.clientAttemptId === abandoned.clientAttemptId,
+      )?.workflowState,
+    ).toBe("abandoned");
   });
 
   test("keeps scheduling processing polls beyond 15.5 seconds", async () => {

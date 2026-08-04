@@ -30,6 +30,8 @@ import {
 import {
   enqueueRecording,
   listRecordingQueue,
+  markFeedbackDelivered,
+  markFeedbackError,
   retryQueuedRecordings,
   subscribeRecordingQueue,
   syncRecordingQueue,
@@ -44,6 +46,12 @@ import {
   reducePracticeState,
   type PracticeStage,
 } from "@/features/practice/state-machine";
+import {
+  abandonWorkflow,
+  listRecoveryWorkflows,
+  type DurablePracticeWorkflow,
+} from "@/lib/practice/workflow-store";
+import { FeedbackRecovery } from "@/features/practice/components/FeedbackRecovery";
 
 export const Route = createFileRoute("/practice")({
   head: () => ({
@@ -73,6 +81,7 @@ const STEP_INDEX: Record<Step, number> = {
   uploading: 2,
   processing: 2,
   feedback: 2,
+  "feedback-recovery": 2,
   record2: 3,
   processing2: 3,
   result: 4,
@@ -164,9 +173,6 @@ function Practice() {
   } = usePracticeStore();
   const [practiceState, dispatchPractice] = useReducer(reducePracticeState, initialPracticeState);
   const step = practiceState.stage;
-  const setStep = useCallback((next: Step) => {
-    dispatchPractice({ type: "stage", stage: next });
-  }, []);
   const [first, setFirst] = useState<Attempt | null>(null);
   const [second, setSecond] = useState<Attempt | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(() =>
@@ -177,6 +183,8 @@ function Practice() {
   const [error, setError] = useState<string | null>(null);
   const [interruptedDraftPending, setInterruptedDraftPending] = useState(false);
   const [feedbackRetryPending, setFeedbackRetryPending] = useState(false);
+  const [feedbackPendingDelivery, setFeedbackPendingDelivery] = useState<string | null>(null);
+  const [recoveryTarget, setRecoveryTarget] = useState<DurablePracticeWorkflow | null>(null);
   const { setBusy } = usePwa();
   const interruptedAttemptIdRef = useRef<string | null>(null);
   const pendingFeedbackAttemptIdRef = useRef<string | null>(null);
@@ -238,6 +246,11 @@ function Practice() {
   const recorder = useRecorder({ mode, onInterruptedRecording: saveInterruptedDraft });
   const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
 
+  useEffect(() => {
+    if (recorder.status === "recording") dispatchPractice({ type: "recording" });
+    if (recorder.status === "recorded") dispatchPractice({ type: "recorded" });
+  }, [recorder.status]);
+
   const resolveReadyAttempt = useCallback(
     async (item: RecordingQueueItem, generation = workflowGenerationRef.current) => {
       const resolutionKey = `${item.clientAttemptId}:${generation}`;
@@ -251,10 +264,24 @@ function Practice() {
           return null;
         }
         if (result.status === "retry") {
-          pendingFeedbackAttemptIdRef.current = item.clientAttemptId;
-          if (interruptedAttemptIdRef.current === item.clientAttemptId) {
-            interruptedAttemptIdRef.current = null;
-          }
+          await markFeedbackError(item.clientAttemptId, errorMessage(result.error)).catch(() => {
+            // The ready queue row remains the recovery source if IDB is temporarily unavailable.
+          });
+          setRecoveryTarget(
+            (current) =>
+              current ?? {
+                learnerId: item.learnerId,
+                clientSessionId: item.clientSessionId,
+                clientAttemptId: item.clientAttemptId,
+                promptId: item.promptId,
+                lang: item.lang,
+                attemptIndex: item.attemptIndex,
+                state: "awaiting-feedback",
+                updatedAt: item.workflowUpdatedAt ?? item.createdAt,
+                sessionId: item.sessionId,
+                attemptId: item.attemptId!,
+              },
+          );
           setFeedbackRetryPending(true);
           setInterruptedDraftPending(false);
           setError(
@@ -262,7 +289,11 @@ function Practice() {
               ? "Recording uploaded. Feedback will load when your connection returns."
               : errorMessage(result.error),
           );
-          setStep(item.attemptIndex === 1 ? "record" : "record2");
+          dispatchPractice({
+            type: "feedback-load-failed",
+            message: errorMessage(result.error),
+            attemptIndex: item.attemptIndex,
+          });
           return null;
         }
 
@@ -270,21 +301,19 @@ function Practice() {
         else if (result.attempt.sessionId) setSessionId(result.attempt.sessionId);
         if (item.attemptIndex === 1) {
           setFirst(result.attempt);
-          setStep("feedback");
+          dispatchPractice({ type: "ready", attemptIndex: 1 });
         } else {
           setSecond(result.attempt);
-          setStep("result");
+          dispatchPractice({ type: "ready", attemptIndex: 2 });
         }
-        if (interruptedAttemptIdRef.current === item.clientAttemptId) {
-          interruptedAttemptIdRef.current = null;
-        }
-        if (pendingFeedbackAttemptIdRef.current === item.clientAttemptId) {
-          pendingFeedbackAttemptIdRef.current = null;
-        }
+        // Mark consumed in an effect after React commits feedback state. A
+        // crash between fetch and commit leaves durable recovery available.
+        setFeedbackPendingDelivery(item.clientAttemptId);
         setFeedbackRetryPending(false);
         setInterruptedDraftPending(false);
         setError(null);
         void refresh().catch((cause) => {
+          if (generation !== workflowGenerationRef.current) return;
           setError(`Attempt saved, but progress could not refresh: ${errorMessage(cause)}`);
         });
         return result.attempt;
@@ -295,8 +324,61 @@ function Practice() {
       });
       return resolution;
     },
-    [refresh, setStep],
+    [refresh],
   );
+
+  useEffect(() => {
+    if (!feedbackPendingDelivery) return;
+    const clientAttemptId = feedbackPendingDelivery;
+    const generation = workflowGenerationRef.current;
+    let cancelled = false;
+    void markFeedbackDelivered(clientAttemptId)
+      .then(() => {
+        if (cancelled || generation !== workflowGenerationRef.current) return;
+        if (interruptedAttemptIdRef.current === clientAttemptId) {
+          interruptedAttemptIdRef.current = null;
+        }
+        if (pendingFeedbackAttemptIdRef.current === clientAttemptId) {
+          pendingFeedbackAttemptIdRef.current = null;
+        }
+        setRecoveryTarget(null);
+        setFeedbackPendingDelivery(null);
+      })
+      .catch((deliveryError) => {
+        if (cancelled || generation !== workflowGenerationRef.current) return;
+        const item = queuedItems.find((candidate) => candidate.clientAttemptId === clientAttemptId);
+        if (item) {
+          setRecoveryTarget(
+            (current) =>
+              current ?? {
+                learnerId: item.learnerId,
+                clientSessionId: item.clientSessionId,
+                clientAttemptId: item.clientAttemptId,
+                promptId: item.promptId,
+                lang: item.lang,
+                attemptIndex: item.attemptIndex,
+                state: "awaiting-feedback",
+                updatedAt: item.workflowUpdatedAt ?? item.createdAt,
+                sessionId: item.sessionId,
+                attemptId: item.attemptId!,
+              },
+          );
+          setFeedbackRetryPending(true);
+          dispatchPractice({
+            type: "feedback-load-failed",
+            message: errorMessage(deliveryError),
+            attemptIndex: item.attemptIndex,
+          });
+        }
+        setError(
+          `Feedback loaded, but recovery state could not be saved: ${errorMessage(deliveryError)}`,
+        );
+        setFeedbackPendingDelivery(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [feedbackPendingDelivery, queuedItems]);
 
   const reconcileQueue = useCallback(async () => {
     const generation = ++queueReadGenerationRef.current;
@@ -304,14 +386,28 @@ function Practice() {
       const items = await listRecordingQueue(getQueueLearnerIds());
       if (!queueMountedRef.current || generation !== queueReadGenerationRef.current) return;
       setQueuedItems(items);
-      const clientAttemptId =
-        interruptedAttemptIdRef.current ?? pendingFeedbackAttemptIdRef.current;
+      let clientAttemptId = interruptedAttemptIdRef.current ?? pendingFeedbackAttemptIdRef.current;
+      if (!clientAttemptId && mode === "api") {
+        const [workflow] = await listRecoveryWorkflows(getQueueLearnerIds());
+        if (workflow) {
+          clientAttemptId = workflow.clientAttemptId;
+          interruptedAttemptIdRef.current = workflow.clientAttemptId;
+          setRecoveryTarget(workflow);
+          setSessionId(workflow.sessionId);
+          setFeedbackRetryPending(true);
+          dispatchPractice({
+            type: "feedback-load-failed",
+            message: "Recording uploaded. Feedback is ready to load.",
+            attemptIndex: workflow.attemptIndex,
+          });
+        }
+      }
       const ready = findReadyRecording(items, clientAttemptId);
       if (ready) void resolveReadyAttempt(ready, workflowGenerationRef.current);
     } catch {
       // A later online/visibility/queue event retries the durable read.
     }
-  }, [resolveReadyAttempt]);
+  }, [mode, resolveReadyAttempt]);
 
   useEffect(() => {
     queueMountedRef.current = true;
@@ -339,6 +435,7 @@ function Practice() {
   }, [queuedItems, resolveReadyAttempt]);
 
   const retryReadyFeedback = useCallback(() => {
+    dispatchPractice({ type: "feedback-retry-requested" });
     void reconcileQueue();
   }, [reconcileQueue]);
 
@@ -354,6 +451,29 @@ function Practice() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [retryReadyFeedback]);
+
+  const startOver = useCallback(async () => {
+    const target = recoveryTarget;
+    workflowGenerationRef.current += 1;
+    if (target) {
+      await abandonWorkflow(target.clientAttemptId);
+    }
+    const nextClientSessionId = crypto.randomUUID();
+    clientSessionIdRef.current = nextClientSessionId;
+    interruptedAttemptIdRef.current = null;
+    pendingFeedbackAttemptIdRef.current = null;
+    readyAttemptResolutionRef.current.clear();
+    setRecoveryTarget(null);
+    setFeedbackPendingDelivery(null);
+    setFeedbackRetryPending(false);
+    setInterruptedDraftPending(false);
+    setFirst(null);
+    setSecond(null);
+    setSessionId(null);
+    setError(null);
+    recorder.reset();
+    dispatchPractice({ type: "next-prompt" });
+  }, [recoveryTarget, recorder]);
   useEffect(() => {
     setBusy(
       recorder.status === "recording" || step === "processing" || step === "processing2",
@@ -369,6 +489,22 @@ function Practice() {
         <div className="mx-auto max-w-3xl px-4 py-12">
           <div className="h-56 animate-pulse rounded-3xl bg-secondary" />
         </div>
+      </div>
+    );
+  }
+
+  if (mode === "api" && recoveryTarget && step === "feedback-recovery") {
+    return (
+      <div className="min-h-screen">
+        <AppHeader />
+        <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:py-10">
+          <FeedbackRecovery
+            workflow={recoveryTarget}
+            error={error}
+            onRetry={retryReadyFeedback}
+            onStartOver={() => void startOver()}
+          />
+        </main>
       </div>
     );
   }
@@ -396,10 +532,18 @@ function Practice() {
     }
     if (mode === "api") {
       setStarting(true);
+      const generation = workflowGenerationRef.current;
       const clientSessionId = clientSessionIdRef.current ?? crypto.randomUUID();
       clientSessionIdRef.current = clientSessionId;
       try {
         const session = await createSession(prompt.id, clientSessionId);
+        if (
+          generation !== workflowGenerationRef.current ||
+          clientSessionIdRef.current !== clientSessionId
+        ) {
+          setStarting(false);
+          return;
+        }
         setSessionId(session.id);
       } catch (cause) {
         // Offline is not a blocker: the session is created from the same
@@ -415,13 +559,15 @@ function Practice() {
       }
       setStarting(false);
     }
-    setStep("record");
+    dispatchPractice({ type: "begin" });
   };
 
   const submit = async (index: 1 | 2) => {
     setError(null);
-    setStep(index === 1 ? "processing" : "processing2");
     workflowGenerationRef.current += 1;
+    const generation = workflowGenerationRef.current;
+    dispatchPractice({ type: "submit", attemptIndex: index });
+    dispatchPractice({ type: "processing", attemptIndex: index });
     const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
     try {
       if (!prompt) throw new Error("No prompt is selected.");
@@ -440,7 +586,7 @@ function Practice() {
         // Persist before any network mutation. A page kill after this point
         // leaves an idempotent durable record instead of an in-memory Blob only.
         try {
-          await enqueueRecording(
+          const canonicalClientAttemptId = await enqueueRecording(
             {
               learnerId: getQueueLearnerId(),
               clientAttemptId,
@@ -456,6 +602,7 @@ function Practice() {
             },
             queueLearnerIds,
           );
+          interruptedAttemptIdRef.current = canonicalClientAttemptId;
         } catch {
           // No durable row exists when enqueue fails, so do not reuse this
           // client id for a later recording.
@@ -481,7 +628,7 @@ function Practice() {
           );
         }
         const queued = (await listRecordingQueue(queueLearnerIds)).find(
-          (item) => item.clientAttemptId === clientAttemptId,
+          (item) => item.clientAttemptId === interruptedAttemptIdRef.current,
         );
         if (!queued || queued.syncStatus === "queued" || queued.syncStatus === "uploading") {
           throw new ApiClientError(
@@ -510,10 +657,11 @@ function Practice() {
       } else {
         // Demo feedback is deterministic sample data even if the browser captured a local blob.
         attempt = await analyzeAttempt(prompt, index, recorder.seconds || 32, true);
+        if (generation !== workflowGenerationRef.current) return;
       }
       if (index === 1) {
         setFirst(attempt);
-        setStep("feedback");
+        dispatchPractice({ type: "ready", attemptIndex: 1 });
         recordSession({
           id: sessionId ?? `s-${Date.now()}`,
           lang,
@@ -524,7 +672,7 @@ function Practice() {
         });
       } else {
         setSecond(attempt);
-        setStep("result");
+        dispatchPractice({ type: "ready", attemptIndex: 2 });
         recordSession({
           id: sessionId ?? `s-${Date.now()}`,
           lang,
@@ -541,7 +689,7 @@ function Practice() {
       if (queueWaiting) {
         setInterruptedDraftPending(true);
         setError(errorMessage(cause));
-        setStep(index === 1 ? "record" : "record2");
+        dispatchPractice({ type: "failed", message: errorMessage(cause), attemptIndex: index });
         recorder.reset();
         return;
       }
@@ -575,7 +723,7 @@ function Practice() {
           );
           interruptedAttemptIdRef.current = clientAttemptId;
           setInterruptedDraftPending(true);
-          setStep(index === 1 ? "record" : "record2");
+          dispatchPractice({ type: "offline", attemptIndex: index });
           recorder.reset();
           return;
         } catch {
@@ -583,7 +731,7 @@ function Practice() {
         }
       }
       setError(errorMessage(cause));
-      setStep(index === 1 ? "record" : "record2");
+      dispatchPractice({ type: "failed", message: errorMessage(cause), attemptIndex: index });
       return;
     }
     interruptedAttemptIdRef.current = null;
@@ -595,6 +743,7 @@ function Practice() {
 
   const retryOffline = async () => {
     const learnerIds = getQueueLearnerIds();
+    dispatchPractice({ type: "retry", attemptIndex: practiceState.attemptIndex });
     await retryQueuedRecordings(learnerIds);
     setBusy(true, "queue");
     try {
@@ -667,7 +816,16 @@ function Practice() {
                 </Button>
                 <Button
                   variant="ghost"
-                  onClick={() => setPromptOffset((o) => o + 1)}
+                  onClick={() => {
+                    workflowGenerationRef.current += 1;
+                    clientSessionIdRef.current = crypto.randomUUID();
+                    setFeedbackPendingDelivery(null);
+                    setSessionId(null);
+                    setFirst(null);
+                    setSecond(null);
+                    setPromptOffset((o) => o + 1);
+                    dispatchPractice({ type: "next-prompt" });
+                  }}
                   className="text-muted-foreground"
                 >
                   <RefreshCw className="size-4" aria-hidden />
@@ -677,7 +835,10 @@ function Practice() {
             </>
           ) : null}
 
-          {step === "record" || step === "record2" ? (
+          {step === "record" ||
+          step === "record2" ||
+          step === "recording" ||
+          step === "recorded" ? (
             <>
               <PromptCard prompt={prompt} compact mode={mode} />
               {step === "record2" && first ? (
@@ -693,8 +854,10 @@ function Practice() {
               <RecordControls
                 recorder={recorder}
                 targetSeconds={prompt.seconds}
-                submitLabel={step === "record" ? "Get feedback" : "See my improvement"}
-                onSubmit={() => void submit(step === "record" ? 1 : 2)}
+                submitLabel={
+                  practiceState.attemptIndex === 1 ? "Get feedback" : "See my improvement"
+                }
+                onSubmit={() => void submit(practiceState.attemptIndex)}
                 mode={mode}
                 onUseDemo={switchToDemo}
                 onStartRecording={() => {
@@ -705,6 +868,19 @@ function Practice() {
                 savedDraft={interruptedDraftPending}
               />
             </>
+          ) : null}
+
+          {step === "offline-recovery" || step === "retry" ? (
+            <section className="rounded-3xl border border-warn/40 bg-warn/10 p-6 shadow-lift">
+              <h1 className="font-display text-xl">Recording saved for upload</h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Your answer stays on this device. Retry upload when connection returns; it will not
+                be recorded again.
+              </p>
+              <Button className="mt-5" onClick={() => void retryOffline()}>
+                Retry upload
+              </Button>
+            </section>
           ) : null}
 
           {step === "processing" ? <Processing label="Listening to your answer…" /> : null}
@@ -735,9 +911,10 @@ function Practice() {
                   workflowGenerationRef.current += 1;
                   interruptedAttemptIdRef.current = null;
                   pendingFeedbackAttemptIdRef.current = null;
+                  setFeedbackPendingDelivery(null);
                   setFeedbackRetryPending(false);
                   recorder.reset();
-                  setStep("record2");
+                  dispatchPractice({ type: "second-attempt-started" });
                 }}
               >
                 Try again with these fixes
@@ -760,12 +937,13 @@ function Practice() {
                   setSecond(null);
                   setPromptOffset((o) => o + 1);
                   setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
-                  clientSessionIdRef.current = null;
+                  clientSessionIdRef.current = crypto.randomUUID();
                   interruptedAttemptIdRef.current = null;
                   pendingFeedbackAttemptIdRef.current = null;
+                  setFeedbackPendingDelivery(null);
                   setFeedbackRetryPending(false);
                   recorder.reset();
-                  setStep("prompt");
+                  dispatchPractice({ type: "next-prompt" });
                 }}
               >
                 Next prompt
@@ -810,6 +988,14 @@ function FeedbackView({
 }) {
   const fb = attempt.feedback;
   const delta = previous ? fb.overall - previous.feedback.overall : null;
+  const metricsUnavailable = fb.speechMetricsStatus === "unavailable" && !attempt.mocked;
+  const metricsNotice = attempt.mocked
+    ? "Demo stats are illustrative. Your audio is not analyzed."
+    : fb.speechMetricsStatus === "degraded"
+      ? "Some speech stats come from transcript or client timing, not acoustic measurement."
+      : metricsUnavailable
+        ? "Audio timing was unavailable for this attempt."
+        : null;
 
   return (
     <div className="space-y-6">
@@ -888,21 +1074,33 @@ function FeedbackView({
           <AccordionTrigger className="font-display text-lg">Detailed breakdown</AccordionTrigger>
           <AccordionContent className="space-y-4 pb-6">
             <div className="grid gap-3 sm:grid-cols-2">
-              {SCORE_KEYS.map((k) => (
-                <ScoreBar
-                  key={k}
-                  label={k}
-                  value={fb.scores[k]}
-                  previous={previous?.feedback.scores[k]}
-                />
-              ))}
+              {SCORE_KEYS.map((k) => {
+                const value = fb.scores[k];
+                if (
+                  typeof value !== "number" ||
+                  (k === "pronunciation" && fb.pronunciationStatus === "unavailable")
+                )
+                  return null;
+                const previousValue = previous?.feedback.scores[k];
+                return (
+                  <ScoreBar
+                    key={k}
+                    label={k}
+                    value={value}
+                    previous={typeof previousValue === "number" ? previousValue : undefined}
+                  />
+                );
+              })}
             </div>
+            {metricsNotice ? (
+              <p className="mb-3 text-xs text-muted-foreground">{metricsNotice}</p>
+            ) : null}
             <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
               {[
-                ["Words", String(fb.stats.words)],
-                ["Speed", `${fb.stats.wpm} wpm`],
-                ["Fillers", String(fb.stats.fillers)],
-                ["Longest pause", fb.stats.longestPause],
+                ["Words", metricsUnavailable ? "Unavailable" : String(fb.stats.words)],
+                ["Speed", metricsUnavailable ? "Unavailable" : `${fb.stats.wpm} wpm`],
+                ["Fillers", metricsUnavailable ? "Unavailable" : String(fb.stats.fillers)],
+                ["Longest pause", metricsUnavailable ? "Unavailable" : fb.stats.longestPause],
               ].map(([k, v]) => (
                 <div key={k} className="rounded-xl bg-secondary/60 px-3 py-2">
                   <dt className="text-xs text-muted-foreground">{k}</dt>

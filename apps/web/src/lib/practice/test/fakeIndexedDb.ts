@@ -142,11 +142,16 @@ function createDatabase(data: DatabaseData) {
       const keyPath = typeof options?.keyPath === "string" ? options.keyPath : "id";
       const store = { keyPath, records: new Map<IDBValidKey, unknown>() };
       data.stores.set(name, store);
-      return createObjectStoreHandle(store, createTransaction(data, [name])) as unknown as IDBObjectStore;
+      return createObjectStoreHandle(
+        store,
+        createTransaction(data, [name]),
+      ) as unknown as IDBObjectStore;
     },
     transaction(storeNames: string | string[], _mode?: IDBTransactionMode) {
-      return createTransaction(data, Array.isArray(storeNames) ? storeNames : [storeNames]) as
-        unknown as IDBTransaction;
+      return createTransaction(
+        data,
+        Array.isArray(storeNames) ? storeNames : [storeNames],
+      ) as unknown as IDBTransaction;
     },
   };
 }

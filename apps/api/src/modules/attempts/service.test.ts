@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { PROMPTS, fixtureFeedback, type Attempt } from "@kotoba/contracts";
 import { ApiError } from "../../http/errors";
+import { attemptRepository } from "./repository";
 
 const prompt = PROMPTS[0]!;
 const learnerId = "lnr_test";
@@ -16,6 +17,11 @@ type StorageCleanupCall = {
   reason: string;
 };
 
+type AttemptLookupRow = Awaited<ReturnType<typeof attemptRepository.findByClientId>>;
+type AttemptRaceRow = Awaited<ReturnType<typeof attemptRepository.findRaced>>;
+type InsertProcessingInput = Parameters<typeof attemptRepository.insertProcessing>[0];
+type PersistResultInput = Parameters<typeof attemptRepository.persistResult>[0];
+
 type State = {
   cleanupCalls: StorageCleanupCall[];
   storagePutCalls: string[];
@@ -27,14 +33,14 @@ type State = {
   requirePrompt: typeof prompt | (() => Promise<typeof prompt>);
   getAttempt: (id: string) => Promise<Attempt>;
   findSession: (id: string) => Promise<{ id: string; learnerId: string; promptId: string } | null>;
-  findByClientId: (learnerId: string, clientAttemptId: string) => Promise<any>;
-  findBySessionAndIndex: (sessionId: string, attemptIndex: 1 | 2) => Promise<any>;
+  findByClientId: (learnerId: string, clientAttemptId: string) => Promise<AttemptLookupRow>;
+  findBySessionAndIndex: (sessionId: string, attemptIndex: 1 | 2) => Promise<AttemptLookupRow>;
   markFailedIfProcessing: (attemptId: string) => Promise<boolean>;
   insertProcessing: (
-    input: any,
+    input: InsertProcessingInput,
   ) => Promise<{ audioId: string | null; reclaimedStorageKeys: string[] }>;
-  findRaced: (learnerId: string, clientAttemptId: string) => Promise<any>;
-  persistResult: (input: any) => Promise<void>;
+  findRaced: (learnerId: string, clientAttemptId: string) => Promise<AttemptRaceRow>;
+  persistResult: (input: PersistResultInput) => Promise<void>;
   removeAttempt: (attemptId: string, audioId: string | null) => Promise<void>;
   markFailed: (attemptId: string) => Promise<void>;
   removeAudioMetadata: (audioId: string) => Promise<void>;
@@ -140,10 +146,10 @@ mock.module("./repository", () => ({
     findBySessionAndIndex: (currentSessionId: string, attemptIndex: 1 | 2) =>
       state.findBySessionAndIndex(currentSessionId, attemptIndex),
     markFailedIfProcessing: (attemptId: string) => state.markFailedIfProcessing(attemptId),
-    insertProcessing: (input: any) => state.insertProcessing(input),
+    insertProcessing: (input: InsertProcessingInput) => state.insertProcessing(input),
     findRaced: (currentLearnerId: string, clientAttemptId: string) =>
       state.findRaced(currentLearnerId, clientAttemptId),
-    persistResult: (input: any) => state.persistResult(input),
+    persistResult: (input: PersistResultInput) => state.persistResult(input),
     removeAttempt: (attemptId: string, audioId: string | null) =>
       state.removeAttempt(attemptId, audioId),
     markFailed: (attemptId: string) => state.markFailed(attemptId),

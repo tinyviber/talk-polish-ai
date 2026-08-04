@@ -94,8 +94,7 @@ describe("offline queue sync behavior", () => {
     await enqueueRecording(createRecording("attempt-1"));
 
     let releaseFirstUpload:
-      | ((value: { id: string; status: "ready"; sessionId: string }) => void)
-      | null = null;
+      ((value: { id: string; status: "ready"; sessionId: string }) => void) | null = null;
     const upload = vi.fn(async (item) => {
       if (item.clientAttemptId === "attempt-1") {
         return await new Promise<{ id: string; status: "ready"; sessionId: string }>((resolve) => {

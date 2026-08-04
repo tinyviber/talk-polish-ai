@@ -91,7 +91,7 @@ export function canSyncAttempt(item: RecordingQueueItem, items: RecordingQueueIt
 }
 
 function normalizeLearnerIds(learnerIds?: string | string[]) {
-  return [...new Set((Array.isArray(learnerIds) ? learnerIds : learnerIds ? [learnerIds] : []))];
+  return [...new Set(Array.isArray(learnerIds) ? learnerIds : learnerIds ? [learnerIds] : [])];
 }
 
 function getBackoffDelay(delays: readonly number[], index?: number) {
@@ -233,7 +233,7 @@ async function allItems() {
   });
 }
 
-function waitForTransactionWrite(request: IDBRequest<any>, tx: IDBTransaction) {
+function waitForTransactionWrite<T>(request: IDBRequest<T>, tx: IDBTransaction) {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     const finish = (callback: () => void) => {

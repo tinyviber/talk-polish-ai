@@ -72,12 +72,8 @@ describe("offline recording queue boundaries", () => {
     Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
 
     try {
-      const {
-        enqueueRecording,
-        listRecordingQueue,
-        subscribeRecordingQueue,
-        syncRecordingQueue,
-      } = await import("./offlineQueue");
+      const { enqueueRecording, listRecordingQueue, subscribeRecordingQueue, syncRecordingQueue } =
+        await import("./offlineQueue");
 
       let queueChanges = 0;
       const unsubscribe = subscribeRecordingQueue(() => {
@@ -111,7 +107,8 @@ describe("offline recording queue boundaries", () => {
 
       unsubscribe();
     } finally {
-      if (originalIndexedDB === undefined) delete (globalThis as typeof globalThis & { indexedDB?: unknown }).indexedDB;
+      if (originalIndexedDB === undefined)
+        delete (globalThis as typeof globalThis & { indexedDB?: unknown }).indexedDB;
       else vi.stubGlobal("indexedDB", originalIndexedDB);
 
       if (originalBroadcastChannel === undefined)
@@ -128,7 +125,7 @@ function createAbortAfterSuccessIndexedDB() {
   const stores = new Map<string, Map<string, unknown>>();
   const keyPaths = new Map<string, string>();
 
-  const cloneValue = <T,>(value: T) =>
+  const cloneValue = <T>(value: T) =>
     typeof structuredClone === "function" ? structuredClone(value) : value;
 
   const schedule = (fn: () => void) => queueMicrotask(fn);

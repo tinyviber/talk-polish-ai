@@ -289,13 +289,7 @@ export async function uploadQueuedAttempt(item: {
   blob: Blob;
   attemptId?: string | undefined;
   syncStatus?:
-    | "local-draft"
-    | "queued"
-    | "uploading"
-    | "processing"
-    | "ready"
-    | "failed"
-    | undefined;
+    "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed" | undefined;
 }) {
   if (item.syncStatus === "processing" && item.attemptId) {
     const attempt = await getAttempt(item.attemptId);

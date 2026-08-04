@@ -328,17 +328,20 @@ export async function cleanupRecordingQueue(
       .map((item) => sessionDependencyKey(item.clientSessionId)),
   );
   for (const key of protectedSessionKeys) pendingSecondSessionKeys.add(key);
-  // Never silently delete a recording that still needs upload or processing.
+  // Never silently delete a recording that still needs upload or processing,
+  // nor one whose feedback has never been delivered to the learner.
   const expired = items.filter(
     (item) =>
       now - item.createdAt > TTL_MS &&
       (item.syncStatus === "ready" || item.syncStatus === "failed") &&
+      !isFeedbackOutstanding(item) &&
       !(
         item.attemptIndex === 1 &&
         item.syncStatus === "ready" &&
         pendingSecondSessionKeys.has(sessionDependencyKey(item.clientSessionId))
       ),
   );
+
   for (const item of expired) await remove(item.clientAttemptId, internal);
 }
 

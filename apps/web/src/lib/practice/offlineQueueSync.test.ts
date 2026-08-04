@@ -46,6 +46,22 @@ async function waitFor(condition: () => boolean, rounds = 40) {
   throw new Error("Condition was not met in time.");
 }
 
+async function putQueueItemDirectly(item: Record<string, unknown>) {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open("kotoba-loop-offline", 3);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("recordings", "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("queue seed aborted"));
+    tx.objectStore("recordings").put(item);
+  });
+  db.close();
+}
+
 describe("offline queue sync loop", () => {
   let restoreIndexedDb: (() => void) | null = null;
   let originalWindow: unknown;
@@ -131,6 +147,37 @@ describe("offline queue sync loop", () => {
 
     const ready = (await listRecordingQueue("device:learner-1"))[0]!;
     expect(ready.syncStatus).toBe("ready");
+    stop();
+    await flushMicrotasks(20);
+  });
+
+  test("recovers an uploading item on a fresh sync-loop start", async () => {
+    await enqueueRecording(createRecording("attempt-crashed-upload"));
+    await putQueueItemDirectly({
+      ...createRecording("attempt-crashed-upload"),
+      syncStatus: "uploading",
+    });
+
+    let uploadCalls = 0;
+    const stop = startOfflineQueueSyncLoop({
+      getLearnerIds: () => ["device:learner-1"],
+      getNextPollAt: getNextRecordingQueuePollAt,
+      syncQueue: (learnerIds) =>
+        syncRecordingQueue(async (item) => {
+          uploadCalls += 1;
+          return {
+            id: `server-${item.clientAttemptId}`,
+            status: "ready" as const,
+            sessionId: "session-1",
+          };
+        }, learnerIds),
+      doc: fakeDocument,
+      nav: navigator,
+      win: fakeWindow,
+    });
+
+    await waitFor(() => uploadCalls === 1);
+    expect((await listRecordingQueue("device:learner-1"))[0]?.syncStatus).toBe("ready");
     stop();
     await flushMicrotasks(20);
   });

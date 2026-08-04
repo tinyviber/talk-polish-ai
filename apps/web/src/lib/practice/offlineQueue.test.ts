@@ -25,6 +25,7 @@ describe("offline recording queue boundaries", () => {
   test("never leaves an interrupted upload stranded", () => {
     expect(recoverQueueStatus("uploading")).toBe("queued");
     expect(isQueueSyncCandidate("queued")).toBe(true);
+    expect(isQueueSyncCandidate("uploading")).toBe(true);
     expect(isQueueSyncCandidate("processing")).toBe(true);
     expect(isQueueSyncCandidate("failed")).toBe(false);
   });
@@ -64,6 +65,13 @@ describe("offline recording queue boundaries", () => {
       canSyncAttempt({ ...second, prerequisiteSatisfied: true }, [
         { ...second, prerequisiteSatisfied: true },
       ]),
+    ).toBe(true);
+    expect(
+      canSyncAttempt(
+        { ...second, learnerId: "device:learner" },
+        [{ ...first, learnerId: "lnr_old", syncStatus: "ready" }],
+        ["device:learner", "lnr_old"],
+      ),
     ).toBe(true);
   });
 

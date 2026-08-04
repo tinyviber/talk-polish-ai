@@ -143,6 +143,22 @@ describe("offline queue sync behavior", () => {
     ]);
   });
 
+  test("does not regress an existing outbox attempt when a submit is replayed", async () => {
+    const input = createRecording("attempt-replayed");
+
+    await enqueueRecording(input);
+    await markRecordingReady(input.clientAttemptId, {
+      attemptId: "server-attempt-a",
+      sessionId: "server-session-a",
+    });
+    await enqueueRecording({ ...input, blob: new Blob(["replacement"]) });
+
+    const item = (await listRecordingQueue(input.learnerId))[0]!;
+    expect(item.syncStatus).toBe("ready");
+    expect(item.attemptId).toBe("server-attempt-a");
+    expect(item.blobDiscarded).toBe(true);
+  });
+
   test("keeps scheduling processing polls beyond 15.5 seconds", async () => {
     await enqueueRecording(createRecording("attempt-processing"));
 
@@ -181,7 +197,8 @@ describe("offline queue sync behavior", () => {
   });
 
   test("keeps attempt two recoverable after a week offline", async () => {
-    await enqueueRecording(createRecording("attempt-1", { createdAt: 0 }));
+    const learnerIds = ["device:learner-1", "lnr_old"];
+    await enqueueRecording(createRecording("attempt-1", { createdAt: 0, learnerId: "lnr_old" }));
     await markRecordingReady("attempt-1", {
       attemptId: "server-attempt-1",
       sessionId: "session-1",
@@ -192,12 +209,14 @@ describe("offline queue sync behavior", () => {
         attemptIndex: 2,
         createdAt: Date.now(),
       }),
+      learnerIds,
     );
 
     await cleanupRecordingQueue();
-    expect(
-      (await listRecordingQueue("device:learner-1")).map((item) => item.clientAttemptId),
-    ).toEqual(["attempt-1", "attempt-2"]);
+    expect((await listRecordingQueue(learnerIds)).map((item) => item.clientAttemptId)).toEqual([
+      "attempt-1",
+      "attempt-2",
+    ]);
 
     // The prerequisite flag is durable even if a later cleanup pass removes
     // the ready metadata for attempt 1.
@@ -207,11 +226,11 @@ describe("offline queue sync behavior", () => {
       status: "ready" as const,
       sessionId: "session-1",
     }));
-    await syncRecordingQueue(upload, "device:learner-1");
+    await syncRecordingQueue(upload, learnerIds);
 
     expect(upload).toHaveBeenCalledTimes(1);
     expect(upload.mock.calls[0]?.[0].clientAttemptId).toBe("attempt-2");
-    expect((await listRecordingQueue("device:learner-1"))[0]?.syncStatus).toBe("ready");
+    expect((await listRecordingQueue(learnerIds))[0]?.syncStatus).toBe("ready");
   });
 
   test("backs off while another tab owns an expired processing lease", async () => {

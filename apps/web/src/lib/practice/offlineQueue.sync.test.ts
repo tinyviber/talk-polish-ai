@@ -1,16 +1,25 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   __resetRecordingQueueForTests,
+  cleanupRecordingQueue,
   enqueueRecording,
+  getNextRecordingQueuePollAt,
   getRecordingQueueLeaseKey,
   listRecordingQueue,
+  markRecordingReady,
+  removeQueuedRecording,
   syncRecordingQueue,
 } from "./offlineQueue";
+import { startOfflineQueueSyncLoop } from "./offlineQueueSync";
 import { installFakeIndexedDb } from "./test/fakeIndexedDb";
 
 class FakeWindow extends EventTarget {
   readonly setTimeout = globalThis.setTimeout.bind(globalThis);
   readonly clearTimeout = globalThis.clearTimeout.bind(globalThis);
+}
+
+class FakeDocument extends EventTarget {
+  visibilityState: DocumentVisibilityState = "visible";
 }
 
 function createRecording(
@@ -169,5 +178,111 @@ describe("offline queue sync behavior", () => {
     expect(item.syncStatus).toBe("ready");
     expect(item.blobDiscarded).toBe(true);
     expect(item.blob.size).toBe(0);
+  });
+
+  test("keeps attempt two recoverable after a week offline", async () => {
+    await enqueueRecording(createRecording("attempt-1", { createdAt: 0 }));
+    await markRecordingReady("attempt-1", {
+      attemptId: "server-attempt-1",
+      sessionId: "session-1",
+    });
+    vi.setSystemTime(new Date(8 * 24 * 60 * 60 * 1000));
+    await enqueueRecording(
+      createRecording("attempt-2", {
+        attemptIndex: 2,
+        createdAt: Date.now(),
+      }),
+    );
+
+    await cleanupRecordingQueue();
+    expect(
+      (await listRecordingQueue("device:learner-1")).map((item) => item.clientAttemptId),
+    ).toEqual(["attempt-1", "attempt-2"]);
+
+    // The prerequisite flag is durable even if a later cleanup pass removes
+    // the ready metadata for attempt 1.
+    await removeQueuedRecording("attempt-1");
+    const upload = vi.fn(async (item) => ({
+      id: `server-${item.clientAttemptId}`,
+      status: "ready" as const,
+      sessionId: "session-1",
+    }));
+    await syncRecordingQueue(upload, "device:learner-1");
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload.mock.calls[0]?.[0].clientAttemptId).toBe("attempt-2");
+    expect((await listRecordingQueue("device:learner-1"))[0]?.syncStatus).toBe("ready");
+  });
+
+  test("backs off while another tab owns an expired processing lease", async () => {
+    await __resetRecordingQueueForTests();
+    vi.resetModules();
+    const tabA = await import("./offlineQueue");
+    vi.resetModules();
+    const tabB = await import("./offlineQueue");
+
+    await tabA.__resetRecordingQueueForTests();
+    await tabA.enqueueRecording(createRecording("attempt-processing"));
+    await tabA.syncRecordingQueue(
+      async () => ({
+        id: "server-attempt-processing",
+        status: "processing" as const,
+        sessionId: "session-1",
+      }),
+      "device:learner-1",
+    );
+
+    vi.setSystemTime(new Date(500));
+    type UploadResult = { id: string; status: "ready"; sessionId: string };
+    let releaseProcessing: ((result: UploadResult) => void) | null = null;
+    const ownerUpload = vi.fn(
+      () =>
+        new Promise<UploadResult>((resolve) => {
+          releaseProcessing = resolve;
+        }),
+    );
+    const ownerSync = tabA.syncRecordingQueue(ownerUpload, "device:learner-1");
+    await waitFor(() => ownerUpload.mock.calls.length === 1);
+
+    let losingTabSyncCalls = 0;
+    const losingWindow = new FakeWindow();
+    const losingDocument = new FakeDocument();
+    const stop = startOfflineQueueSyncLoop({
+      getLearnerIds: () => ["device:learner-1"],
+      getNextPollAt: tabB.getNextRecordingQueuePollAt,
+      syncQueue: (learnerIds) => {
+        losingTabSyncCalls += 1;
+        return tabB.syncRecordingQueue(
+          async () => ({
+            id: "should-not-upload",
+            status: "ready" as const,
+            sessionId: "session-1",
+          }),
+          learnerIds,
+        );
+      },
+      doc: losingDocument,
+      nav: navigator,
+      win: losingWindow,
+    });
+
+    await waitFor(() => losingTabSyncCalls === 1);
+    losingWindow.dispatchEvent(new Event("kotoba:queue-change"));
+    losingWindow.dispatchEvent(new Event("online"));
+    losingDocument.dispatchEvent(new Event("visibilitychange"));
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(losingTabSyncCalls).toBe(1);
+
+    releaseProcessing!({
+      id: "server-attempt-processing",
+      status: "ready",
+      sessionId: "session-1",
+    });
+    await ownerSync;
+    stop();
+    await tabA.__resetRecordingQueueForTests();
+    await tabB.__resetRecordingQueueForTests();
   });
 });

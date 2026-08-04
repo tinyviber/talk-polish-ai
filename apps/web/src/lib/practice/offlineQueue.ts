@@ -28,6 +28,8 @@ export type RecordingQueueItem = {
   processingPollIndex?: number | undefined;
   /** Exponential backoff step after a transient upload/read failure. */
   transientRetryIndex?: number | undefined;
+  /** Attempt 1 was confirmed ready before this attempt was queued offline. */
+  prerequisiteSatisfied?: boolean | undefined;
 };
 
 export function isQueueSyncCandidate(status: QueueStatus) {
@@ -47,6 +49,8 @@ const MAX_BYTES = 100 * 1024 * 1024;
 const LEASE_MS = 30_000;
 const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const TRANSIENT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+const LEASE_MISS_RETRY_DELAY_MS = 1_500;
+const LEASE_MISS_JITTER_MS = 750;
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
 let queueChannel: BroadcastChannel | null = null;
@@ -81,6 +85,7 @@ export function orderRecordingQueue(items: RecordingQueueItem[]) {
 
 export function canSyncAttempt(item: RecordingQueueItem, items: RecordingQueueItem[]) {
   if (item.attemptIndex === 1) return true;
+  if (item.prerequisiteSatisfied) return true;
   return items.some(
     (candidate) =>
       candidate.learnerId === item.learnerId &&
@@ -105,6 +110,10 @@ function clearDeferredSyncState(item: RecordingQueueItem): RecordingQueueItem {
     processingPollIndex: undefined,
     transientRetryIndex: undefined,
   };
+}
+
+function sessionDependencyKey(learnerId: string, clientSessionId: string) {
+  return `${learnerId}\u0000${clientSessionId}`;
 }
 
 function scheduleProcessingPoll(item: RecordingQueueItem, now = Date.now()): RecordingQueueItem {
@@ -156,7 +165,11 @@ function queueSchedulableItems(
   return orderRecordingQueue(items).filter((item) => {
     if (!learnerMatches(item, queueLearnerIds) || !isQueueSyncCandidate(item.syncStatus))
       return false;
-    return item.attemptIndex === 1 || readySessionKeys.has(item.clientSessionId);
+    return (
+      item.attemptIndex === 1 ||
+      item.prerequisiteSatisfied === true ||
+      readySessionKeys.has(item.clientSessionId)
+    );
   });
 }
 
@@ -267,13 +280,30 @@ async function remove(clientAttemptId: string) {
   notify();
 }
 
-export async function cleanupRecordingQueue(now = Date.now()) {
+export async function cleanupRecordingQueue(
+  now = Date.now(),
+  protectedSessionKeys: ReadonlySet<string> = new Set(),
+) {
   const items = await allItems();
+  const pendingSecondSessionKeys = new Set(
+    items
+      .filter(
+        (item) =>
+          item.attemptIndex === 2 && item.syncStatus !== "ready",
+      )
+      .map((item) => sessionDependencyKey(item.learnerId, item.clientSessionId)),
+  );
+  for (const key of protectedSessionKeys) pendingSecondSessionKeys.add(key);
   // Never silently delete a recording that still needs upload or processing.
   const expired = items.filter(
     (item) =>
       now - item.createdAt > TTL_MS &&
-      (item.syncStatus === "ready" || item.syncStatus === "failed"),
+      (item.syncStatus === "ready" || item.syncStatus === "failed") &&
+      !(
+        item.attemptIndex === 1 &&
+        item.syncStatus === "ready" &&
+        pendingSecondSessionKeys.has(sessionDependencyKey(item.learnerId, item.clientSessionId))
+      ),
   );
   for (const item of expired) await remove(item.clientAttemptId);
 }
@@ -294,7 +324,11 @@ export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStat
   if (!input.learnerId || input.learnerId === "legacy") {
     throw new Error("Learner session is unavailable; recording was not queued.");
   }
-  await cleanupRecordingQueue();
+  const incomingPrerequisite =
+    input.attemptIndex === 2
+      ? new Set([sessionDependencyKey(input.learnerId, input.clientSessionId)])
+      : new Set<string>();
+  await cleanupRecordingQueue(Date.now(), incomingPrerequisite);
   const existing = await allItems();
   // Synced recordings keep only metadata, so they never consume the quota.
   const totalBytes = existing
@@ -303,7 +337,21 @@ export async function enqueueRecording(input: Omit<RecordingQueueItem, "syncStat
   if (totalBytes + input.blob.size > MAX_BYTES) {
     throw new Error("Offline recording storage is full. Retry or remove an older recording first.");
   }
-  await put({ ...input, syncStatus: "queued" });
+  const prerequisiteSatisfied =
+    input.attemptIndex === 2 &&
+    (input.prerequisiteSatisfied === true ||
+      existing.some(
+        (item) =>
+          item.learnerId === input.learnerId &&
+          item.clientSessionId === input.clientSessionId &&
+          item.attemptIndex === 1 &&
+          item.syncStatus === "ready",
+      ));
+  await put({
+    ...input,
+    ...(input.attemptIndex === 2 ? { prerequisiteSatisfied } : {}),
+    syncStatus: "queued",
+  });
   return input.clientAttemptId;
 }
 
@@ -386,7 +434,9 @@ export type QueueUploadResult = {
   sessionId?: string;
 };
 
-let syncInFlight: Promise<void> | null = null;
+export type SyncResult = { acquired: true } | { acquired: false; retryAt: number };
+
+let syncInFlight: Promise<SyncResult> | null = null;
 
 function getSyncOwnerId() {
   syncOwnerId ??=
@@ -394,6 +444,10 @@ function getSyncOwnerId() {
       ? crypto.randomUUID()
       : `sync-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   return syncOwnerId;
+}
+
+function getLeaseMissRetryAt(now = Date.now()) {
+  return now + LEASE_MISS_RETRY_DELAY_MS + Math.floor(Math.random() * LEASE_MISS_JITTER_MS);
 }
 
 async function acquireSyncLease(learnerId: string) {
@@ -517,7 +571,12 @@ export async function syncRecordingQueue(
     const now = Date.now();
     for (const item of items) {
       if (item.nextPollAt !== undefined && item.nextPollAt > now) continue;
-      if (item.attemptIndex === 2 && !readySessionKeys.has(item.clientSessionId)) continue;
+      if (
+        item.attemptIndex === 2 &&
+        item.prerequisiteSatisfied !== true &&
+        !readySessionKeys.has(item.clientSessionId)
+      )
+        continue;
       try {
         const syncing =
           item.syncStatus === "processing"
@@ -595,12 +654,15 @@ export async function syncRecordingQueue(
       }
     }
   };
-  const runWithCrossTabLease = async () => {
+  const runWithCrossTabLease = async (): Promise<SyncResult> => {
     const queueLearnerIds = normalizeLearnerIds(learnerIds);
-    if (queueLearnerIds.length === 0 || typeof indexedDB === "undefined") return run();
+    if (queueLearnerIds.length === 0 || typeof indexedDB === "undefined") {
+      await run();
+      return { acquired: true };
+    }
     const leaseKey = getRecordingQueueLeaseKey(queueLearnerIds);
     const acquired = await acquireSyncLease(leaseKey);
-    if (!acquired) return;
+    if (!acquired) return { acquired: false, retryAt: getLeaseMissRetryAt() };
     const runWithRelease = async () => {
       const heartbeat = setInterval(
         () => {
@@ -612,7 +674,8 @@ export async function syncRecordingQueue(
         Math.floor(LEASE_MS / 3),
       );
       try {
-        return await run();
+        await run();
+        return { acquired: true } as const;
       } finally {
         clearInterval(heartbeat);
         await releaseSyncLease(leaseKey);
@@ -621,14 +684,21 @@ export async function syncRecordingQueue(
     const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
     if (!locks) return runWithRelease();
     return locks.request("kotoba-loop-recording-sync", { ifAvailable: true }, (lock) =>
-      lock ? runWithRelease() : releaseSyncLease(leaseKey),
+      lock
+        ? runWithRelease()
+        : releaseSyncLease(leaseKey).then(() => ({
+            acquired: false,
+            retryAt: getLeaseMissRetryAt(),
+          })),
     );
   };
   syncInFlight = (async () => {
+    let result: SyncResult = { acquired: true };
     do {
       syncTrailingPassRequested = false;
-      await runWithCrossTabLease();
-    } while (syncTrailingPassRequested);
+      result = await runWithCrossTabLease();
+    } while (syncTrailingPassRequested && result.acquired);
+    return result;
   })().finally(() => {
     syncInFlight = null;
     syncTrailingPassRequested = false;

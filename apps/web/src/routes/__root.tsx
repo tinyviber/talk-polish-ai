@@ -160,12 +160,11 @@ function OfflineQueueSync() {
     return startOfflineQueueSyncLoop({
       getLearnerIds: getQueueLearnerIds,
       getNextPollAt: getNextRecordingQueuePollAt,
-      syncQueue: async (learnerIds) => {
-        await syncRecordingQueue(async (item) => {
+      syncQueue: (learnerIds) =>
+        syncRecordingQueue(async (item) => {
           const { attempt, sessionId } = await uploadQueuedAttempt(item);
           return { id: attempt.id, status: attempt.status, sessionId };
-        }, learnerIds);
-      },
+        }, learnerIds),
       setBusy,
     });
   }, [setBusy]);

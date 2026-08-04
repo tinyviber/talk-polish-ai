@@ -1,7 +1,9 @@
+import type { SyncResult } from "./offlineQueue";
+
 export type OfflineQueueSyncLoopOptions = {
   getLearnerIds: () => string[];
   getNextPollAt: (learnerIds: string[]) => Promise<number | null>;
-  syncQueue: (learnerIds: string[]) => Promise<void>;
+  syncQueue: (learnerIds: string[]) => Promise<SyncResult | void>;
   setBusy?: (busy: boolean, reason: "queue") => void;
   doc?: Pick<Document, "addEventListener" | "removeEventListener" | "visibilityState">;
   nav?: Pick<Navigator, "onLine">;
@@ -24,10 +26,11 @@ export function startOfflineQueueSyncLoop({
 
   let disposed = false;
   let timer: ReturnType<typeof globalThis.setTimeout> | null = null;
-  let syncInFlight: Promise<void> | null = null;
+  let syncInFlight: Promise<SyncResult | void> | null = null;
   let trailingSyncRequested = false;
   let planningInFlight: Promise<void> | null = null;
   let replanRequested = false;
+  let leaseRetryAt: number | null = null;
 
   const clearTimer = () => {
     if (timer === null) return;
@@ -35,7 +38,10 @@ export function startOfflineQueueSyncLoop({
     timer = null;
   };
 
-  const scheduleNextSync = async (): Promise<void> => {
+  const scheduleNextSync = async (retryAt?: number): Promise<void> => {
+    if (retryAt !== undefined) {
+      leaseRetryAt = Math.max(leaseRetryAt ?? 0, retryAt);
+    }
     if (disposed) return;
     if (planningInFlight) {
       replanRequested = true;
@@ -48,8 +54,13 @@ export function startOfflineQueueSyncLoop({
         if (disposed || nav.onLine === false) continue;
         const learnerIds = getLearnerIds();
         const nextPollAt = await getNextPollAt(learnerIds);
-        if (disposed || nextPollAt === null) continue;
-        const delay = Math.max(0, nextPollAt - Date.now());
+        if (disposed) continue;
+        if (nextPollAt === null) {
+          leaseRetryAt = null;
+          continue;
+        }
+        const wakeAt = Math.max(nextPollAt, leaseRetryAt ?? 0);
+        const delay = Math.max(0, wakeAt - Date.now());
         if (delay === 0) {
           requestSync();
         } else {
@@ -69,7 +80,17 @@ export function startOfflineQueueSyncLoop({
     if (disposed || syncInFlight || nav.onLine === false) return;
     clearTimer();
     setBusy?.(true, "queue");
+    let syncResult: SyncResult | void;
     syncInFlight = syncQueue(getLearnerIds())
+      .then((result) => {
+        syncResult = result;
+        if (result && !result.acquired) {
+          leaseRetryAt = Math.max(leaseRetryAt ?? 0, result.retryAt);
+        } else if (result?.acquired) {
+          leaseRetryAt = null;
+        }
+        return result;
+      })
       .finally(() => {
         setBusy?.(false, "queue");
       })
@@ -78,6 +99,10 @@ export function startOfflineQueueSyncLoop({
         if (disposed) return;
         if (trailingSyncRequested) {
           trailingSyncRequested = false;
+          if (syncResult && !syncResult.acquired) {
+            await scheduleNextSync();
+            return;
+          }
           runSync();
           return;
         }

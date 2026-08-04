@@ -60,6 +60,12 @@ describe("offline recording queue boundaries", () => {
     ]);
     expect(canSyncAttempt(second, [first, second])).toBe(false);
     expect(canSyncAttempt(second, [{ ...first, syncStatus: "ready" }])).toBe(true);
+    expect(
+      canSyncAttempt(
+        { ...second, prerequisiteSatisfied: true },
+        [{ ...second, prerequisiteSatisfied: true }],
+      ),
+    ).toBe(true);
   });
 
   test("waits for transaction commit so an abort after request success never looks durable", async () => {

@@ -28,9 +28,8 @@ let cached: Providers | undefined;
  * Single place where provider implementations are chosen from configuration.
  * Add new drivers here — nothing else in the codebase constructs a provider.
  */
-export function providers(): Providers {
+export function providers(config = env()): Providers {
   if (cached) return cached;
-  const config = env();
 
   const storage =
     config.AUDIO_STORAGE_DRIVER === "s3"

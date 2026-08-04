@@ -2,6 +2,7 @@
   "name": "kotoba-loop",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.2.17",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -16,6 +17,7 @@
     "build:web": "bun --filter @kotoba/web build",
     "start:web": "bun --filter @kotoba/web start",
     "build:api": "bun --filter @kotoba/api build",
+    "build:docker": "docker build -f apps/api/Dockerfile -t kotoba-api:ci .",
     "lint": "eslint .",
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun --filter '*' test",

@@ -7,18 +7,15 @@ import {
   type Lang,
   type PracticeSession,
 } from "@kotoba/contracts";
-import { and, asc, eq } from "drizzle-orm";
-import { db } from "../../db/client";
-import {
-  attemptResults,
-  audioRecordings,
-  practiceSessions,
-  speakingAttempts,
-} from "../../db/schema";
 import { ApiError } from "../../http/errors";
-import { withDb } from "../../http/with-db";
 import { requirePrompt } from "../prompts/service";
 import { requireLearner } from "../learners/service";
+import {
+  sessionRepository,
+  type AttemptResultRow,
+  type AttemptRow,
+  type AudioRow,
+} from "./repository";
 
 export async function createPracticeSession(
   learnerId: string,
@@ -30,19 +27,7 @@ export async function createPracticeSession(
   // Offline devices replay the same clientSessionId; return the existing
   // session instead of creating a duplicate for the same recordings.
   if (clientSessionId) {
-    const existing = await withDb("findPracticeSessionByClientId", () =>
-      db()
-        .select()
-        .from(practiceSessions)
-        .where(
-          and(
-            eq(practiceSessions.learnerId, learnerId),
-            eq(practiceSessions.clientSessionId, clientSessionId),
-          ),
-        )
-        .limit(1),
-    );
-    const found = existing[0];
+    const found = await sessionRepository.findByClientId(learnerId, clientSessionId);
     if (found) {
       if (found.promptId !== promptId) {
         throw ApiError.conflict("This offline session id already belongs to another prompt.");
@@ -57,20 +42,13 @@ export async function createPracticeSession(
       };
     }
   }
-  const inserted = await withDb("createPracticeSession", () =>
-    db()
-      .insert(practiceSessions)
-      .values({
-        id: `ses_${randomUUID()}`,
-        learnerId,
-        promptId,
-        lang: prompt.lang,
-        ...(clientSessionId ? { clientSessionId } : {}),
-      })
-      .onConflictDoNothing()
-      .returning(),
-  );
-  const row = inserted[0];
+  const row = await sessionRepository.insert({
+    id: `ses_${randomUUID()}`,
+    learnerId,
+    promptId,
+    lang: prompt.lang,
+    ...(clientSessionId ? { clientSessionId } : {}),
+  });
   // A concurrent replay of the same key won the insert race; read it back.
   if (!row && clientSessionId) return createPracticeSession(learnerId, promptId, clientSessionId);
   if (!row) throw ApiError.internal("The practice session could not be created.");
@@ -85,10 +63,7 @@ export async function createPracticeSession(
 }
 
 export async function getPracticeSession(id: string, learnerId: string): Promise<PracticeSession> {
-  const rows = await withDb("getPracticeSession", () =>
-    db().select().from(practiceSessions).where(eq(practiceSessions.id, id)),
-  );
-  const row = rows[0];
+  const row = await sessionRepository.findById(id);
   if (!row) throw ApiError.notFound("Practice session");
   if (row.learnerId !== learnerId) throw ApiError.notFound("Practice session");
   return {
@@ -102,41 +77,21 @@ export async function getPracticeSession(id: string, learnerId: string): Promise
 }
 
 export async function listAttempts(sessionId: string): Promise<Attempt[]> {
-  const rows = await withDb("listAttempts", () =>
-    db()
-      .select({
-        attempt: speakingAttempts,
-        result: attemptResults,
-        audio: audioRecordings,
-      })
-      .from(speakingAttempts)
-      .leftJoin(attemptResults, eq(attemptResults.attemptId, speakingAttempts.id))
-      .leftJoin(audioRecordings, eq(audioRecordings.id, speakingAttempts.audioId))
-      .where(eq(speakingAttempts.sessionId, sessionId))
-      .orderBy(asc(speakingAttempts.attemptIndex)),
-  );
+  const rows = await sessionRepository.listAttempts(sessionId);
   return rows.map((r) => composeAttempt(r.attempt, r.result, r.audio));
 }
 
 export async function getAttempt(id: string, learnerId?: string): Promise<Attempt> {
-  const rows = await withDb("getAttempt", () =>
-    db()
-      .select({ attempt: speakingAttempts, result: attemptResults, audio: audioRecordings })
-      .from(speakingAttempts)
-      .leftJoin(attemptResults, eq(attemptResults.attemptId, speakingAttempts.id))
-      .leftJoin(audioRecordings, eq(audioRecordings.id, speakingAttempts.audioId))
-      .where(eq(speakingAttempts.id, id)),
-  );
-  const row = rows[0];
+  const row = await sessionRepository.findAttempt(id);
   if (!row) throw ApiError.notFound("Attempt");
   if (learnerId && row.attempt.learnerId !== learnerId) throw ApiError.notFound("Attempt");
   return composeAttempt(row.attempt, row.result, row.audio);
 }
 
 export function composeAttempt(
-  attempt: typeof speakingAttempts.$inferSelect,
-  result: typeof attemptResults.$inferSelect | null,
-  audio: typeof audioRecordings.$inferSelect | null,
+  attempt: AttemptRow,
+  result: AttemptResultRow | null,
+  audio: AudioRow | null,
 ): Attempt {
   let feedback = null;
   if (result?.feedback !== undefined) {

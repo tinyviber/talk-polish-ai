@@ -14,9 +14,9 @@ import { reportLovableError } from "../lib/lovable-error-reporting";
 import { PracticeStoreProvider } from "../lib/practice/store";
 import { Toaster } from "../components/ui/sonner";
 import { PwaProvider, usePwa } from "../lib/pwa";
-import { getLearnerId } from "../lib/practice/api";
-import { syncRecordingQueue } from "../lib/practice/offlineQueue";
-import { uploadQueuedAttempt } from "../lib/practice/api";
+import { getQueueLearnerIds, uploadQueuedAttempt } from "../lib/practice/api";
+import { getNextRecordingQueuePollAt, syncRecordingQueue } from "../lib/practice/offlineQueue";
+import { startOfflineQueueSyncLoop } from "../lib/practice/offlineQueueSync";
 
 function NotFoundComponent() {
   return (
@@ -157,29 +157,16 @@ function RootComponent() {
 function OfflineQueueSync() {
   const { setBusy } = usePwa();
   useEffect(() => {
-    const sync = () => {
-      const learnerId = getLearnerId();
-      if (!learnerId) return;
-      setBusy(true, "queue");
-      void syncRecordingQueue(async (item) => {
-        const { attempt, sessionId } = await uploadQueuedAttempt(item);
-        return { id: attempt.id, status: attempt.status, sessionId };
-      }, learnerId).finally(() => setBusy(false, "queue"));
-    };
-    sync();
-    window.addEventListener("online", sync);
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") sync();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("kotoba:retry-queue", sync);
-    window.addEventListener("kotoba:learner-ready", sync);
-    return () => {
-      window.removeEventListener("online", sync);
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("kotoba:retry-queue", sync);
-      window.removeEventListener("kotoba:learner-ready", sync);
-    };
+    return startOfflineQueueSyncLoop({
+      getLearnerIds: getQueueLearnerIds,
+      getNextPollAt: getNextRecordingQueuePollAt,
+      syncQueue: (learnerIds) =>
+        syncRecordingQueue(async (item) => {
+          const { attempt, sessionId } = await uploadQueuedAttempt(item);
+          return { id: attempt.id, status: attempt.status, sessionId };
+        }, learnerIds),
+      setBusy,
+    });
   }, [setBusy]);
   return null;
 }

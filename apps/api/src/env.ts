@@ -6,6 +6,7 @@ import { z } from "zod";
  */
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  APP_VERSION: z.string().min(1).default("0.1.0"),
   PORT: z.coerce.number().int().positive().default(3333),
   HOST: z.string().default("0.0.0.0"),
   /** Enable only when a trusted reverse proxy overwrites forwarding headers. */
@@ -74,7 +75,10 @@ let cached: Env | undefined;
 
 export function env(): Env {
   if (!cached) {
-    const parsed = envSchema.safeParse(process.env);
+    const parsed = envSchema.safeParse({
+      ...process.env,
+      APP_VERSION: process.env.APP_VERSION ?? process.env.npm_package_version ?? "0.1.0",
+    });
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
       throw new Error(`Invalid API environment configuration:\n  ${issues.join("\n  ")}`);
@@ -84,6 +88,9 @@ export function env(): Env {
       parsed.data.ANON_TOKEN_SECRET === "local-development-anon-token-secret"
     ) {
       throw new Error("ANON_TOKEN_SECRET must be changed in production.");
+    }
+    if (parsed.data.NODE_ENV === "production") {
+      assertProductionSecret(parsed.data.ANON_TOKEN_SECRET);
     }
     if (parsed.data.NODE_ENV === "production" && parsed.data.CORS_ORIGIN === "*") {
       throw new Error("CORS_ORIGIN must be explicit in production.");
@@ -137,6 +144,22 @@ export function env(): Env {
     cached = parsed.data;
   }
   return cached;
+}
+
+/** Test-only seam for processes that deliberately change configuration before boot. */
+export function resetEnvForTests() {
+  cached = undefined;
+}
+
+export function assertProductionSecret(secret: string) {
+  if (
+    secret.length < 32 ||
+    /(?:replace[-_ ]?with|change[-_ ]?me|example|local-development|test-secret)/i.test(secret)
+  ) {
+    throw new Error(
+      "ANON_TOKEN_SECRET must be a unique random secret of at least 32 characters in production.",
+    );
+  }
 }
 
 function assertProviderUrl(name: string, value: string, production: boolean) {

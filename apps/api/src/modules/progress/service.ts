@@ -1,13 +1,5 @@
 import type { Lang, Progress, SessionRecord } from "@kotoba/contracts";
-import { asc, eq } from "drizzle-orm";
-import { db } from "../../db/client";
-import {
-  attemptResults,
-  practiceSessions,
-  savedExpressions,
-  speakingAttempts,
-} from "../../db/schema";
-import { withDb } from "../../http/with-db";
+import { progressRepository } from "./repository";
 
 /** Consecutive days (ending today or yesterday) with at least one session. */
 export function computeStreak(days: Set<string>): number {
@@ -27,22 +19,7 @@ export function computeStreak(days: Set<string>): number {
 }
 
 export async function getProgress(learnerId: string): Promise<Progress> {
-  const rows = await withDb("getProgress", () =>
-    db()
-      .select({
-        sessionId: practiceSessions.id,
-        promptId: practiceSessions.promptId,
-        lang: practiceSessions.lang,
-        createdAt: practiceSessions.createdAt,
-        attemptIndex: speakingAttempts.attemptIndex,
-        score: attemptResults.overallScore,
-      })
-      .from(practiceSessions)
-      .leftJoin(speakingAttempts, eq(speakingAttempts.sessionId, practiceSessions.id))
-      .leftJoin(attemptResults, eq(attemptResults.attemptId, speakingAttempts.id))
-      .where(eq(practiceSessions.learnerId, learnerId))
-      .orderBy(asc(practiceSessions.createdAt)),
-  );
+  const rows = await progressRepository.listSessions(learnerId);
 
   const byId = new Map<string, SessionRecord>();
   for (const row of rows) {
@@ -63,12 +40,7 @@ export async function getProgress(learnerId: string): Promise<Progress> {
 
   const sessions = [...byId.values()].reverse();
   const improved = sessions.filter((s) => s.second !== null);
-  const savedRows = await withDb("countSaved", () =>
-    db()
-      .select({ id: savedExpressions.id })
-      .from(savedExpressions)
-      .where(eq(savedExpressions.learnerId, learnerId)),
-  );
+  const savedCount = await progressRepository.countSaved(learnerId);
 
   return {
     streak: computeStreak(new Set(sessions.map((s) => s.date))),
@@ -79,7 +51,7 @@ export async function getProgress(learnerId: string): Promise<Progress> {
             improved.reduce((a, s) => a + ((s.second ?? 0) - s.first), 0) / improved.length,
           )
         : null,
-    savedCount: savedRows.length,
+    savedCount,
     sessions,
   };
 }

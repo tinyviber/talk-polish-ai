@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import type { Lang } from "@kotoba/contracts";
 import { createOpenAICompatibleHttpClient, ProviderConfigurationError } from "./http";
 import type { AudioStorageProvider } from "./storage";
-import type { SynthesisInput, SynthesisResult, TextToSpeechProvider } from "./tts";
+import {
+  withSynthesisStorageDisposition,
+  type SynthesisInput,
+  type SynthesisResult,
+  type TextToSpeechProvider,
+} from "./tts";
 
 export type OpenAITtsConfig = {
   baseUrl?: string;
@@ -43,12 +48,16 @@ export function createOpenAICompatibleTtsProvider(
         );
       const cachedKey = storage.keyFor?.(logicalKey);
       if (cachedKey && (await storage.get(cachedKey))) {
-        return {
-          storageKey: cachedKey,
-          contentType: "audio/mpeg",
-          seconds: estimateSeconds(input.text),
-          provider: "openai-compatible-tts",
-        };
+        return withSynthesisStorageDisposition(
+          {
+            storageKey: cachedKey,
+            cacheStatus: "cache-hit",
+            contentType: "audio/mpeg",
+            seconds: estimateSeconds(input.text),
+            provider: "openai-compatible-tts",
+          },
+          "cache-hit",
+        );
       }
 
       const bytes = await requestAudio(client, model, voice, input.text);
@@ -57,12 +66,16 @@ export function createOpenAICompatibleTtsProvider(
         body: Buffer.from(bytes),
         contentType: "audio/mpeg",
       });
-      return {
-        storageKey: stored.storageKey,
-        contentType: "audio/mpeg",
-        seconds: estimateSeconds(input.text),
-        provider: "openai-compatible-tts",
-      };
+      return withSynthesisStorageDisposition(
+        {
+          storageKey: stored.storageKey,
+          cacheStatus: "created",
+          contentType: "audio/mpeg",
+          seconds: estimateSeconds(input.text),
+          provider: "openai-compatible-tts",
+        },
+        "created",
+      );
     },
   };
 }

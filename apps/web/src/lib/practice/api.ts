@@ -22,7 +22,6 @@ import {
 } from "@kotoba/contracts";
 import { apiBaseUrl } from "./mode";
 
-const TOKEN_KEY = "kotoba.api.token.v1";
 const DEVICE_KEY = "kotoba.api.device.v1";
 
 function readStorage(key: string) {
@@ -61,7 +60,9 @@ function learnerIdFromToken(value: string | null) {
   }
 }
 
-let token: string | null = readStorage(TOKEN_KEY);
+// Bearer tokens stay in memory. A reload bootstraps the same anonymous learner
+// from the durable device id instead of exposing credentials to localStorage.
+let token: string | null = null;
 let deviceId: string | null = readStorage(DEVICE_KEY);
 let learnerId: string | null = learnerIdFromToken(token);
 let lastBootstrapLang: Lang | null = null;
@@ -72,6 +73,16 @@ const READ_RETRY_LIMIT = 2;
 /** Current learner namespace for local offline recordings. Never trust this as API auth. */
 export function getLearnerId() {
   return learnerId;
+}
+
+/** Stable local namespace available before an anonymous API bootstrap succeeds. */
+export function getQueueLearnerId() {
+  return `device:${getDeviceId()}`;
+}
+
+/** Include the stable namespace and the server id for queues created by older builds. */
+export function getQueueLearnerIds() {
+  return [...new Set([getQueueLearnerId(), learnerId].filter((value): value is string => !!value))];
 }
 
 /** Build same-origin API URLs; never attach bearer tokens to arbitrary origins. */
@@ -217,7 +228,6 @@ async function bootstrapLearnerOnce(lang: Lang | null) {
   token = response.token;
   learnerId = response.learner.id;
   lastBootstrapLang = response.learner.lang;
-  writeStorage(TOKEN_KEY, token);
   if (typeof window !== "undefined") window.dispatchEvent(new Event("kotoba:learner-ready"));
   return response.learner;
 }
@@ -271,14 +281,15 @@ export async function createAttempt(
 export async function uploadQueuedAttempt(item: {
   clientAttemptId: string;
   sessionId: string | null;
-  clientSessionId?: string;
+  clientSessionId?: string | undefined;
   promptId: string;
   attemptIndex: 1 | 2;
   duration: number;
   mimeType: string;
   blob: Blob;
-  attemptId?: string;
-  syncStatus?: "queued" | "uploading" | "processing" | "ready" | "failed";
+  attemptId?: string | undefined;
+  syncStatus?:
+    "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed" | undefined;
 }) {
   if (item.syncStatus === "processing" && item.attemptId) {
     const attempt = await getAttempt(item.attemptId);
@@ -370,6 +381,11 @@ export function toReadyAttempt(value: Awaited<ReturnType<typeof createAttempt>>)
     );
   }
   return {
+    id: value.id,
+    ...(value.clientAttemptId ? { clientAttemptId: value.clientAttemptId } : {}),
+    sessionId: value.sessionId,
+    status: value.status,
+    audio: value.audio,
     index: value.index,
     transcript: value.transcript,
     feedback: value.feedback as Feedback,

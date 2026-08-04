@@ -103,7 +103,7 @@ export const improvementSchema = z.object({
 export type Improvement = z.infer<typeof improvementSchema>;
 
 export const expressionSchema = z.object({
-  id: z.string(),
+  id: z.string().min(1).max(96),
   lang: langSchema,
   text: z.string(),
   reading: z.string().optional(),

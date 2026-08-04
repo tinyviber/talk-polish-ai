@@ -62,12 +62,17 @@ export function verifyLearnerToken(token: string): LearnerTokenPayload {
     ) {
       throw ApiError.unauthorized();
     }
+    const now = Math.floor(Date.now() / 1000);
     if (
       !("iat" in payload) ||
       typeof payload.iat !== "number" ||
+      !Number.isSafeInteger(payload.iat) ||
       !("exp" in payload) ||
       typeof payload.exp !== "number" ||
-      payload.exp <= Math.floor(Date.now() / 1000)
+      !Number.isSafeInteger(payload.exp) ||
+      payload.iat > now + 60 ||
+      payload.exp <= now ||
+      payload.iat > payload.exp
     ) {
       throw ApiError.unauthorized("The learner token has expired.");
     }

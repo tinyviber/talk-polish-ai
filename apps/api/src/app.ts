@@ -7,13 +7,12 @@ import {
   validatorCompiler,
 } from "fastify-type-provider-zod";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { env } from "./env";
+import { env, type Env } from "./env";
 import { closeDatabase } from "./db/client";
 import { ApiError, toErrorResponse } from "./http/errors";
 import { registerRoutes } from "./routes";
 
-export async function buildApp() {
-  const config = env();
+export async function buildApp(config: Env = env()) {
   const app = Fastify({
     // Caddy/Nginx is the only trusted proxy in production. Enable this only
     // when the proxy overwrites X-Forwarded-For; never trust client headers.
@@ -84,6 +83,12 @@ export async function buildApp() {
       return;
     }
 
+    const clientError = fastifyClientError(error);
+    if (clientError) {
+      reply.status(clientError.statusCode).send(toErrorResponse(clientError, request.id));
+      return;
+    }
+
     if (isPayloadTooLarge(error)) {
       const tooLarge = ApiError.tooLarge("The request payload is too large.");
       reply.status(tooLarge.statusCode).send(toErrorResponse(tooLarge, request.id));
@@ -95,7 +100,7 @@ export async function buildApp() {
     reply.status(internal.statusCode).send(toErrorResponse(internal, request.id));
   });
 
-  await registerRoutes(app);
+  await registerRoutes(app, config);
   app.addHook("onClose", async () => {
     await closeDatabase();
   });
@@ -109,4 +114,15 @@ function isPayloadTooLarge(error: unknown) {
     "code" in error &&
     (error.code === "FST_ERR_CTP_BODY_TOO_LARGE" || error.code === "FST_REQ_BODY_TOO_LARGE")
   );
+}
+
+function fastifyClientError(error: unknown) {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = error.code;
+  if (code === "FST_ERR_CTP_INVALID_JSON_BODY")
+    return ApiError.badRequest("Request body is not valid JSON.");
+  if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE")
+    return ApiError.badRequest("Unsupported content type.");
+  if (code === "FST_ERR_CTP_BODY_TOO_LARGE" || code === "FST_REQ_BODY_TOO_LARGE") return null;
+  return null;
 }

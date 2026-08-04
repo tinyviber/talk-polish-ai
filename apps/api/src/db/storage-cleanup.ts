@@ -8,6 +8,8 @@ import { randomUUID } from "node:crypto";
 
 export const CLEANUP_MAX_ATTEMPTS = 5;
 export const CLEANUP_BATCH_SIZE = 25;
+export const ORPHAN_STORAGE_GRACE_MS = 24 * 60 * 60 * 1000;
+export const FAILED_ATTEMPT_AUDIO_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEAD_LETTER_DELAY_MS = 365 * 24 * 60 * 60 * 1000;
 
 export type CleanupRunResult = {
@@ -49,6 +51,20 @@ export async function processStorageCleanupJobs(
   for (const job of jobs) {
     result.processed += 1;
     try {
+      const activeReferences = await db()
+        .select({ id: audioPlaybackReferences.id })
+        .from(audioPlaybackReferences)
+        .where(
+          and(
+            eq(audioPlaybackReferences.storageKey, job.storageKey),
+            gt(audioPlaybackReferences.expiresAt, now),
+          ),
+        )
+        .limit(1);
+      if (activeReferences.length > 0) {
+        await db().delete(storageCleanupJobs).where(eq(storageCleanupJobs.id, job.id));
+        continue;
+      }
       await storage.remove(job.storageKey);
       await db().delete(storageCleanupJobs).where(eq(storageCleanupJobs.id, job.id));
       result.deleted += 1;
@@ -120,7 +136,12 @@ export async function removeOrQueueStorage(
   storage: AudioStorageProvider,
   storageKey: string,
   reason: string,
+  notBefore?: Date,
 ) {
+  if (notBefore && notBefore.getTime() > Date.now()) {
+    await queueStorageCleanup(storageKey, reason, notBefore);
+    return;
+  }
   try {
     await storage.remove(storageKey);
   } catch (error) {
@@ -130,20 +151,23 @@ export async function removeOrQueueStorage(
       storageKey,
       errorCode: error instanceof StorageError ? error.code : "provider_error",
     });
-    try {
-      await withDb("queueStorageCleanup", () =>
-        db()
-          .insert(storageCleanupJobs)
-          .values({ id: `cln_${randomUUID()}`, storageKey, reason }),
-      );
-    } catch (queueError) {
-      console.error("[storage] cleanup intent could not be persisted", {
-        provider: storage.name,
-        reason,
-        storageKey,
-        error: queueError instanceof Error ? queueError.message : "database_error",
-      });
-    }
+    await queueStorageCleanup(storageKey, reason, new Date());
+  }
+}
+
+async function queueStorageCleanup(storageKey: string, reason: string, nextAttemptAt: Date) {
+  try {
+    await withDb("queueStorageCleanup", () =>
+      db()
+        .insert(storageCleanupJobs)
+        .values({ id: `cln_${randomUUID()}`, storageKey, reason, nextAttemptAt }),
+    );
+  } catch (queueError) {
+    console.error("[storage] cleanup intent could not be persisted", {
+      reason,
+      storageKey,
+      error: queueError instanceof Error ? queueError.message : "database_error",
+    });
   }
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createAnonymousLearnerRequestSchema,
   createAttemptFieldsSchema,
+  expressionSchema,
   feedbackSchema,
   errorCodeSchema,
 } from "./schemas";
@@ -30,6 +31,17 @@ describe("shared contracts", () => {
     expect(() => createAnonymousLearnerRequestSchema.parse({ deviceId: "x" })).toThrow();
     expect(() => createAttemptFieldsSchema.parse({ attemptIndex: 3, durationSec: 1 })).toThrow();
     expect(errorCodeSchema.safeParse("not-a-real-code").success).toBe(false);
+  });
+
+  test("bounds expression ids to the database column width", () => {
+    expect(
+      expressionSchema.safeParse({
+        id: "x".repeat(97),
+        lang: "en",
+        text: "hello",
+        meaning: "hello",
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts provider feedback fixture shape", () => {

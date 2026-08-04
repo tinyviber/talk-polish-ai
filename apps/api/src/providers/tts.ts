@@ -12,10 +12,28 @@ export type SynthesisInput = {
 export type SynthesisResult = {
   /** Storage reference for generated audio, or null for mock providers. */
   storageKey: string | null;
+  /** Explicitly distinguishes a deterministic cache hit from a new object. */
+  cacheStatus?: SynthesisStorageDisposition;
   contentType?: string;
   seconds: number;
   provider: string;
 };
+
+export type SynthesisStorageDisposition = "cache-hit" | "created";
+
+const synthesisStorageDisposition = new WeakMap<SynthesisResult, SynthesisStorageDisposition>();
+
+export function withSynthesisStorageDisposition<T extends SynthesisResult>(
+  result: T,
+  disposition: SynthesisStorageDisposition,
+) {
+  synthesisStorageDisposition.set(result, disposition);
+  return result;
+}
+
+export function getSynthesisStorageDisposition(result: SynthesisResult) {
+  return result.cacheStatus ?? synthesisStorageDisposition.get(result);
+}
 
 export interface TextToSpeechProvider {
   readonly name: string;

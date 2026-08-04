@@ -6,12 +6,14 @@ import {
   getNextRecordingQueuePollAt,
   getRecordingQueueLeaseKey,
   listRecordingQueue,
+  markRecordingFailed,
   markRecordingReady,
   removeQueuedRecording,
   syncRecordingQueue,
 } from "./offlineQueue";
 import { startOfflineQueueSyncLoop } from "./offlineQueueSync";
 import { installFakeIndexedDb } from "./test/fakeIndexedDb";
+import { findReadyRecording } from "../../features/practice/ready-attempt";
 
 class FakeWindow extends EventTarget {
   readonly setTimeout = globalThis.setTimeout.bind(globalThis);
@@ -157,6 +159,32 @@ describe("offline queue sync behavior", () => {
     expect(item.syncStatus).toBe("ready");
     expect(item.attemptId).toBe("server-attempt-a");
     expect(item.blobDiscarded).toBe(true);
+  });
+
+  test("keeps durable ready metadata visible and never uploads it again", async () => {
+    const input = createRecording("attempt-ready-recovery");
+    let uploadCalls = 0;
+    const upload = vi.fn(async (item) => {
+      uploadCalls += 1;
+      return {
+        id: `server-${item.clientAttemptId}`,
+        status: "ready" as const,
+        sessionId: "session-1",
+      };
+    });
+
+    await enqueueRecording(input);
+    await syncRecordingQueue(upload, input.learnerId);
+
+    const otherTabItems = await listRecordingQueue(input.learnerId);
+    const durableReady = findReadyRecording(otherTabItems, input.clientAttemptId);
+    expect(durableReady?.attemptId).toBe("server-attempt-ready-recovery");
+
+    await syncRecordingQueue(upload, input.learnerId);
+    expect(uploadCalls).toBe(1);
+
+    await markRecordingFailed(input.clientAttemptId, "late worker error");
+    expect((await listRecordingQueue(input.learnerId))[0]?.syncStatus).toBe("ready");
   });
 
   test("keeps scheduling processing polls beyond 15.5 seconds", async () => {

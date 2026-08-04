@@ -1,11 +1,6 @@
 import { asc, eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import {
-  attemptResults,
-  practiceSessions,
-  savedExpressions,
-  speakingAttempts,
-} from "../../db/schema";
+import { progressEvents, practiceSessions, savedExpressions } from "../../db/schema";
 import { withDb } from "../../http/with-db";
 
 export type ProgressSessionRow = {
@@ -13,6 +8,7 @@ export type ProgressSessionRow = {
   promptId: string;
   lang: string;
   createdAt: Date;
+  day: string;
   attemptIndex: number | null;
   score: number | null;
 };
@@ -25,15 +21,15 @@ export const progressRepository = {
           sessionId: practiceSessions.id,
           promptId: practiceSessions.promptId,
           lang: practiceSessions.lang,
-          createdAt: practiceSessions.createdAt,
-          attemptIndex: speakingAttempts.attemptIndex,
-          score: attemptResults.overallScore,
+          createdAt: progressEvents.createdAt,
+          day: progressEvents.day,
+          attemptIndex: progressEvents.attemptIndex,
+          score: progressEvents.score,
         })
         .from(practiceSessions)
-        .leftJoin(speakingAttempts, eq(speakingAttempts.sessionId, practiceSessions.id))
-        .leftJoin(attemptResults, eq(attemptResults.attemptId, speakingAttempts.id))
-        .where(eq(practiceSessions.learnerId, learnerId))
-        .orderBy(asc(practiceSessions.createdAt)),
+        .innerJoin(progressEvents, eq(progressEvents.sessionId, practiceSessions.id))
+        .where(eq(progressEvents.learnerId, learnerId))
+        .orderBy(asc(progressEvents.createdAt)),
     );
   },
   async countSaved(learnerId: string) {

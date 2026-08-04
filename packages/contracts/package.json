@@ -7,7 +7,17 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./fixtures": "./src/fixtures.ts"
+    "./fixtures": "./src/fixtures.ts",
+    "./attempts": "./src/attempts.ts",
+    "./audio": "./src/audio.ts",
+    "./errors": "./src/errors.ts",
+    "./expressions": "./src/expressions.ts",
+    "./progress": "./src/progress.ts",
+    "./prompts": "./src/prompts.ts",
+    "./providers": "./src/providers.ts",
+    "./sessions": "./src/sessions.ts",
+    "./speaking-feedback": "./src/speaking-feedback.ts",
+    "./transcription": "./src/transcription.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",

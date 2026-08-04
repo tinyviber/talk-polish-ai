@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  feedbackProvenanceSchema,
+  pronunciationSourceSchema,
+  pronunciationStatusSchema,
+  speechMetricsSourceSchema,
+  speechMetricsStatusSchema,
+} from "./speaking-feedback";
 
 /* ------------------------------------------------------------------ */
 /* Primitives                                                          */
@@ -83,7 +90,8 @@ export const scoresSchema = z.object({
   grammar: z.number().int().min(0).max(100),
   vocabulary: z.number().int().min(0).max(100),
   naturalness: z.number().int().min(0).max(100),
-  pronunciation: z.number().int().min(0).max(100),
+  /** Nullable for new results until an acoustic scorer is connected. */
+  pronunciation: z.number().int().min(0).max(100).nullable(),
 });
 export type Scores = z.infer<typeof scoresSchema>;
 
@@ -119,6 +127,11 @@ export const feedbackSchema = z.object({
   improvements: z.array(improvementSchema),
   annotations: z.array(annotationSchema),
   expressions: z.array(expressionSchema),
+  pronunciationStatus: pronunciationStatusSchema.optional(),
+  pronunciationSource: pronunciationSourceSchema.optional(),
+  speechMetricsStatus: speechMetricsStatusSchema.optional(),
+  speechMetricsSource: speechMetricsSourceSchema.optional(),
+  sources: feedbackProvenanceSchema.optional(),
   stats: z.object({
     words: z.number(),
     wpm: z.number(),

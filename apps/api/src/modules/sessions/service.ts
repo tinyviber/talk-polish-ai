@@ -97,7 +97,31 @@ export function composeAttempt(
   if (result?.feedback !== undefined) {
     const parsed = feedbackSchema.safeParse(result.feedback);
     if (!parsed.success) throw ApiError.internal("Stored attempt feedback is invalid.");
-    feedback = parsed.data;
+    feedback = {
+      ...parsed.data,
+      ...(parsed.data.pronunciationStatus
+        ? {}
+        : {
+            pronunciationStatus: "unavailable" as const,
+            pronunciationSource: "unavailable" as const,
+          }),
+      ...(parsed.data.speechMetricsStatus
+        ? {}
+        : {
+            speechMetricsStatus: "unavailable" as const,
+            speechMetricsSource: "unavailable" as const,
+          }),
+      ...(parsed.data.sources
+        ? {}
+        : {
+            sources: {
+              overall: "unavailable" as const,
+              text: "unavailable" as const,
+              speechMetrics: "unavailable" as const,
+              pronunciation: "unavailable" as const,
+            },
+          }),
+    };
   }
   let transcription;
   if (result?.transcription !== null && result?.transcription !== undefined) {

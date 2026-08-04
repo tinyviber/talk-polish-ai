@@ -330,7 +330,7 @@ const FIRST_SCORES: Scores = {
   grammar: 62,
   vocabulary: 66,
   naturalness: 55,
-  pronunciation: 71,
+  pronunciation: null,
 };
 
 const SECOND_SCORES: Scores = {
@@ -339,11 +339,15 @@ const SECOND_SCORES: Scores = {
   grammar: 88,
   vocabulary: 81,
   naturalness: 84,
-  pronunciation: 78,
+  pronunciation: null,
 };
 
-const avg = (s: Scores) =>
-  Math.round(Object.values(s).reduce((a, b) => a + b, 0) / Object.keys(s).length);
+const avg = (s: Scores) => {
+  const values = Object.entries(s)
+    .filter(([key, value]) => key !== "pronunciation" && typeof value === "number")
+    .map(([, value]) => value as number);
+  return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+};
 
 /** Mock ASR + AI feedback. Deterministic per prompt + attempt. */
 export async function analyzeAttempt(
@@ -360,6 +364,8 @@ export async function analyzeAttempt(
     overall: avg(scores),
     headline: bank.headline[index - 1] ?? "",
     scores,
+    pronunciationStatus: "unavailable",
+    pronunciationSource: "unavailable",
     improvements: index === 1 ? bank.feedback : bank.feedback.slice(0, 1),
     annotations: part.annotations,
     expressions: bank.expressions,

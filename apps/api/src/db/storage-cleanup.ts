@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 export const CLEANUP_MAX_ATTEMPTS = 5;
 export const CLEANUP_BATCH_SIZE = 25;
 export const ORPHAN_STORAGE_GRACE_MS = 24 * 60 * 60 * 1000;
+export const FAILED_ATTEMPT_AUDIO_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEAD_LETTER_DELAY_MS = 365 * 24 * 60 * 60 * 1000;
 
 export type CleanupRunResult = {

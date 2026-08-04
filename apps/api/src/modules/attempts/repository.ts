@@ -7,9 +7,11 @@ import {
   practiceSessions,
   progressEvents,
   speakingAttempts,
+  storageCleanupJobs,
 } from "../../db/schema";
 import { ApiError } from "../../http/errors";
 import { withDb } from "../../http/with-db";
+import { FAILED_ATTEMPT_AUDIO_RETENTION_MS } from "../../db/storage-cleanup";
 
 export type StoredAudio = {
   buffer: Buffer;
@@ -222,14 +224,47 @@ export const attemptRepository = {
     );
   },
   async markFailedIfProcessing(attemptId: string) {
-    const rows = await withDb("markAttemptFailedIfProcessing", () =>
-      db()
-        .update(speakingAttempts)
-        .set({ status: "failed" })
-        .where(and(eq(speakingAttempts.id, attemptId), eq(speakingAttempts.status, "processing")))
-        .returning({ id: speakingAttempts.id }),
+    return withDb("markAttemptFailedIfProcessing", () =>
+      db().transaction(async (tx) => {
+        const currentRows = await tx
+          .select({ audioId: speakingAttempts.audioId })
+          .from(speakingAttempts)
+          .where(and(eq(speakingAttempts.id, attemptId), eq(speakingAttempts.status, "processing")))
+          .limit(1);
+        const current = currentRows[0];
+        if (!current) return false;
+
+        let storageKey: string | undefined;
+        if (current.audioId) {
+          const audioRows = await tx
+            .select({ storageKey: audioRecordings.storageKey })
+            .from(audioRecordings)
+            .where(eq(audioRecordings.id, current.audioId))
+            .limit(1);
+          storageKey = audioRows[0]?.storageKey;
+        }
+
+        const updated = await tx
+          .update(speakingAttempts)
+          .set({ status: "failed", audioId: null })
+          .where(and(eq(speakingAttempts.id, attemptId), eq(speakingAttempts.status, "processing")))
+          .returning({ id: speakingAttempts.id });
+        if (updated.length === 0) return false;
+
+        if (current.audioId) {
+          await tx.delete(audioRecordings).where(eq(audioRecordings.id, current.audioId));
+        }
+        if (storageKey) {
+          await tx.insert(storageCleanupJobs).values({
+            id: `cln_${randomUUID()}`,
+            storageKey,
+            reason: "stale-attempt-audio",
+            nextAttemptAt: new Date(Date.now() + FAILED_ATTEMPT_AUDIO_RETENTION_MS),
+          });
+        }
+        return true;
+      }),
     );
-    return rows.length > 0;
   },
   async removeAudioMetadata(audioId: string) {
     await withDb("cleanupFailedAudioMetadata", () =>

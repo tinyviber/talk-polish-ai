@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "./app";
+import { db } from "./db/client";
+import { audioRecordings, speakingAttempts, storageCleanupJobs } from "./db/schema";
+import { ATTEMPT_PROCESSING_STALE_MS } from "./modules/attempts/service";
 
 const integration = process.env.RUN_INTEGRATION === "1" ? test : test.skip;
 const ttsIntegration =
@@ -181,6 +185,85 @@ describe("persisted practice journey", () => {
     expect(diagnostics.chat.status).toBe("available");
     expect(diagnostics.transcription.status).toBe("available");
     expect(JSON.stringify(diagnostics)).not.toContain("minioadmin");
+  });
+
+  integration("creates durable cleanup intent when stale processing is recovered", async () => {
+    const deviceId = `stale-${crypto.randomUUID()}`;
+    const learnerResponse = await app.inject({
+      method: "POST",
+      url: "/api/learners/anonymous",
+      payload: { deviceId, lang: "en" },
+    });
+    const { learner, token } = learnerResponse.json();
+    const prompt = (await app.inject({ method: "GET", url: "/api/prompts?lang=en" })).json()
+      .prompts[0];
+    const sessionResponse = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { promptId: prompt.id, clientSessionId: `stale-session-${crypto.randomUUID()}` },
+    });
+    const session = sessionResponse.json().session;
+    const staleAttemptId = `att_stale_${crypto.randomUUID()}`;
+    const audioId = `aud_stale_${crypto.randomUUID()}`;
+    const storageKey = `recordings/${learner.id}/${staleAttemptId}.webm`;
+
+    await db().insert(audioRecordings).values({
+      id: audioId,
+      storageKey,
+      mimeType: "audio/webm",
+      sizeBytes: 12,
+      durationSec: 1,
+    });
+    await db()
+      .insert(speakingAttempts)
+      .values({
+        id: staleAttemptId,
+        sessionId: session.id,
+        learnerId: learner.id,
+        attemptIndex: 1,
+        clientAttemptId: null,
+        status: "processing",
+        durationSec: 1,
+        mocked: false,
+        audioId,
+        createdAt: new Date(Date.now() - ATTEMPT_PROCESSING_STALE_MS - 1),
+      });
+
+    const upload = multipart({ attemptIndex: "1", durationSec: "1" }, Buffer.from("new audio"));
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/attempts`,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": upload.contentType,
+      },
+      payload: upload.body,
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error.code).toBe("processing_unavailable");
+
+    const failed = await db()
+      .select({ status: speakingAttempts.status, audioId: speakingAttempts.audioId })
+      .from(speakingAttempts)
+      .where(eq(speakingAttempts.id, staleAttemptId));
+    expect(failed[0]).toEqual({ status: "failed", audioId: null });
+
+    const audio = await db()
+      .select({ id: audioRecordings.id })
+      .from(audioRecordings)
+      .where(eq(audioRecordings.id, audioId));
+    expect(audio).toHaveLength(0);
+
+    const cleanup = await db()
+      .select({
+        reason: storageCleanupJobs.reason,
+        nextAttemptAt: storageCleanupJobs.nextAttemptAt,
+      })
+      .from(storageCleanupJobs)
+      .where(eq(storageCleanupJobs.storageKey, storageKey));
+    expect(cleanup[0]?.reason).toBe("stale-attempt-audio");
+    expect(cleanup[0]?.nextAttemptAt.getTime()).toBeGreaterThan(Date.now());
   });
 
   integration("replays an offline session key without duplicating sessions", async () => {

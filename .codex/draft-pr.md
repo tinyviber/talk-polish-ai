@@ -82,7 +82,7 @@ All code checks below used fixed Bun `1.2.17` via `PATH=/tmp/kotoba-bun-1.2.17/b
 - `bun run build:docker` — blocked: Docker daemon unavailable at `unix:///Users/wj/.orbstack/run/docker.sock`.
 - `git diff --check` — pass.
 
-GitHub Actions run [`30916161136`](https://github.com/tinyviber/talk-polish-ai/actions/runs/30916161136) for head `553032573432abf0b7c49300ce2419063fd6edce` — pass. Its `checks` job passed `bun install --frozen-lockfile`, `bun run format:check`, `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`, and `bun run build:docker`; its PostgreSQL `integration` job passed `bun install --frozen-lockfile` and `bun run test:integration`.
+GitHub Actions run [`30930765697`](https://github.com/tinyviber/talk-polish-ai/actions/runs/30930765697) for head `dc55aa22c0c5ac6d14f23c27bcc90ed6f9a8ffea` — pass. Its `checks` job passed `bun install --frozen-lockfile`, `bun run format:check`, `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`, and `bun run build:docker`; its PostgreSQL `integration` job passed `bun install --frozen-lockfile` and `bun run test:integration`.
 
 Latest follow-up local commands: `bunx vitest run apps/web/src/lib/practice/offlineQueue.test.ts apps/web/src/lib/practice/offlineQueue.sync.test.ts apps/web/src/lib/practice/offlineQueueSync.test.ts` — pass (14 tests); `git diff --check` — pass; `bun run test:integration` — blocked before migration because local PostgreSQL is unavailable; `bun run build:docker` — blocked because the local Docker daemon is unavailable. The pushed CI run above is the authoritative frozen-install, PostgreSQL integration, and Docker result.
 

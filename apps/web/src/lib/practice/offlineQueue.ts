@@ -155,23 +155,37 @@ async function allItems() {
   });
 }
 
+function waitForTransactionWrite(request: IDBRequest<any>, tx: IDBTransaction) {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
+    tx.oncomplete = () => finish(resolve);
+    tx.onerror = () =>
+      finish(() => reject(tx.error ?? request.error ?? new Error("IndexedDB write failed")));
+    tx.onabort = () =>
+      finish(() => reject(tx.error ?? request.error ?? new Error("IndexedDB write aborted")));
+    request.onerror = () =>
+      finish(() => reject(request.error ?? tx.error ?? new Error("IndexedDB write failed")));
+  });
+}
+
 async function put(item: RecordingQueueItem) {
   const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const request = db.transaction(STORE, "readwrite").objectStore(STORE).put(item);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+  const tx = db.transaction(STORE, "readwrite");
+  const request = tx.objectStore(STORE).put(item);
+  await waitForTransactionWrite(request, tx);
   notify();
 }
 
 async function remove(clientAttemptId: string) {
   const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const request = db.transaction(STORE, "readwrite").objectStore(STORE).delete(clientAttemptId);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+  const tx = db.transaction(STORE, "readwrite");
+  const request = tx.objectStore(STORE).delete(clientAttemptId);
+  await waitForTransactionWrite(request, tx);
   notify();
 }
 

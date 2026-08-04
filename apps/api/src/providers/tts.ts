@@ -12,6 +12,8 @@ export type SynthesisInput = {
 export type SynthesisResult = {
   /** Storage reference for generated audio, or null for mock providers. */
   storageKey: string | null;
+  /** Explicitly distinguishes a deterministic cache hit from a new object. */
+  cacheStatus?: SynthesisStorageDisposition;
   contentType?: string;
   seconds: number;
   provider: string;
@@ -30,7 +32,7 @@ export function withSynthesisStorageDisposition<T extends SynthesisResult>(
 }
 
 export function getSynthesisStorageDisposition(result: SynthesisResult) {
-  return synthesisStorageDisposition.get(result);
+  return result.cacheStatus ?? synthesisStorageDisposition.get(result);
 }
 
 export interface TextToSpeechProvider {

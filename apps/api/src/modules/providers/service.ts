@@ -9,13 +9,10 @@ import { providers, type Providers } from "../../providers";
 import { diagnoseProviders } from "../../providers/diagnostics";
 import { safeProviderError } from "../../providers/http";
 import { StorageError } from "../../providers/storage";
-import {
-  getSynthesisStorageDisposition,
-  type SynthesisResult,
-} from "../../providers/tts";
+import { getSynthesisStorageDisposition } from "../../providers/tts";
 import { issueAudioReference, resolveAudioReference } from "./audio-references";
 import { enforceProviderRateLimit } from "./rate-limit";
-import { removeOrQueueStorage } from "../../db/storage-cleanup";
+import { ORPHAN_STORAGE_GRACE_MS, removeOrQueueStorage } from "../../db/storage-cleanup";
 import { providerRepository } from "./repository";
 
 export type ProviderApplication = ReturnType<typeof createProviderApplication>;
@@ -25,10 +22,7 @@ type ProviderApplicationDependencies = {
   issueAudioReference: typeof issueAudioReference;
   resolveAudioReference: typeof resolveAudioReference;
   removeOrQueueStorage: typeof removeOrQueueStorage;
-  providerRepository: Pick<
-    typeof providerRepository,
-    "findRecordingForLearner" | "hasPlaybackReferenceForStorageKey"
-  >;
+  providerRepository: Pick<typeof providerRepository, "findRecordingForLearner">;
 };
 
 /** Application boundary for provider capability, TTS, audio, and realtime use cases. */
@@ -78,14 +72,12 @@ export function createProviderApplication(
               )
             : null;
         } catch (error) {
-          if (
-            result.storageKey &&
-            (await shouldCleanupTtsObjectAfterReferenceFailure(result, deps.providerRepository))
-          ) {
+          if (result.storageKey && getSynthesisStorageDisposition(result) !== "cache-hit") {
             await deps.removeOrQueueStorage(
               providerSet.storage,
               result.storageKey,
               "tts-reference-failed",
+              new Date(Date.now() + ORPHAN_STORAGE_GRACE_MS),
             );
           }
           throw error;
@@ -151,23 +143,6 @@ export function createProviderApplication(
       }
     },
   };
-}
-
-async function shouldCleanupTtsObjectAfterReferenceFailure(
-  result: SynthesisResult,
-  repository: Pick<typeof providerRepository, "hasPlaybackReferenceForStorageKey">,
-) {
-  if (!result.storageKey) return false;
-  if (getSynthesisStorageDisposition(result) === "cache-hit") return false;
-  try {
-    return !(await repository.hasPlaybackReferenceForStorageKey(result.storageKey));
-  } catch (error) {
-    console.warn("[providers] skipped TTS cleanup after reference failure", {
-      storageKey: result.storageKey,
-      error: error instanceof Error ? error.message : "database_error",
-    });
-    return false;
-  }
 }
 
 async function readAudio(providerSet: Providers, storageKey: string, mimeType: string) {

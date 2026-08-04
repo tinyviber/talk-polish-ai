@@ -5,7 +5,10 @@ import type { Providers } from "../../providers";
 import { withSynthesisStorageDisposition } from "../../providers/tts";
 import { createProviderApplication } from "./service";
 
-const capability = (provider: string, status: ProviderCapability["status"]): ProviderCapability => ({
+const capability = (
+  provider: string,
+  status: ProviderCapability["status"],
+): ProviderCapability => ({
   provider,
   status,
   checkedAt: "2026-08-04T00:00:00.000Z",
@@ -117,7 +120,6 @@ describe("provider application", () => {
 
   test("does not delete a cached TTS object when reference persistence fails", async () => {
     const cleanupCalls: string[] = [];
-    let sharedReferenceChecks = 0;
     const service = createProviderApplication(
       config(),
       providerSet(async () =>
@@ -142,10 +144,6 @@ describe("provider application", () => {
           async findRecordingForLearner() {
             return undefined;
           },
-          async hasPlaybackReferenceForStorageKey() {
-            sharedReferenceChecks += 1;
-            return false;
-          },
         },
       },
     );
@@ -155,12 +153,10 @@ describe("provider application", () => {
     ).rejects.toMatchObject({ code: "processing_unavailable" });
 
     expect(cleanupCalls).toEqual([]);
-    expect(sharedReferenceChecks).toBe(0);
   });
 
-  test("does not delete a shared TTS object when another playback reference already exists", async () => {
-    const cleanupCalls: string[] = [];
-    const sharedReferenceChecks: string[] = [];
+  test("defers cleanup for a newly created TTS object when reference persistence fails", async () => {
+    const cleanupCalls: Array<{ storageKey: string; notBefore?: Date }> = [];
     const service = createProviderApplication(
       config(),
       providerSet(async () =>
@@ -178,16 +174,12 @@ describe("provider application", () => {
         issueAudioReference: async () => {
           throw new Error("reference insert failed");
         },
-        removeOrQueueStorage: async (_storage, storageKey) => {
-          cleanupCalls.push(storageKey);
+        removeOrQueueStorage: async (_storage, storageKey, _reason, notBefore) => {
+          cleanupCalls.push({ storageKey, notBefore });
         },
         providerRepository: {
           async findRecordingForLearner() {
             return undefined;
-          },
-          async hasPlaybackReferenceForStorageKey(storageKey: string) {
-            sharedReferenceChecks.push(storageKey);
-            return true;
           },
         },
       },
@@ -197,7 +189,8 @@ describe("provider application", () => {
       service.synthesize("learner-2", synthesisRequest(), "req-shared", "198.51.100.5"),
     ).rejects.toMatchObject({ code: "processing_unavailable" });
 
-    expect(sharedReferenceChecks).toEqual(["local://tts/learner/expression/hash.mp3"]);
-    expect(cleanupCalls).toEqual([]);
+    expect(cleanupCalls).toHaveLength(1);
+    expect(cleanupCalls[0]?.storageKey).toBe("local://tts/learner/expression/hash.mp3");
+    expect(cleanupCalls[0]?.notBefore?.getTime()).toBeGreaterThan(Date.now());
   });
 });

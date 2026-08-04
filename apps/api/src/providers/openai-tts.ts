@@ -51,6 +51,7 @@ export function createOpenAICompatibleTtsProvider(
         return withSynthesisStorageDisposition(
           {
             storageKey: cachedKey,
+            cacheStatus: "cache-hit",
             contentType: "audio/mpeg",
             seconds: estimateSeconds(input.text),
             provider: "openai-compatible-tts",
@@ -68,6 +69,7 @@ export function createOpenAICompatibleTtsProvider(
       return withSynthesisStorageDisposition(
         {
           storageKey: stored.storageKey,
+          cacheStatus: "created",
           contentType: "audio/mpeg",
           seconds: estimateSeconds(input.text),
           provider: "openai-compatible-tts",

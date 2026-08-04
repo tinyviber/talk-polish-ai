@@ -384,6 +384,19 @@ export async function enqueueRecording(
     return input.clientAttemptId;
   }
   const allowedLearnerIds = normalizeLearnerIds(learnerIds ?? input.learnerId);
+  // The server already holds a ready attempt for this slot whose feedback was
+  // never delivered. Re-recording would orphan it and create a duplicate
+  // attempt for the same (session, index); hand the caller that row instead.
+  const outstanding = existing.find(
+    (item) =>
+      learnerMatches(item, allowedLearnerIds) &&
+      item.clientSessionId === input.clientSessionId &&
+      item.attemptIndex === input.attemptIndex &&
+      item.clientAttemptId !== input.clientAttemptId &&
+      isFeedbackOutstanding(item),
+  );
+  if (outstanding) return outstanding.clientAttemptId;
+
   // Synced recordings keep only metadata, so they never consume the quota.
   const totalBytes = existing
     .filter((item) => item.syncStatus !== "ready")

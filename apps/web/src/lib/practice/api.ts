@@ -281,14 +281,21 @@ export async function createAttempt(
 export async function uploadQueuedAttempt(item: {
   clientAttemptId: string;
   sessionId: string | null;
-  clientSessionId?: string;
+  clientSessionId?: string | undefined;
   promptId: string;
   attemptIndex: 1 | 2;
   duration: number;
   mimeType: string;
   blob: Blob;
-  attemptId?: string;
-  syncStatus?: "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed";
+  attemptId?: string | undefined;
+  syncStatus?:
+    | "local-draft"
+    | "queued"
+    | "uploading"
+    | "processing"
+    | "ready"
+    | "failed"
+    | undefined;
 }) {
   if (item.syncStatus === "processing" && item.attemptId) {
     const attempt = await getAttempt(item.attemptId);

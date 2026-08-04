@@ -18,10 +18,16 @@ export type RecordingQueueItem = {
   blob: Blob;
   createdAt: number;
   syncStatus: QueueStatus;
-  attemptId?: string;
-  lastError?: string;
+  attemptId?: string | undefined;
+  lastError?: string | undefined;
   /** Bytes are dropped once the attempt is safely stored server-side. */
-  blobDiscarded?: boolean;
+  blobDiscarded?: boolean | undefined;
+  /** Durable wake-up time for future processing polls and transient retries. */
+  nextPollAt?: number | undefined;
+  /** Exponential backoff step while the server is still processing. */
+  processingPollIndex?: number | undefined;
+  /** Exponential backoff step after a transient upload/read failure. */
+  transientRetryIndex?: number | undefined;
 };
 
 export function isQueueSyncCandidate(status: QueueStatus) {
@@ -40,10 +46,12 @@ const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
 const LEASE_MS = 30_000;
 const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
+const TRANSIENT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
 let queueChannel: BroadcastChannel | null = null;
 let syncOwnerId: string | null = null;
+let syncTrailingPassRequested = false;
 
 function ensureQueueChannel() {
   if (typeof BroadcastChannel === "undefined") return null;
@@ -80,6 +88,76 @@ export function canSyncAttempt(item: RecordingQueueItem, items: RecordingQueueIt
       candidate.attemptIndex === 1 &&
       candidate.syncStatus === "ready",
   );
+}
+
+function normalizeLearnerIds(learnerIds?: string | string[]) {
+  return [...new Set((Array.isArray(learnerIds) ? learnerIds : learnerIds ? [learnerIds] : []))];
+}
+
+function getBackoffDelay(delays: readonly number[], index?: number) {
+  return delays[Math.min(index ?? 0, delays.length - 1)]!;
+}
+
+function clearDeferredSyncState(item: RecordingQueueItem): RecordingQueueItem {
+  return {
+    ...item,
+    nextPollAt: undefined,
+    processingPollIndex: undefined,
+    transientRetryIndex: undefined,
+  };
+}
+
+function scheduleProcessingPoll(item: RecordingQueueItem, now = Date.now()): RecordingQueueItem {
+  const processingPollIndex = item.processingPollIndex ?? 0;
+  return {
+    ...item,
+    syncStatus: "processing",
+    lastError: undefined,
+    nextPollAt: now + getBackoffDelay(PROCESSING_POLL_DELAYS_MS, processingPollIndex),
+    processingPollIndex: processingPollIndex + 1,
+    transientRetryIndex: undefined,
+  };
+}
+
+function scheduleTransientRetry(
+  item: RecordingQueueItem,
+  message: string,
+  now = Date.now(),
+): RecordingQueueItem {
+  const recoveredStatus = recoverQueueStatus(item.syncStatus);
+  const transientRetryIndex = item.transientRetryIndex ?? 0;
+  return {
+    ...item,
+    syncStatus: recoveredStatus,
+    lastError: message,
+    nextPollAt: now + getBackoffDelay(TRANSIENT_RETRY_DELAYS_MS, transientRetryIndex),
+    processingPollIndex:
+      recoveredStatus === "processing" ? (item.processingPollIndex ?? 0) : undefined,
+    transientRetryIndex: transientRetryIndex + 1,
+  };
+}
+
+function queueSchedulableItems(
+  items: RecordingQueueItem[],
+  learnerIds?: string | string[],
+): RecordingQueueItem[] {
+  const queueLearnerIds = normalizeLearnerIds(learnerIds);
+  if (queueLearnerIds.length === 0) return [];
+  const readySessionKeys = new Set(
+    items
+      .filter(
+        (item) =>
+          learnerMatches(item, queueLearnerIds) &&
+          item.attemptIndex === 1 &&
+          item.syncStatus === "ready",
+      )
+      .map((item) => item.clientSessionId),
+  );
+  return orderRecordingQueue(items).filter((item) => {
+    if (!learnerMatches(item, queueLearnerIds) || !isQueueSyncCandidate(item.syncStatus))
+      return false;
+    return item.attemptIndex === 1 || readySessionKeys.has(item.clientSessionId);
+  });
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -204,8 +282,11 @@ export async function cleanupRecordingQueue(now = Date.now()) {
 export async function recoverInterruptedUploads() {
   const items = await allItems();
   for (const item of items.filter((candidate) => candidate.syncStatus === "uploading")) {
-    const { lastError: _lastError, ...withoutError } = item;
-    await put({ ...withoutError, syncStatus: recoverQueueStatus(item.syncStatus) });
+    await put({
+      ...clearDeferredSyncState(item),
+      syncStatus: recoverQueueStatus(item.syncStatus),
+      lastError: undefined,
+    });
   }
 }
 
@@ -235,10 +316,11 @@ export async function markRecordingReady(
   );
   if (!item) return;
   await put({
-    ...item,
+    ...clearDeferredSyncState(item),
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     attemptId: input.attemptId,
     syncStatus: "ready",
+    lastError: undefined,
     blob: new Blob([], { type: item.mimeType }),
     blobDiscarded: true,
   });
@@ -249,7 +331,11 @@ export async function markRecordingFailed(clientAttemptId: string, message: stri
     (candidate) => candidate.clientAttemptId === clientAttemptId,
   );
   if (!item) return;
-  await put({ ...item, syncStatus: "failed", lastError: message });
+  await put({
+    ...clearDeferredSyncState(item),
+    syncStatus: "failed",
+    lastError: message,
+  });
 }
 
 export async function removeQueuedRecording(clientAttemptId: string) {
@@ -283,10 +369,13 @@ export async function retryQueuedRecordings(learnerIds?: string | string[]) {
   await Promise.all(
     items
       .filter((item) => item.syncStatus === "failed")
-      .map((item) => {
-        const { lastError: _lastError, ...withoutError } = item;
-        return put({ ...withoutError, syncStatus: "queued" });
-      }),
+      .map((item) =>
+        put({
+          ...clearDeferredSyncState(item),
+          syncStatus: "queued",
+          lastError: undefined,
+        }),
+      ),
   );
 }
 
@@ -365,10 +454,6 @@ async function renewSyncLease(learnerId: string) {
   });
 }
 
-function wait(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
 function isTransientUploadError(error: unknown) {
   const status =
     typeof error === "object" &&
@@ -383,28 +468,32 @@ function isTransientUploadError(error: unknown) {
   return error instanceof TypeError || /network|reach|offline|timeout|aborted/i.test(message);
 }
 
-async function uploadWithProcessingPoll(
-  item: RecordingQueueItem,
-  upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
+export async function getNextRecordingQueuePollAt(
+  learnerIds?: string | string[],
+  now = Date.now(),
 ) {
-  let current = await upload(item);
-  for (const delay of PROCESSING_POLL_DELAYS_MS) {
-    if (current.status !== "processing") return current;
-    await wait(delay);
-    current = await upload({
-      ...item,
-      attemptId: current.id,
-      syncStatus: "processing",
-    });
-  }
-  return current;
+  const items = queueSchedulableItems(await allItems(), learnerIds);
+  if (items.length === 0) return null;
+  return items.reduce<number>(
+    (earliest, item) => Math.min(earliest, item.nextPollAt ?? now),
+    Number.POSITIVE_INFINITY,
+  );
+}
+
+export function getRecordingQueueLeaseKey(learnerIds?: string | string[]) {
+  const queueLearnerIds = normalizeLearnerIds(learnerIds).sort();
+  const deviceNamespace = queueLearnerIds.find((learnerId) => learnerId.startsWith("device:"));
+  return deviceNamespace ?? queueLearnerIds.join("|");
 }
 
 export async function syncRecordingQueue(
   upload: (item: RecordingQueueItem) => Promise<QueueUploadResult>,
   learnerIds?: string | string[],
 ) {
-  if (syncInFlight) return syncInFlight;
+  if (syncInFlight) {
+    syncTrailingPassRequested = true;
+    return syncInFlight;
+  }
   const run = async () => {
     if (
       !learnerIds ||
@@ -412,43 +501,56 @@ export async function syncRecordingQueue(
       (typeof navigator !== "undefined" && !navigator.onLine)
     )
       return;
-    const queueLearnerIds = Array.isArray(learnerIds) ? learnerIds : [learnerIds];
+    const queueLearnerIds = normalizeLearnerIds(learnerIds);
     await recoverInterruptedUploads();
     await cleanupRecordingQueue();
-    const items = (await allItems()).filter(
+    const queueItems = orderRecordingQueue(await allItems());
+    const items = queueItems.filter(
       (item) => learnerMatches(item, queueLearnerIds) && isQueueSyncCandidate(item.syncStatus),
     );
     const readySessionKeys = new Set(
-      (await allItems())
-        .filter(
-          (item) =>
-            learnerMatches(item, queueLearnerIds) &&
-            item.attemptIndex === 1 &&
-            item.syncStatus === "ready",
-        )
+      queueItems
+        .filter((item) => learnerMatches(item, queueLearnerIds))
+        .filter((item) => item.attemptIndex === 1 && item.syncStatus === "ready")
         .map((item) => item.clientSessionId),
     );
+    const now = Date.now();
     for (const item of items) {
+      if (item.nextPollAt !== undefined && item.nextPollAt > now) continue;
       if (item.attemptIndex === 2 && !readySessionKeys.has(item.clientSessionId)) continue;
       try {
-        const syncing = {
-          ...item,
-          syncStatus: item.syncStatus === "processing" ? "processing" : "uploading",
-        } as RecordingQueueItem;
-        await put(syncing);
-        const attempt = await uploadWithProcessingPoll(syncing, upload);
-        const { lastError: _lastError, ...withoutError } = syncing;
+        const syncing =
+          item.syncStatus === "processing"
+            ? item
+            : ({
+                ...clearDeferredSyncState(item),
+                syncStatus: "uploading",
+                lastError: undefined,
+              } as RecordingQueueItem);
+        if (syncing !== item) await put(syncing);
+        const attempt = await upload(syncing);
         const synced = attempt.status === "ready";
+        const nextItem =
+          attempt.status === "processing"
+            ? {
+                ...scheduleProcessingPoll(syncing),
+                ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
+                attemptId: attempt.id,
+              }
+            : {
+                ...clearDeferredSyncState(syncing),
+                ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
+                attemptId: attempt.id,
+                syncStatus: attempt.status,
+                lastError: undefined,
+                // Free the device once the server owns the recording; the metadata
+                // row stays so the UI can still report the completed upload.
+                ...(synced
+                  ? { blob: new Blob([], { type: syncing.mimeType }), blobDiscarded: true }
+                  : {}),
+              };
         await put({
-          ...withoutError,
-          ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
-          attemptId: attempt.id,
-          syncStatus: attempt.status,
-          // Free the device once the server owns the recording; the metadata
-          // row stays so the UI can still report the completed upload.
-          ...(synced
-            ? { blob: new Blob([], { type: withoutError.mimeType }), blobDiscarded: true }
-            : {}),
+          ...nextItem,
         });
         if (attempt.status === "ready") {
           if (item.attemptIndex === 1) readySessionKeys.add(item.clientSessionId);
@@ -471,19 +573,32 @@ export async function syncRecordingQueue(
         const message = error instanceof Error ? error.message : "Upload failed";
         // Network/5xx failures can resume automatically. Permanent 4xx and
         // validation failures stay failed until the user explicitly retries.
-        await put({
-          ...item,
-          syncStatus: isTransientUploadError(error) ? "queued" : "failed",
-          lastError: message,
-        });
+        await put(
+          isTransientUploadError(error)
+            ? scheduleTransientRetry(
+                item.syncStatus === "processing"
+                  ? item
+                  : ({
+                      ...clearDeferredSyncState(item),
+                      syncStatus: "uploading",
+                      lastError: undefined,
+                    } as RecordingQueueItem),
+                message,
+              )
+            : {
+                ...clearDeferredSyncState(item),
+                syncStatus: "failed",
+                lastError: message,
+              },
+        );
         if (isTransientUploadError(error)) break;
       }
     }
   };
   const runWithCrossTabLease = async () => {
-    const queueLearnerIds = Array.isArray(learnerIds) ? learnerIds : learnerIds ? [learnerIds] : [];
+    const queueLearnerIds = normalizeLearnerIds(learnerIds);
     if (queueLearnerIds.length === 0 || typeof indexedDB === "undefined") return run();
-    const leaseKey = queueLearnerIds.join("|");
+    const leaseKey = getRecordingQueueLeaseKey(queueLearnerIds);
     const acquired = await acquireSyncLease(leaseKey);
     if (!acquired) return;
     const runWithRelease = async () => {
@@ -509,8 +624,33 @@ export async function syncRecordingQueue(
       lock ? runWithRelease() : releaseSyncLease(leaseKey),
     );
   };
-  syncInFlight = runWithCrossTabLease().finally(() => {
+  syncInFlight = (async () => {
+    do {
+      syncTrailingPassRequested = false;
+      await runWithCrossTabLease();
+    } while (syncTrailingPassRequested);
+  })().finally(() => {
     syncInFlight = null;
+    syncTrailingPassRequested = false;
   });
   return syncInFlight;
+}
+
+export async function __resetRecordingQueueForTests() {
+  listeners.clear();
+  queueChannel?.close();
+  queueChannel = null;
+  syncOwnerId = null;
+  syncInFlight = null;
+  syncTrailingPassRequested = false;
+  const db = await dbPromise?.catch(() => null);
+  db?.close();
+  dbPromise = null;
+  if (typeof indexedDB === "undefined") return;
+  await new Promise<void>((resolve) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => resolve();
+    request.onblocked = () => resolve();
+  });
 }

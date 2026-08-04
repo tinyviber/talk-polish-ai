@@ -438,8 +438,41 @@ export async function markRecordingReady(
     lastError: undefined,
     blob: new Blob([], { type: item.mimeType }),
     blobDiscarded: true,
+    feedbackState: item.feedbackState === "delivered" ? "delivered" : "pending",
+    feedbackUpdatedAt: Date.now(),
   });
 }
+
+/** Durably record that a feedback read failed, so any tab can retry it later. */
+export async function markFeedbackError(clientAttemptId: string, message: string) {
+  await updateFeedbackState(clientAttemptId, "error", message);
+}
+
+/** Durably record that feedback reached the learner; releases the slot. */
+export async function markFeedbackDelivered(clientAttemptId: string) {
+  await updateFeedbackState(clientAttemptId, "delivered");
+}
+
+async function updateFeedbackState(
+  clientAttemptId: string,
+  feedbackState: FeedbackState,
+  feedbackLastError?: string,
+) {
+  if (typeof indexedDB === "undefined") return;
+  const item = (await allItems()).find(
+    (candidate) => candidate.clientAttemptId === clientAttemptId,
+  );
+  if (!item || item.feedbackState === "delivered") return;
+  // `put` refuses to overwrite ready rows, so write feedback state directly.
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  const request = tx
+    .objectStore(STORE)
+    .put({ ...item, feedbackState, feedbackLastError, feedbackUpdatedAt: Date.now() });
+  await waitForTransactionWrite(request, tx);
+  notify();
+}
+
 
 export async function markRecordingFailed(clientAttemptId: string, message: string) {
   const item = (await allItems()).find(

@@ -32,17 +32,27 @@ This is a maintainability refactor, not a UI or product redesign.
 - Bug fixes called out separately: stale `processing` recovery no longer risks duplicate provider billing; failed storage cleanup preserves the audio reference for retry; recordings are queued before session/attempt mutations; offline cold start no longer loses queue ownership before anonymous learner bootstrap.
 - Existing migration files remain unchanged. Repositories target the existing tables and constraints; no migration is required by this refactor.
 
+## Review follow-up fixes
+
+- Fixed integration CI to invoke the root `bun run test:integration` entry point.
+- Added stale `processing` recovery with an atomic conditional transition to `failed`; the server never silently replays provider work from a possibly live worker.
+- Added queue-change notifications, trailing sync passes, persisted `nextPollAt`, one controlled processing timer, and a stable pre-bootstrap lease namespace.
+- Restored active diagnostics rate limiting with learner ID and client IP, only when an active probe is requested and enabled.
+- Added explicit TTS cache disposition. Cache hits are never deleted on reference-write failure; newly created objects use delayed, reference-aware cleanup.
+- Made IndexedDB queue writes resolve only after transaction completion and added abort-after-request-success coverage.
+- Tightened new regression fixtures to repository-derived types; no production behavior is hidden behind `any`.
+
 ## File mapping / boundaries
 
-| Existing responsibility | New boundary |
-| --- | --- |
-| `apps/api/src/routes.ts` feature persistence and provider orchestration | thin routes plus `apps/api/src/modules/*/{service,repository}.ts` |
-| direct provider route logic | `apps/api/src/modules/providers/service.ts` and narrow provider/storage interfaces |
-| attempt insert/result/progress/audio cleanup | `apps/api/src/modules/attempts/repository.ts` + `service.ts` |
-| practice route transition logic | `apps/web/src/features/practice/state-machine.ts` |
-| recording queue and recovery | `apps/web/src/lib/practice/offlineQueue.ts` |
-| cache policy | `apps/web/src/sw-rules.ts`, `sw.ts`, and tests |
-| scattered startup env reads | `apps/api/src/env.ts` and composition in `apps/api/src/index.ts` |
+| Existing responsibility                                                 | New boundary                                                                       |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `apps/api/src/routes.ts` feature persistence and provider orchestration | thin routes plus `apps/api/src/modules/*/{service,repository}.ts`                  |
+| direct provider route logic                                             | `apps/api/src/modules/providers/service.ts` and narrow provider/storage interfaces |
+| attempt insert/result/progress/audio cleanup                            | `apps/api/src/modules/attempts/repository.ts` + `service.ts`                       |
+| practice route transition logic                                         | `apps/web/src/features/practice/state-machine.ts`                                  |
+| recording queue and recovery                                            | `apps/web/src/lib/practice/offlineQueue.ts`                                        |
+| cache policy                                                            | `apps/web/src/sw-rules.ts`, `sw.ts`, and tests                                     |
+| scattered startup env reads                                             | `apps/api/src/env.ts` and composition in `apps/api/src/index.ts`                   |
 
 Contracts stay schema/types/pure functions only. Web and API do not become dependencies of contracts. Composition remains simple and occurs at API startup.
 
@@ -56,7 +66,7 @@ All code checks below used fixed Bun `1.2.17` via `PATH=/tmp/kotoba-bun-1.2.17/b
 - `bun run format:check` — pass.
 - `bun run lint` — pass, 0 errors and 10 existing Fast Refresh warnings.
 - `bun run typecheck` — pass for contracts, API, and web.
-- `bun run test` — pass: contracts 6, web 12, API 25; 4 integration/storage tests skipped by their existing environment gates.
+- `bun run test` — pass: contracts 6, web 18, API 30; 4 integration/storage tests skipped by their existing environment gates.
 - `bun run build` — pass: contracts, production web/PWA, and API build.
 - `bun run test:integration` — blocked: PostgreSQL was not available; migration connection failed before integration tests.
 - `bun run build:docker` — blocked: Docker daemon unavailable at `unix:///Users/wj/.orbstack/run/docker.sock`.

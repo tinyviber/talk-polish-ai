@@ -287,10 +287,7 @@ export async function cleanupRecordingQueue(
   const items = await allItems();
   const pendingSecondSessionKeys = new Set(
     items
-      .filter(
-        (item) =>
-          item.attemptIndex === 2 && item.syncStatus !== "ready",
-      )
+      .filter((item) => item.attemptIndex === 2 && item.syncStatus !== "ready")
       .map((item) => sessionDependencyKey(item.learnerId, item.clientSessionId)),
   );
   for (const key of protectedSessionKeys) pendingSecondSessionKeys.add(key);

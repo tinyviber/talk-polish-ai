@@ -46,6 +46,9 @@ This is a maintainability refactor, not a UI or product redesign.
 - Practice API submit is outbox-only: it explicitly wakes the shared queue owner and reads the ready result; direct `createAttempt`/ready/failure mutations were removed from the route.
 - Queue enqueue is non-regressive for an existing `queued`, `uploading`, `processing`, or `ready` `clientAttemptId`, preventing a read-after-upload failure from re-queuing a completed recording.
 - Attempt dependency and TTL protection use stable `clientSessionId` keys while prerequisite checks remain restricted to the active device/server learner namespace set; added old-learner/new-device upgrade coverage.
+- Durable `ready` queue metadata now drives practice feedback recovery. `queue-ready` is only a wake hint; queue reconciliation rereads IndexedDB, rejects stale snapshots, and resolves matching attempts across tabs.
+- Feedback GET failures keep the local row `ready`, expose `Retry feedback`, and retry on online, visibility, or manual action without uploading the Blob again. Workflow-generation guards prevent late reads from overwriting a newer prompt/session.
+- Queue writes are monotonic after completion: a late worker cannot overwrite `ready` with `queued`, `processing`, or `failed`.
 - Stale attempt recovery now clears old audio metadata and inserts a 24-hour delayed storage cleanup intent in the same database transaction; PostgreSQL integration covers the complete path.
 - Tightened new regression fixtures to repository-derived types; no production behavior is hidden behind `any`.
 
@@ -73,7 +76,7 @@ All code checks below used fixed Bun `1.2.17` via `PATH=/tmp/kotoba-bun-1.2.17/b
 - `bun run format:check` — pass.
 - `bun run lint` — pass, 0 errors and 10 existing Fast Refresh warnings.
 - `bun run typecheck` — pass for contracts, API, and web.
-- `bun run test` — pass: contracts 6, web 22, API 30; 5 integration/storage tests skipped by their existing environment gates.
+- `bun run test` — pass: contracts 6, web 25, API 30; 5 integration/storage tests skipped by their existing environment gates.
 - `bun run build` — pass: contracts, production web/PWA, and API build.
 - `bun run test:integration` — blocked: PostgreSQL was not available; migration connection failed before integration tests.
 - `bun run build:docker` — blocked: Docker daemon unavailable at `unix:///Users/wj/.orbstack/run/docker.sock`.

@@ -65,7 +65,7 @@ export function recoverQueueStatus(status: QueueStatus): QueueStatus {
 const DB_NAME = "kotoba-loop-offline";
 const STORE = "recordings";
 const LEASE_STORE = "syncLeases";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
 const LEASE_MS = 30_000;

@@ -15,6 +15,20 @@ export type DurablePracticeWorkflow = Pick<
   attemptId: string;
 };
 
+export function replaceRecoveryTarget(
+  _current: DurablePracticeWorkflow | null,
+  next: DurablePracticeWorkflow,
+) {
+  return next;
+}
+
+export function clearRecoveryTarget(
+  current: DurablePracticeWorkflow | null,
+  clientAttemptId: string | null,
+) {
+  return clientAttemptId && current?.clientAttemptId === clientAttemptId ? null : current;
+}
+
 /** IndexedDB-backed recovery source. Selection order is newest update, then id. */
 export async function listRecoveryWorkflows(learnerIds: string[]) {
   const items = await listDurablePracticeWorkflows(learnerIds);

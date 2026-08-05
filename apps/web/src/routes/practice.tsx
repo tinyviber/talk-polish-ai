@@ -48,7 +48,9 @@ import {
 } from "@/features/practice/state-machine";
 import {
   abandonWorkflow,
+  clearRecoveryTarget,
   listRecoveryWorkflows,
+  replaceRecoveryTarget,
   type DurablePracticeWorkflow,
 } from "@/lib/practice/workflow-store";
 import {
@@ -290,20 +292,19 @@ function Practice() {
           await markFeedbackError(item.clientAttemptId, errorMessage(result.error)).catch(() => {
             // The ready queue row remains the recovery source if IDB is temporarily unavailable.
           });
-          setRecoveryTarget(
-            (current) =>
-              current ?? {
-                learnerId: item.learnerId,
-                clientSessionId: item.clientSessionId,
-                clientAttemptId: item.clientAttemptId,
-                promptId: item.promptId,
-                lang: item.lang,
-                attemptIndex: item.attemptIndex,
-                state: "awaiting-feedback",
-                updatedAt: item.workflowUpdatedAt ?? item.createdAt,
-                sessionId: item.sessionId,
-                attemptId: item.attemptId!,
-              },
+          setRecoveryTarget((current) =>
+            replaceRecoveryTarget(current, {
+              learnerId: item.learnerId,
+              clientSessionId: item.clientSessionId,
+              clientAttemptId: item.clientAttemptId,
+              promptId: item.promptId,
+              lang: item.lang,
+              attemptIndex: item.attemptIndex,
+              state: "awaiting-feedback",
+              updatedAt: item.workflowUpdatedAt ?? item.createdAt,
+              sessionId: item.sessionId,
+              attemptId: item.attemptId!,
+            }),
           );
           setFeedbackRetryPending(true);
           setInterruptedDraftPending(false);
@@ -364,27 +365,26 @@ function Practice() {
         if (pendingFeedbackAttemptIdRef.current === clientAttemptId) {
           pendingFeedbackAttemptIdRef.current = null;
         }
-        setRecoveryTarget(null);
+        setRecoveryTarget((current) => clearRecoveryTarget(current, clientAttemptId));
         setFeedbackPendingDelivery(null);
       })
       .catch((deliveryError) => {
         if (cancelled || generation !== workflowGenerationRef.current) return;
         const item = queuedItems.find((candidate) => candidate.clientAttemptId === clientAttemptId);
         if (item) {
-          setRecoveryTarget(
-            (current) =>
-              current ?? {
-                learnerId: item.learnerId,
-                clientSessionId: item.clientSessionId,
-                clientAttemptId: item.clientAttemptId,
-                promptId: item.promptId,
-                lang: item.lang,
-                attemptIndex: item.attemptIndex,
-                state: "awaiting-feedback",
-                updatedAt: item.workflowUpdatedAt ?? item.createdAt,
-                sessionId: item.sessionId,
-                attemptId: item.attemptId!,
-              },
+          setRecoveryTarget((current) =>
+            replaceRecoveryTarget(current, {
+              learnerId: item.learnerId,
+              clientSessionId: item.clientSessionId,
+              clientAttemptId: item.clientAttemptId,
+              promptId: item.promptId,
+              lang: item.lang,
+              attemptIndex: item.attemptIndex,
+              state: "awaiting-feedback",
+              updatedAt: item.workflowUpdatedAt ?? item.createdAt,
+              sessionId: item.sessionId,
+              attemptId: item.attemptId!,
+            }),
           );
           setFeedbackRetryPending(true);
           dispatchPractice({
@@ -945,9 +945,11 @@ function Practice() {
                 size="lg"
                 className="h-14 rounded-full px-7 text-base shadow-tactile"
                 onClick={() => {
+                  const deliveredAttemptId = feedbackPendingDelivery;
                   workflowGenerationRef.current += 1;
                   interruptedAttemptIdRef.current = null;
                   pendingFeedbackAttemptIdRef.current = null;
+                  setRecoveryTarget((current) => clearRecoveryTarget(current, deliveredAttemptId));
                   setFeedbackPendingDelivery(null);
                   setFeedbackRetryPending(false);
                   recorder.reset();

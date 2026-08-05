@@ -15,7 +15,11 @@ import { PracticeStoreProvider } from "../lib/practice/store";
 import { Toaster } from "../components/ui/sonner";
 import { PwaProvider, usePwa } from "../lib/pwa";
 import { getQueueLearnerIds, uploadQueuedAttempt } from "../lib/practice/api";
-import { getNextRecordingQueuePollAt, syncRecordingQueue } from "../lib/practice/offlineQueue";
+import {
+  getNextRecordingQueuePollAt,
+  subscribeRecordingQueue,
+  syncRecordingQueue,
+} from "../lib/practice/offlineQueue";
 import { startOfflineQueueSyncLoop } from "../lib/practice/offlineQueueSync";
 
 function NotFoundComponent() {
@@ -157,7 +161,10 @@ function RootComponent() {
 function OfflineQueueSync() {
   const { setBusy } = usePwa();
   useEffect(() => {
-    return startOfflineQueueSyncLoop({
+    // Keep one transport subscriber for the root sync owner even when this
+    // tab has no Practice page mounted.
+    const unsubscribeTransport = subscribeRecordingQueue(() => {});
+    const stop = startOfflineQueueSyncLoop({
       getLearnerIds: getQueueLearnerIds,
       getNextPollAt: getNextRecordingQueuePollAt,
       syncQueue: (learnerIds) =>
@@ -167,6 +174,10 @@ function OfflineQueueSync() {
         }, learnerIds),
       setBusy,
     });
+    return () => {
+      unsubscribeTransport();
+      stop();
+    };
   }, [setBusy]);
   return null;
 }

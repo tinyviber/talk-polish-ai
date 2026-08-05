@@ -359,6 +359,74 @@ describe("attempt recovery", () => {
     expect(recovered.id).toBe("att_committed");
     expect(state.persistCalls).toBe(1);
   });
+
+  test("reclaims a rolled-back processing row before retrying the same recording", async () => {
+    const clientAttemptId = "client-rolled-back";
+    const staleRow = {
+      id: "att-rolled-back",
+      sessionId,
+      attemptIndex: 1 as const,
+      status: "processing",
+      clientAttemptId,
+      createdAt: new Date(Date.now() - ATTEMPT_PROCESSING_STALE_MS - 1),
+    };
+    let lookupRow: AttemptLookupRow = undefined;
+    let markedAttemptId: string | undefined;
+    let persistError = true;
+    state.findByClientId = async () => lookupRow;
+    state.getAttempt = async (id) =>
+      persistError
+        ? {
+            ...createReadyAttempt(id),
+            status: "processing",
+            transcript: null,
+            feedback: null,
+            audio: null,
+          }
+        : createReadyAttempt(id);
+    state.markFailedIfProcessing = async (attemptId) => {
+      markedAttemptId = attemptId;
+      lookupRow = { ...staleRow, status: "failed" };
+      return true;
+    };
+    state.persistResult = async () => {
+      state.persistCalls += 1;
+      if (persistError) throw ApiError.database("The result transaction rolled back.");
+    };
+
+    // The first request inserted processing, but its result transaction rolled
+    // back and its acknowledgement was lost. The caller only knows 503.
+    await expect(
+      createAttempt(
+        sessionId,
+        learnerId,
+        { attemptIndex: 1, durationSec: 12, clientAttemptId, mocked: false },
+        audio,
+      ),
+    ).rejects.toMatchObject({ statusCode: 503, code: "processing_unavailable" });
+
+    lookupRow = staleRow;
+    await expect(
+      createAttempt(
+        sessionId,
+        learnerId,
+        { attemptIndex: 1, durationSec: 12, clientAttemptId, mocked: false },
+        audio,
+      ),
+    ).rejects.toMatchObject({ statusCode: 503, code: "processing_unavailable" });
+    expect(markedAttemptId).toBe(staleRow.id);
+
+    persistError = false;
+    await expect(
+      createAttempt(
+        sessionId,
+        learnerId,
+        { attemptIndex: 1, durationSec: 12, clientAttemptId, mocked: false },
+        audio,
+      ),
+    ).resolves.toMatchObject({ status: "ready" });
+    expect(state.persistCalls).toBe(2);
+  });
 });
 
 function createReadyAttempt(id: string): Attempt {

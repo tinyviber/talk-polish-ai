@@ -17,6 +17,9 @@ import { requirePrompt } from "../prompts/service";
 import { enforceProviderRateLimit } from "../providers/rate-limit";
 import { removeOrQueueStorage } from "../../db/storage-cleanup";
 import { attemptRepository } from "./repository";
+import { ATTEMPT_PROCESSING_STALE_MS, isAttemptProcessingStale } from "./processing-recovery";
+
+export { ATTEMPT_PROCESSING_STALE_MS, isAttemptProcessingStale } from "./processing-recovery";
 
 export type UploadedAudio = {
   buffer: Buffer;
@@ -40,7 +43,6 @@ const EXTENSIONS: Record<string, string> = {
   "audio/m4a": "m4a",
 };
 
-export const ATTEMPT_PROCESSING_STALE_MS = 10 * 60 * 1000;
 const STALE_PROCESSING_RETRY_MESSAGE =
   "A previous processing attempt expired before completion. Please retry the upload.";
 
@@ -57,10 +59,6 @@ export function assertSupportedAudio(audio: UploadedAudio, maxBytes = MAX_AUDIO_
     throw ApiError.tooLarge(`Recording is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`);
   }
   return mime;
-}
-
-export function isAttemptProcessingStale(createdAt: Date, now = Date.now()) {
-  return now - createdAt.getTime() >= ATTEMPT_PROCESSING_STALE_MS;
 }
 
 async function recoverStaleProcessingAttempt(

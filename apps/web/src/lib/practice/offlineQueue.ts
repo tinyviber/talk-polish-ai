@@ -156,11 +156,14 @@ export function migrateRecordingQueueRecord(
   const ready = value["syncStatus"] === "ready";
   const feedbackState = value["feedbackState"];
   const isPreFeedbackWorkflowSchema = oldVersion < 5;
+  const explicitFeedbackPending =
+    ready && (feedbackState === "pending" || feedbackState === "error");
   const explicitAwaitingFeedback =
     ready &&
     !isPreFeedbackWorkflowSchema &&
     value["workflowState"] === "awaiting-feedback" &&
     (feedbackState === "pending" || feedbackState === "error");
+  const legacyUnknownFeedback = explicitFeedbackPending && !explicitAwaitingFeedback;
   const clientSessionId =
     typeof value["clientSessionId"] === "string" && value["clientSessionId"]
       ? value["clientSessionId"]
@@ -169,15 +172,17 @@ export function migrateRecordingQueueRecord(
         : `legacy-attempt:${String(value["clientAttemptId"] ?? "unknown")}`;
   const workflowState = legacy
     ? "abandoned"
-    : explicitAwaitingFeedback
-      ? "awaiting-feedback"
-      : value["workflowState"] === "consumed"
-        ? "consumed"
-        : value["workflowState"] === "abandoned"
-          ? "abandoned"
-          : ready
-            ? "consumed"
-            : "awaiting-upload";
+    : legacyUnknownFeedback
+      ? "legacy-unknown"
+      : explicitAwaitingFeedback
+        ? "awaiting-feedback"
+        : value["workflowState"] === "consumed"
+          ? "consumed"
+          : value["workflowState"] === "abandoned"
+            ? "abandoned"
+            : ready
+              ? "consumed"
+              : "awaiting-upload";
 
   return {
     ...value,
@@ -189,7 +194,7 @@ export function migrateRecordingQueueRecord(
           lastError: "This recording needs to be re-recorded after the app update.",
         }
       : {}),
-    ...(ready && !explicitAwaitingFeedback ? { feedbackState: "delivered" } : {}),
+    ...(ready && !explicitFeedbackPending ? { feedbackState: "delivered" } : {}),
     workflowState,
     workflowUpdatedAt:
       typeof value["workflowUpdatedAt"] === "number"

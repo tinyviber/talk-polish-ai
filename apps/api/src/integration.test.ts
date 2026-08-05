@@ -230,6 +230,56 @@ describe("persisted practice journey", () => {
         createdAt: new Date(Date.now() - ATTEMPT_PROCESSING_STALE_MS - 1),
       });
 
+    const getRecoveryAttemptId = `att_get_stale_${crypto.randomUUID()}`;
+    const getRecoveryAudioId = `aud_get_stale_${crypto.randomUUID()}`;
+    const getRecoveryClientAttemptId = `client-get-stale-${crypto.randomUUID()}`;
+    const getRecoveryStorageKey = `recordings/${learner.id}/${getRecoveryAttemptId}.webm`;
+    await db().insert(audioRecordings).values({
+      id: getRecoveryAudioId,
+      storageKey: getRecoveryStorageKey,
+      mimeType: "audio/webm",
+      sizeBytes: 12,
+      durationSec: 1,
+    });
+    await db()
+      .insert(speakingAttempts)
+      .values({
+        id: getRecoveryAttemptId,
+        sessionId: session.id,
+        learnerId: learner.id,
+        attemptIndex: 2,
+        clientAttemptId: getRecoveryClientAttemptId,
+        status: "processing",
+        durationSec: 1,
+        mocked: false,
+        audioId: getRecoveryAudioId,
+        createdAt: new Date(Date.now() - ATTEMPT_PROCESSING_STALE_MS - 1),
+      });
+
+    const getRecoveryResponse = await app.inject({
+      method: "GET",
+      url: `/api/attempts/${getRecoveryAttemptId}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(getRecoveryResponse.statusCode).toBe(200);
+    expect(getRecoveryResponse.json().attempt.status).toBe("failed");
+
+    const replay = multipart(
+      { clientAttemptId: getRecoveryClientAttemptId, attemptIndex: "2", durationSec: "1" },
+      Buffer.from("replayed audio"),
+    );
+    const replayResponse = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/attempts`,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": replay.contentType,
+      },
+      payload: replay.body,
+    });
+    expect(replayResponse.statusCode).toBe(200);
+    expect(replayResponse.json().attempt.status).toBe("ready");
+
     const upload = multipart({ attemptIndex: "1", durationSec: "1" }, Buffer.from("new audio"));
     const response = await app.inject({
       method: "POST",

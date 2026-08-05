@@ -258,4 +258,28 @@ describe("offline queue sync loop", () => {
     expect(rows[0]?.feedbackState).toBe("delivered");
     await expect(listDurablePracticeWorkflows(["device:learner-1"])).resolves.toEqual([]);
   });
+
+  test("does not silently consume a v4 row that explicitly awaited feedback", async () => {
+    await seedLegacyQueueItem({
+      learnerId: "device:learner-1",
+      clientAttemptId: "historical-pending",
+      sessionId: "session-1",
+      clientSessionId: "session-1",
+      promptId: "prompt-1",
+      lang: "en",
+      attemptIndex: 1,
+      duration: 2,
+      mimeType: "audio/webm",
+      blob: new Blob([], { type: "audio/webm" }),
+      createdAt: 1,
+      syncStatus: "ready",
+      attemptId: "server-historical-pending",
+      feedbackState: "pending",
+    });
+
+    const rows = await listRecordingQueue("device:learner-1");
+    expect(rows[0]?.workflowState).toBe("legacy-unknown");
+    expect(rows[0]?.feedbackState).toBe("pending");
+    await expect(listDurablePracticeWorkflows(["device:learner-1"])).resolves.toEqual([]);
+  });
 });

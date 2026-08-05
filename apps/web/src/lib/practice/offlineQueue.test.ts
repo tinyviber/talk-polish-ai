@@ -8,6 +8,7 @@ import {
   recoverQueueStatus,
   subscribeRecordingQueue,
 } from "./offlineQueue";
+import { installFakeIndexedDb } from "./test/fakeIndexedDb";
 
 describe("offline recording queue boundaries", () => {
   test("is safe when IndexedDB is unavailable (SSR/private browser fallback)", async () => {
@@ -97,7 +98,7 @@ describe("offline recording queue boundaries", () => {
     ).toBe(true);
   });
 
-  test("only preserves explicitly pending v5 feedback during migration", () => {
+  test("does not invent delivery for an explicitly pending v4 feedback row", () => {
     const base = {
       learnerId: "learner",
       clientAttemptId: "attempt",
@@ -113,6 +114,10 @@ describe("offline recording queue boundaries", () => {
       feedbackState: "delivered",
       workflowState: "consumed",
     });
+    expect(migrateRecordingQueueRecord({ ...base, feedbackState: "pending" }, 4)).toMatchObject({
+      feedbackState: "pending",
+      workflowState: "legacy-unknown",
+    });
     expect(
       migrateRecordingQueueRecord(
         {
@@ -126,6 +131,79 @@ describe("offline recording queue boundaries", () => {
       feedbackState: "pending",
       workflowState: "awaiting-feedback",
     });
+  });
+
+  test("keeps a root transport subscriber able to notify another tab", async () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    const channels = new Map<string, Set<FakeBroadcastChannel>>();
+    class FakeBroadcastChannel {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      private readonly peers: Set<FakeBroadcastChannel>;
+
+      constructor(private readonly name: string) {
+        this.peers = channels.get(name) ?? new Set();
+        this.peers.add(this);
+        channels.set(name, this.peers);
+      }
+
+      postMessage(data: unknown) {
+        for (const peer of this.peers) {
+          if (peer !== this) queueMicrotask(() => peer.onmessage?.({ data } as MessageEvent));
+        }
+      }
+
+      close() {
+        this.peers.delete(this);
+      }
+    }
+
+    const restoreIndexedDb = installFakeIndexedDb();
+    vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel);
+    vi.resetModules();
+    const tabA = await import("./offlineQueue");
+    vi.resetModules();
+    const tabB = await import("./offlineQueue");
+
+    try {
+      await tabA.__resetRecordingQueueForTests();
+      let tabBChanges = 0;
+      const unsubscribeRootTransport = tabA.subscribeRecordingQueue(() => {});
+      const unsubscribePractice = tabB.subscribeRecordingQueue(() => {
+        tabBChanges += 1;
+      });
+      const recording = {
+        learnerId: "device:learner-1",
+        clientAttemptId: "cross-tab-ready",
+        sessionId: null,
+        clientSessionId: "session-1",
+        promptId: "prompt-1",
+        lang: "en" as const,
+        attemptIndex: 1 as const,
+        duration: 2,
+        mimeType: "audio/webm",
+        blob: new Blob(["audio"], { type: "audio/webm" }),
+        createdAt: 1,
+      };
+      await tabA.enqueueRecording(recording);
+      await tabA.markRecordingReady(recording.clientAttemptId, {
+        attemptId: "server-cross-tab-ready",
+        sessionId: "session-1",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(tabBChanges).toBeGreaterThan(0);
+      unsubscribePractice();
+      unsubscribeRootTransport();
+    } finally {
+      await tabA.__resetRecordingQueueForTests();
+      await tabB.__resetRecordingQueueForTests();
+      restoreIndexedDb();
+      if (originalBroadcastChannel === undefined) {
+        delete (globalThis as typeof globalThis & { BroadcastChannel?: unknown }).BroadcastChannel;
+      } else {
+        vi.stubGlobal("BroadcastChannel", originalBroadcastChannel);
+      }
+    }
   });
 
   test("waits for transaction commit so an abort after request success never looks durable", async () => {

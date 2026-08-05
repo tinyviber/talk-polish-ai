@@ -3,7 +3,7 @@ import type { Lang } from "../types";
 export type QueueStatus =
   "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed";
 export type DurableWorkflowState =
-  "awaiting-upload" | "awaiting-feedback" | "consumed" | "abandoned";
+  "awaiting-upload" | "awaiting-feedback" | "legacy-unknown" | "consumed" | "abandoned";
 export type FeedbackState = "pending" | "delivered" | "error";
 
 export type RecordingQueueItem = {

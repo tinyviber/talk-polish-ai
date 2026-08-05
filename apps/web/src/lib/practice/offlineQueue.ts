@@ -46,6 +46,7 @@ let syncTrailingPassRequested = false;
 let storageListenerInstalled = false;
 
 function ensureQueueChannel() {
+  if (listeners.size === 0) return null;
   if (typeof window !== "undefined" && !storageListenerInstalled) {
     window.addEventListener("storage", onStorageChange);
     storageListenerInstalled = true;
@@ -61,6 +62,16 @@ function ensureQueueChannel() {
   return queueChannel;
 }
 
+function closeQueueChannelIfUnused() {
+  if (listeners.size > 0) return;
+  queueChannel?.close();
+  queueChannel = null;
+  if (typeof window !== "undefined" && storageListenerInstalled) {
+    window.removeEventListener("storage", onStorageChange);
+  }
+  storageListenerInstalled = false;
+}
+
 function onStorageChange(event: StorageEvent) {
   if (event.key !== QUEUE_CHANGE_STORAGE_KEY) return;
   listeners.forEach((listener) => listener());
@@ -68,6 +79,7 @@ function onStorageChange(event: StorageEvent) {
 }
 
 function broadcastChange() {
+  if (listeners.size === 0) return;
   const channel = ensureQueueChannel();
   channel?.postMessage({ type: "queue-change" });
   try {
@@ -595,6 +607,7 @@ export function subscribeRecordingQueue(listener: () => void) {
   ensureQueueChannel();
   return () => {
     listeners.delete(listener);
+    closeQueueChannelIfUnused();
   };
 }
 
@@ -910,12 +923,7 @@ export async function syncRecordingQueue(
 
 export async function __resetRecordingQueueForTests() {
   listeners.clear();
-  if (typeof window !== "undefined" && storageListenerInstalled) {
-    window.removeEventListener("storage", onStorageChange);
-  }
-  storageListenerInstalled = false;
-  queueChannel?.close();
-  queueChannel = null;
+  closeQueueChannelIfUnused();
   syncOwnerId = null;
   syncInFlight = null;
   syncTrailingPassRequested = false;

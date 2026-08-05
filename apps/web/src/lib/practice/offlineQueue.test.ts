@@ -23,6 +23,27 @@ describe("offline recording queue boundaries", () => {
     expect(calls).toBe(0);
   });
 
+  test("closes the cross-tab channel when the last subscriber leaves", () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    const close = vi.fn();
+    class FakeBroadcastChannel {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      postMessage() {}
+      close = close;
+    }
+    vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel);
+
+    try {
+      const unsubscribe = subscribeRecordingQueue(() => {});
+      unsubscribe();
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      if (originalBroadcastChannel === undefined)
+        delete (globalThis as typeof globalThis & { BroadcastChannel?: unknown }).BroadcastChannel;
+      else vi.stubGlobal("BroadcastChannel", originalBroadcastChannel);
+    }
+  });
+
   test("never leaves an interrupted upload stranded", () => {
     expect(recoverQueueStatus("uploading")).toBe("queued");
     expect(isQueueSyncCandidate("queued")).toBe(true);

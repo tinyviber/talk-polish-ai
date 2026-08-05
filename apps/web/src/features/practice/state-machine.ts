@@ -41,12 +41,19 @@ export type PracticeEvent =
     }
   | { type: "recovery-workflow-adopted"; workflowId: string; attemptIndex: 1 | 2 }
   | { type: "durable-pending-adopted"; workflowId: string; attemptIndex: 1 | 2 }
+  | {
+      type: "permanent-failure-adopted";
+      workflowId: string;
+      attemptIndex: 1 | 2;
+      message: string;
+    }
   | { type: "feedback-retry-requested" }
   | { type: "offline"; attemptIndex: 1 | 2 }
   | { type: "retry"; attemptIndex: 1 | 2 }
   | { type: "retry-existing"; attemptIndex: 1 | 2 }
   | { type: "abandon-and-record-again"; attemptIndex: 1 | 2 }
   | { type: "permanent-failure"; message: string; attemptIndex: 1 | 2 }
+  | { type: "workflow-resolved-elsewhere"; clientAttemptId: string }
   | { type: "failed"; message: string; attemptIndex: 1 | 2 }
   | { type: "second-attempt-started" }
   | { type: "workflow-completed" }
@@ -167,6 +174,14 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         stage: "offline-recovery",
         error: null,
       };
+    case "permanent-failure-adopted":
+      if (state.stage !== "prompt") return state;
+      return {
+        ...state,
+        attemptIndex: event.attemptIndex,
+        stage: "permanent-failure",
+        error: event.message,
+      };
     case "feedback-retry-requested":
       return state.stage === "feedback-recovery" ? { ...state, error: null } : state;
     case "offline":
@@ -203,11 +218,19 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         state.stage !== "processing" &&
         state.stage !== "processing2" &&
         state.stage !== "offline-recovery" &&
-        state.stage !== "retry" &&
-        state.stage !== "prompt"
+        state.stage !== "retry"
       )
         return state;
       return { ...state, stage: "permanent-failure", error: event.message };
+    case "workflow-resolved-elsewhere":
+      if (
+        state.stage !== "feedback-recovery" &&
+        state.stage !== "offline-recovery" &&
+        state.stage !== "retry" &&
+        state.stage !== "permanent-failure"
+      )
+        return state;
+      return initialPracticeState;
     case "failed":
       if (state.stage === "feedback-recovery" || state.attemptIndex !== event.attemptIndex)
         return state;

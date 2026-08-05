@@ -92,6 +92,44 @@ describe("practice state machine", () => {
     );
   });
 
+  test("adopts cold-start permanent failure with the durable attempt index", () => {
+    const failedAttemptOne = reducePracticeState(initialPracticeState, {
+      type: "permanent-failure-adopted",
+      workflowId: "attempt-1",
+      attemptIndex: 1,
+      message: "attempt one failed",
+    });
+    const failedAttemptTwo = reducePracticeState(initialPracticeState, {
+      type: "permanent-failure-adopted",
+      workflowId: "attempt-2",
+      attemptIndex: 2,
+      message: "attempt two failed",
+    });
+
+    expect(failedAttemptOne).toEqual({
+      stage: "permanent-failure",
+      attemptIndex: 1,
+      error: "attempt one failed",
+    });
+    expect(failedAttemptTwo).toEqual({
+      stage: "permanent-failure",
+      attemptIndex: 2,
+      error: "attempt two failed",
+    });
+  });
+
+  test("rejects a late attempt one permanent failure while attempt two is active", () => {
+    const attemptTwo = { stage: "processing2" as const, attemptIndex: 2 as const, error: null };
+
+    expect(
+      reducePracticeState(attemptTwo, {
+        type: "permanent-failure",
+        attemptIndex: 1,
+        message: "late attempt one failure",
+      }),
+    ).toEqual(attemptTwo);
+  });
+
   test("illegal events cannot jump workflow stage", () => {
     expect(reducePracticeState(initialPracticeState, { type: "ready", attemptIndex: 1 })).toEqual(
       initialPracticeState,

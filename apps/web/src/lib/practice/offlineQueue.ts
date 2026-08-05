@@ -111,6 +111,7 @@ export function canSyncAttempt(
   learnerIds?: string | string[],
 ) {
   if (item.attemptIndex === 1) return true;
+  // Durable evidence captured only when attempt one was already consumed.
   if (item.prerequisiteSatisfied) return true;
   const allowedLearnerIds = normalizeLearnerIds(learnerIds ?? item.learnerId);
   return items.some(
@@ -118,7 +119,8 @@ export function canSyncAttempt(
       learnerMatches(candidate, allowedLearnerIds) &&
       candidate.clientSessionId === item.clientSessionId &&
       candidate.attemptIndex === 1 &&
-      candidate.syncStatus === "ready",
+      candidate.syncStatus === "ready" &&
+      (candidate.feedbackState === "delivered" || candidate.workflowState === "consumed"),
   );
 }
 
@@ -398,9 +400,14 @@ export async function cleanupRecordingQueue(
 }
 
 /** Recover a tab that was suspended after marking an item uploading. */
-export async function recoverInterruptedUploads(internal = false) {
+export async function recoverInterruptedUploads(internal = false, learnerIds?: string | string[]) {
   const items = await allItems();
-  for (const item of items.filter((candidate) => candidate.syncStatus === "uploading")) {
+  const allowedLearnerIds = normalizeLearnerIds(learnerIds);
+  for (const item of items.filter(
+    (candidate) =>
+      candidate.syncStatus === "uploading" &&
+      (allowedLearnerIds.length === 0 || learnerMatches(candidate, allowedLearnerIds)),
+  )) {
     await put(
       {
         ...clearDeferredSyncState(item),
@@ -464,7 +471,8 @@ export async function enqueueRecording(
           learnerMatches(item, allowedLearnerIds) &&
           item.clientSessionId === input.clientSessionId &&
           item.attemptIndex === 1 &&
-          item.syncStatus === "ready",
+          item.syncStatus === "ready" &&
+          (item.feedbackState === "delivered" || item.workflowState === "consumed"),
       ));
   await put({
     ...input,
@@ -514,7 +522,9 @@ async function updateFeedbackState(
   feedbackState: FeedbackState,
   feedbackLastError?: string,
 ) {
-  if (typeof indexedDB === "undefined") return;
+  if (typeof indexedDB === "undefined") {
+    throw new Error("IndexedDB unavailable; feedback delivery was not saved.");
+  }
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
   const store = tx.objectStore(STORE);
@@ -545,6 +555,25 @@ export async function listDurablePracticeWorkflows(learnerIds?: string | string[
         item.workflowState === "awaiting-feedback" &&
         item.syncStatus === "ready" &&
         isFeedbackOutstanding(item),
+    )
+    .sort(
+      (a, b) =>
+        (b.workflowUpdatedAt ?? b.createdAt) - (a.workflowUpdatedAt ?? a.createdAt) ||
+        a.clientAttemptId.localeCompare(b.clientAttemptId),
+    );
+}
+
+/** In-flight or permanently failed rows retain their original recording slot. */
+export async function listPendingPracticeWorkflows(learnerIds?: string | string[]) {
+  return (await listRecordingQueue(learnerIds))
+    .filter(
+      (item) =>
+        (item.syncStatus === "queued" ||
+          item.syncStatus === "uploading" ||
+          item.syncStatus === "processing" ||
+          item.syncStatus === "failed") &&
+        item.workflowState !== "abandoned" &&
+        item.workflowState !== "consumed",
     )
     .sort(
       (a, b) =>
@@ -654,11 +683,17 @@ export async function retryQueuedRecordings(learnerIds?: string | string[]) {
   const items = (await allItems()).filter((item) => learnerMatches(item, learnerIds));
   await Promise.all(
     items
-      .filter((item) => item.syncStatus === "failed")
+      .filter(
+        (item) =>
+          item.syncStatus === "failed" ||
+          item.syncStatus === "queued" ||
+          item.syncStatus === "uploading" ||
+          item.syncStatus === "processing",
+      )
       .map((item) =>
         put({
           ...clearDeferredSyncState(item),
-          syncStatus: "queued",
+          syncStatus: item.syncStatus === "processing" ? "processing" : "queued",
           lastError: undefined,
         }),
       ),
@@ -797,28 +832,16 @@ export async function syncRecordingQueue(
     )
       return;
     const queueLearnerIds = normalizeLearnerIds(learnerIds);
-    await recoverInterruptedUploads(true);
+    await recoverInterruptedUploads(true, queueLearnerIds);
     await cleanupRecordingQueue(Date.now(), new Set(), true);
     const queueItems = orderRecordingQueue(await allItems());
     const items = queueItems.filter(
       (item) => learnerMatches(item, queueLearnerIds) && isQueueSyncCandidate(item.syncStatus),
     );
-    const readySessionKeys = new Set(
-      queueItems
-        .filter((item) => learnerMatches(item, queueLearnerIds))
-        .filter((item) => item.attemptIndex === 1 && item.syncStatus === "ready")
-        .map((item) => item.clientSessionId),
-    );
     const now = Date.now();
     for (const item of items) {
       if (item.nextPollAt !== undefined && item.nextPollAt > now) continue;
-      if (
-        item.attemptIndex === 2 &&
-        !item.prerequisiteSatisfied &&
-        !readySessionKeys.has(item.clientSessionId) &&
-        !canSyncAttempt(item, queueItems, queueLearnerIds)
-      )
-        continue;
+      if (item.attemptIndex === 2 && !canSyncAttempt(item, queueItems, queueLearnerIds)) continue;
       let syncing: RecordingQueueItem | null = null;
       try {
         const candidate =
@@ -865,9 +888,6 @@ export async function syncRecordingQueue(
                     }),
               };
         await put({ ...nextItem }, true);
-        if (attempt.status === "ready") {
-          if (item.attemptIndex === 1) readySessionKeys.add(item.clientSessionId);
-        }
         if (attempt.status === "ready" && typeof window !== "undefined") {
           window.dispatchEvent(
             new CustomEvent("kotoba:queue-ready", {

@@ -1,5 +1,5 @@
 import { toReadyAttempt } from "../../lib/practice/api";
-import type { RecordingQueueItem } from "../../lib/practice/offlineQueue";
+import { isFeedbackOutstanding, type RecordingQueueItem } from "../../lib/practice/offlineQueue";
 
 export function findReadyRecording(
   items: RecordingQueueItem[],
@@ -10,7 +10,7 @@ export function findReadyRecording(
     items.find(
       (item) =>
         item.clientAttemptId === clientAttemptId &&
-        item.syncStatus === "ready" &&
+        isFeedbackOutstanding(item) &&
         typeof item.attemptId === "string" &&
         item.attemptId.length > 0,
     ) ?? null

@@ -3,7 +3,9 @@ import {
   adoptLegacyWorkflow,
   listLegacyUnknownWorkflows,
   listDurablePracticeWorkflows,
+  listPendingPracticeWorkflows,
   type DurableWorkflowState,
+  type QueueStatus,
   type RecordingQueueItem,
 } from "./offlineQueue";
 
@@ -12,9 +14,11 @@ export type DurablePracticeWorkflow = Pick<
   "learnerId" | "clientSessionId" | "clientAttemptId" | "promptId" | "lang" | "attemptIndex"
 > & {
   state: DurableWorkflowState;
+  syncStatus?: QueueStatus;
   updatedAt: number;
   sessionId: string | null;
-  attemptId: string;
+  attemptId: string | null;
+  lastError?: string;
 };
 
 export function replaceRecoveryTarget(
@@ -42,6 +46,11 @@ export async function listLegacyRecoveryWorkflows(learnerIds: string[]) {
   return selectRecoveryWorkflows(items.map(toDurablePracticeWorkflow));
 }
 
+export async function listPendingRecoveryWorkflows(learnerIds: string[]) {
+  const items = await listPendingPracticeWorkflows(learnerIds);
+  return selectRecoveryWorkflows(items.map(toDurablePracticeWorkflow));
+}
+
 export function toDurablePracticeWorkflow(item: RecordingQueueItem): DurablePracticeWorkflow {
   return {
     learnerId: item.learnerId,
@@ -51,9 +60,11 @@ export function toDurablePracticeWorkflow(item: RecordingQueueItem): DurablePrac
     lang: item.lang,
     attemptIndex: item.attemptIndex,
     state: item.workflowState ?? "awaiting-feedback",
+    syncStatus: item.syncStatus,
     updatedAt: item.workflowUpdatedAt ?? item.createdAt,
     sessionId: item.sessionId,
-    attemptId: item.attemptId!,
+    attemptId: item.attemptId ?? null,
+    ...(item.lastError ? { lastError: item.lastError } : {}),
   };
 }
 

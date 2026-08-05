@@ -7,6 +7,7 @@ export type PracticeStage =
   | "processing"
   | "feedback"
   | "feedback-recovery"
+  | "permanent-failure"
   | "record2"
   | "processing2"
   | "result"
@@ -27,11 +28,25 @@ export type PracticeEvent =
   | { type: "processing"; attemptIndex: 1 | 2 }
   | { type: "ready"; attemptIndex: 1 | 2 }
   | { type: "feedback-load-failed"; message: string; attemptIndex: 1 | 2 }
-  | { type: "feedback-delivery-failed"; message: string; attemptIndex: 1 | 2 }
+  | {
+      type: "feedback-delivery-failed";
+      message: string;
+      attemptIndex: 1 | 2;
+      clientAttemptId: string;
+    }
+  | {
+      type: "feedback-delivery-succeeded";
+      attemptIndex: 1 | 2;
+      clientAttemptId: string;
+    }
   | { type: "recovery-workflow-adopted"; workflowId: string; attemptIndex: 1 | 2 }
+  | { type: "durable-pending-adopted"; workflowId: string; attemptIndex: 1 | 2 }
   | { type: "feedback-retry-requested" }
   | { type: "offline"; attemptIndex: 1 | 2 }
   | { type: "retry"; attemptIndex: 1 | 2 }
+  | { type: "retry-existing"; attemptIndex: 1 | 2 }
+  | { type: "abandon-and-record-again"; attemptIndex: 1 | 2 }
+  | { type: "permanent-failure"; message: string; attemptIndex: 1 | 2 }
   | { type: "failed"; message: string; attemptIndex: 1 | 2 }
   | { type: "second-attempt-started" }
   | { type: "workflow-completed" }
@@ -68,6 +83,7 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         error: null,
       };
     case "processing":
+      if (state.attemptIndex !== event.attemptIndex) return state;
       if (event.attemptIndex === 1 && state.stage !== "uploading" && state.stage !== "processing")
         return state;
       if (event.attemptIndex === 2 && state.stage !== "processing2" && state.stage !== "recorded")
@@ -79,16 +95,13 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         error: null,
       };
     case "ready":
+      if (state.attemptIndex !== event.attemptIndex) return state;
       if (
-        event.attemptIndex === 1 &&
-        state.stage !== "processing" &&
         state.stage !== "uploading" &&
-        state.stage !== "feedback-recovery"
-      )
-        return state;
-      if (
-        event.attemptIndex === 2 &&
+        state.stage !== "processing" &&
         state.stage !== "processing2" &&
+        state.stage !== "offline-recovery" &&
+        state.stage !== "retry" &&
         state.stage !== "feedback-recovery"
       )
         return state;
@@ -99,12 +112,18 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         error: null,
       };
     case "feedback-load-failed":
+      if (state.attemptIndex !== event.attemptIndex) return state;
       if (
         (event.attemptIndex === 1 &&
+          state.stage !== "uploading" &&
           state.stage !== "processing" &&
+          state.stage !== "offline-recovery" &&
+          state.stage !== "retry" &&
           state.stage !== "feedback-recovery") ||
         (event.attemptIndex === 2 &&
           state.stage !== "processing2" &&
+          state.stage !== "offline-recovery" &&
+          state.stage !== "retry" &&
           state.stage !== "feedback-recovery")
       )
         return state;
@@ -115,6 +134,7 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         error: event.message,
       };
     case "feedback-delivery-failed":
+      if (state.attemptIndex !== event.attemptIndex) return state;
       if (
         state.stage !== "feedback" &&
         state.stage !== "result" &&
@@ -127,6 +147,10 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         stage: "feedback-recovery",
         error: event.message,
       };
+    case "feedback-delivery-succeeded":
+      if (state.attemptIndex !== event.attemptIndex) return state;
+      if (state.stage !== "feedback" && state.stage !== "result") return state;
+      return { ...state, error: null };
     case "recovery-workflow-adopted":
       if (state.stage !== "prompt") return state;
       return {
@@ -135,17 +159,58 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         stage: "feedback-recovery",
         error: null,
       };
+    case "durable-pending-adopted":
+      if (state.stage !== "prompt") return state;
+      return {
+        ...state,
+        attemptIndex: event.attemptIndex,
+        stage: "offline-recovery",
+        error: null,
+      };
     case "feedback-retry-requested":
       return state.stage === "feedback-recovery" ? { ...state, error: null } : state;
     case "offline":
-      if (state.stage !== "recorded" && state.stage !== "processing") return state;
+      if (state.attemptIndex !== event.attemptIndex) return state;
+      if (
+        state.stage !== "recorded" &&
+        state.stage !== "uploading" &&
+        state.stage !== "processing" &&
+        state.stage !== "processing2"
+      )
+        return state;
       return { ...state, attemptIndex: event.attemptIndex, stage: "offline-recovery", error: null };
     case "retry":
+      if (state.attemptIndex !== event.attemptIndex) return state;
       return state.stage === "offline-recovery" || state.stage === "retry"
         ? { ...state, attemptIndex: event.attemptIndex, stage: "retry", error: null }
         : state;
+    case "retry-existing":
+      if (state.stage !== "permanent-failure" || state.attemptIndex !== event.attemptIndex)
+        return state;
+      return { ...state, stage: "offline-recovery", error: null };
+    case "abandon-and-record-again":
+      if (state.stage !== "permanent-failure" || state.attemptIndex !== event.attemptIndex)
+        return state;
+      return {
+        ...state,
+        stage: event.attemptIndex === 1 ? "record" : "record2",
+        error: null,
+      };
+    case "permanent-failure":
+      if (state.attemptIndex !== event.attemptIndex) return state;
+      if (
+        state.stage !== "uploading" &&
+        state.stage !== "processing" &&
+        state.stage !== "processing2" &&
+        state.stage !== "offline-recovery" &&
+        state.stage !== "retry" &&
+        state.stage !== "prompt"
+      )
+        return state;
+      return { ...state, stage: "permanent-failure", error: event.message };
     case "failed":
-      if (state.stage === "feedback-recovery") return state;
+      if (state.stage === "feedback-recovery" || state.attemptIndex !== event.attemptIndex)
+        return state;
       return {
         ...state,
         attemptIndex: event.attemptIndex,

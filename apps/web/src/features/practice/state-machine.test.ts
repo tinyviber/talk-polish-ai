@@ -29,6 +29,69 @@ describe("practice state machine", () => {
     expect(reducePracticeState(state, { type: "next-prompt" })).toEqual(initialPracticeState);
   });
 
+  test("recovers attempt one from real processing through retry and ready", () => {
+    const processing = reducePracticeState(
+      { stage: "processing", attemptIndex: 1, error: null },
+      { type: "offline", attemptIndex: 1 },
+    );
+    const retry = reducePracticeState(processing, { type: "retry", attemptIndex: 1 });
+    const feedback = reducePracticeState(retry, { type: "ready", attemptIndex: 1 });
+
+    expect(processing.stage).toBe("offline-recovery");
+    expect(retry.stage).toBe("retry");
+    expect(feedback.stage).toBe("feedback");
+  });
+
+  test("recovers attempt two from processing2 through retry and result", () => {
+    const processing = reducePracticeState(
+      { stage: "processing2", attemptIndex: 2, error: null },
+      { type: "offline", attemptIndex: 2 },
+    );
+    const retry = reducePracticeState(processing, { type: "retry", attemptIndex: 2 });
+    const result = reducePracticeState(retry, { type: "ready", attemptIndex: 2 });
+
+    expect(processing.stage).toBe("offline-recovery");
+    expect(retry.stage).toBe("retry");
+    expect(result.stage).toBe("result");
+  });
+
+  test("rejects late ready and feedback events from another attempt", () => {
+    const attemptTwoRecovery = {
+      stage: "offline-recovery" as const,
+      attemptIndex: 2 as const,
+      error: null,
+    };
+    expect(reducePracticeState(attemptTwoRecovery, { type: "ready", attemptIndex: 1 })).toEqual(
+      attemptTwoRecovery,
+    );
+    expect(
+      reducePracticeState(attemptTwoRecovery, {
+        type: "feedback-load-failed",
+        message: "late attempt one response",
+        attemptIndex: 1,
+      }),
+    ).toEqual(attemptTwoRecovery);
+  });
+
+  test("keeps durable pending and permanent failure out of recording UI", () => {
+    const pending = reducePracticeState(initialPracticeState, {
+      type: "durable-pending-adopted",
+      workflowId: "attempt-1",
+      attemptIndex: 1,
+    });
+    const failed = reducePracticeState(pending, {
+      type: "permanent-failure",
+      message: "unprocessable audio",
+      attemptIndex: 1,
+    });
+
+    expect(pending.stage).toBe("offline-recovery");
+    expect(failed.stage).toBe("permanent-failure");
+    expect(reducePracticeState(failed, { type: "retry-existing", attemptIndex: 1 }).stage).toBe(
+      "offline-recovery",
+    );
+  });
+
   test("illegal events cannot jump workflow stage", () => {
     expect(reducePracticeState(initialPracticeState, { type: "ready", attemptIndex: 1 })).toEqual(
       initialPracticeState,
@@ -71,6 +134,7 @@ describe("practice state machine", () => {
         type: "feedback-delivery-failed",
         message: "transaction aborted",
         attemptIndex: 1,
+        clientAttemptId: "attempt-1",
       }),
     ).toEqual({ stage: "feedback-recovery", attemptIndex: 1, error: "transaction aborted" });
   });

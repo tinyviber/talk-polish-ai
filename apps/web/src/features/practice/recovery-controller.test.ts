@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { continueToSecondAttempt } from "./recovery-controller";
+import { createFeedbackDeliveryController, continueToSecondAttempt } from "./recovery-controller";
 
 describe("second-attempt application action", () => {
   test("does not enter record2 when consuming attempt one aborts", async () => {
@@ -28,5 +28,38 @@ describe("second-attempt application action", () => {
 
     expect(result).toBe(true);
     expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  test("shares one delivery promise between concurrent callers", async () => {
+    let resolveDelivery: (() => void) | null = null;
+    const markFeedbackDelivered = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDelivery = resolve;
+        }),
+    );
+    const controller = createFeedbackDeliveryController(markFeedbackDelivered);
+
+    const first = controller.deliverFeedbackOnce("attempt-1");
+    const second = controller.deliverFeedbackOnce("attempt-1");
+    expect(first).toBe(second);
+    expect(markFeedbackDelivered).toHaveBeenCalledOnce();
+
+    resolveDelivery!();
+    await Promise.all([first, second]);
+  });
+
+  test("allows retry after a failed shared delivery", async () => {
+    const markFeedbackDelivered = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transaction aborted"))
+      .mockResolvedValueOnce(undefined);
+    const controller = createFeedbackDeliveryController(markFeedbackDelivered);
+
+    await expect(controller.deliverFeedbackOnce("attempt-1")).rejects.toThrow(
+      "transaction aborted",
+    );
+    await expect(controller.deliverFeedbackOnce("attempt-1")).resolves.toBeUndefined();
+    expect(markFeedbackDelivered).toHaveBeenCalledTimes(2);
   });
 });

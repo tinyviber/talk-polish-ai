@@ -41,7 +41,10 @@ import { usePwa } from "@/lib/pwa";
 import type { Attempt, ScoreKey } from "@/lib/practice/types";
 import { cn } from "@/lib/utils";
 import { findReadyRecording, loadReadyAttempt } from "@/features/practice/ready-attempt";
-import { continueToSecondAttempt as continueToSecondAttemptAction } from "@/features/practice/recovery-controller";
+import {
+  continueToSecondAttempt as continueToSecondAttemptAction,
+  createFeedbackDeliveryController,
+} from "@/features/practice/recovery-controller";
 import { canAdoptRecovery, belongsToFrozenSession } from "@/features/practice/recovery-policy";
 import {
   initialPracticeState,
@@ -52,9 +55,11 @@ import {
   abandonWorkflow,
   clearRecoveryTarget,
   listLegacyRecoveryWorkflows,
+  listPendingRecoveryWorkflows,
   listRecoveryWorkflows,
   replaceRecoveryTarget,
   restoreLegacyWorkflow,
+  selectRecoveryWorkflows,
   toDurablePracticeWorkflow,
   type DurablePracticeWorkflow,
 } from "@/lib/practice/workflow-store";
@@ -65,6 +70,7 @@ import {
   type FrozenPracticeContext,
 } from "@/lib/practice/workflow-context";
 import { FeedbackRecovery } from "@/features/practice/components/FeedbackRecovery";
+import { SubmissionFailure } from "@/features/practice/components/SubmissionFailure";
 
 export const Route = createFileRoute("/practice")({
   head: () => ({
@@ -95,6 +101,7 @@ const STEP_INDEX: Record<Step, number> = {
   processing: 2,
   feedback: 2,
   "feedback-recovery": 2,
+  "permanent-failure": 2,
   record2: 3,
   processing2: 3,
   result: 4,
@@ -207,6 +214,12 @@ function Practice() {
   const interruptedAttemptIdRef = useRef<string | null>(null);
   const pendingFeedbackAttemptIdRef = useRef<string | null>(null);
   const readyAttemptResolutionRef = useRef(new Map<string, Promise<Attempt | null>>());
+  const feedbackDeliveryAttemptIndexRef = useRef(new Map<string, 1 | 2>());
+  const feedbackDeliveryWorkflowRef = useRef(new Map<string, DurablePracticeWorkflow>());
+  const feedbackDeliveryOutcomeRef = useRef(new Map<string, Promise<void>>());
+  const feedbackDeliveryControllerRef = useRef<ReturnType<
+    typeof createFeedbackDeliveryController
+  > | null>(null);
   const workflowGenerationRef = useRef(0);
   const queueReadGenerationRef = useRef(0);
   const queueMountedRef = useRef(false);
@@ -216,6 +229,13 @@ function Practice() {
   // Generated when a session starts so recordings captured with no network can
   // still be attached to one practice session once the device reconnects.
   const clientSessionIdRef = useRef<string | null>(null);
+  const queuedItemsRef = useRef<RecordingQueueItem[]>([]);
+  const recoveryTargetRef = useRef<DurablePracticeWorkflow | null>(null);
+
+  if (!feedbackDeliveryControllerRef.current) {
+    feedbackDeliveryControllerRef.current = createFeedbackDeliveryController(markFeedbackDelivered);
+  }
+  recoveryTargetRef.current = recoveryTarget;
 
   const lang = frozenContext?.lang ?? state.lang ?? "en";
   const languagePrompts = useMemo(
@@ -280,6 +300,8 @@ function Practice() {
   );
   const recorder = useRecorder({ mode, onInterruptedRecording: saveInterruptedDraft });
   const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
+  queuedItemsRef.current = queuedItems;
+  recoveryTargetRef.current = recoveryTarget;
   practiceStageRef.current = step;
   frozenContextRef.current = frozenContext;
   recorderStatusRef.current = recorder.status;
@@ -294,6 +316,10 @@ function Practice() {
       const resolutionKey = `${item.clientAttemptId}:${generation}`;
       const existing = readyAttemptResolutionRef.current.get(resolutionKey);
       if (existing) return existing;
+      feedbackDeliveryWorkflowRef.current.set(
+        item.clientAttemptId,
+        toDurablePracticeWorkflow(item),
+      );
       const resolution = (async () => {
         const result = await loadReadyAttempt(item, getAttempt);
         if (!result) return null;
@@ -329,6 +355,7 @@ function Practice() {
 
         if (item.sessionId) setSessionId(item.sessionId);
         else if (result.attempt.sessionId) setSessionId(result.attempt.sessionId);
+        feedbackDeliveryAttemptIndexRef.current.set(item.clientAttemptId, item.attemptIndex);
         if (item.attemptIndex === 1) {
           setFirst(result.attempt);
           dispatchPractice({ type: "ready", attemptIndex: 1 });
@@ -357,54 +384,144 @@ function Practice() {
     [refresh],
   );
 
+  const clearFeedbackDelivery = useCallback((clientAttemptId: string) => {
+    if (interruptedAttemptIdRef.current === clientAttemptId) {
+      interruptedAttemptIdRef.current = null;
+    }
+    if (pendingFeedbackAttemptIdRef.current === clientAttemptId) {
+      pendingFeedbackAttemptIdRef.current = null;
+    }
+    setFeedbackPendingDelivery((current) => (current === clientAttemptId ? null : current));
+    if (recoveryTargetRef.current?.clientAttemptId === clientAttemptId) {
+      setRecoveryTarget((current) => clearRecoveryTarget(current, clientAttemptId));
+      setFeedbackRetryPending(false);
+    }
+    feedbackDeliveryWorkflowRef.current.delete(clientAttemptId);
+    dispatchPractice({
+      type: "feedback-delivery-succeeded",
+      attemptIndex: feedbackDeliveryAttemptIndexRef.current.get(clientAttemptId) ?? 1,
+      clientAttemptId,
+    });
+  }, []);
+
+  const establishFeedbackRecovery = useCallback(
+    (clientAttemptId: string, deliveryError: unknown) => {
+      const item = queuedItemsRef.current.find(
+        (candidate) => candidate.clientAttemptId === clientAttemptId,
+      );
+      const target =
+        item && item.attemptId
+          ? toDurablePracticeWorkflow(item)
+          : (feedbackDeliveryWorkflowRef.current.get(clientAttemptId) ??
+            (recoveryTargetRef.current?.clientAttemptId === clientAttemptId
+              ? recoveryTargetRef.current
+              : null));
+      const targetIsCurrent =
+        !!target &&
+        (!recoveryTargetRef.current ||
+          recoveryTargetRef.current.clientAttemptId === clientAttemptId);
+      if (target && targetIsCurrent) {
+        setRecoveryTarget((current) =>
+          !current || current.clientAttemptId === clientAttemptId
+            ? replaceRecoveryTarget(current, target)
+            : current,
+        );
+        setFeedbackRetryPending(true);
+        dispatchPractice({
+          type: "feedback-delivery-failed",
+          message: errorMessage(deliveryError),
+          attemptIndex: target.attemptIndex,
+          clientAttemptId,
+        });
+      }
+      if (targetIsCurrent) {
+        setFeedbackPendingDelivery((current) => (current === clientAttemptId ? null : current));
+        setError(
+          `Feedback loaded, but recovery state could not be saved: ${errorMessage(deliveryError)}`,
+        );
+      }
+    },
+    [],
+  );
+
+  const deliverFeedbackOnce = useCallback(
+    (clientAttemptId: string) => {
+      const existing = feedbackDeliveryOutcomeRef.current.get(clientAttemptId);
+      if (existing) return existing;
+      const generation = workflowGenerationRef.current;
+      const delivery = feedbackDeliveryControllerRef
+        .current!.deliverFeedbackOnce(clientAttemptId)
+        .then(() => {
+          if (generation === workflowGenerationRef.current) {
+            clearFeedbackDelivery(clientAttemptId);
+          }
+        })
+        .catch((deliveryError) => {
+          if (generation === workflowGenerationRef.current) {
+            establishFeedbackRecovery(clientAttemptId, deliveryError);
+          }
+          throw deliveryError;
+        });
+      feedbackDeliveryOutcomeRef.current.set(clientAttemptId, delivery);
+      void delivery.then(
+        () => {
+          if (feedbackDeliveryOutcomeRef.current.get(clientAttemptId) === delivery)
+            feedbackDeliveryOutcomeRef.current.delete(clientAttemptId);
+        },
+        () => {
+          if (feedbackDeliveryOutcomeRef.current.get(clientAttemptId) === delivery)
+            feedbackDeliveryOutcomeRef.current.delete(clientAttemptId);
+        },
+      );
+      return delivery;
+    },
+    [clearFeedbackDelivery, establishFeedbackRecovery],
+  );
+
   useEffect(() => {
     if (!feedbackPendingDelivery) return;
     const clientAttemptId = feedbackPendingDelivery;
-    const generation = workflowGenerationRef.current;
-    let cancelled = false;
-    void markFeedbackDelivered(clientAttemptId)
-      .then(() => {
-        if (cancelled || generation !== workflowGenerationRef.current) return;
+    void deliverFeedbackOnce(clientAttemptId).catch(() => undefined);
+  }, [deliverFeedbackOnce, feedbackPendingDelivery]);
+
+  const reconcileQueue = useCallback(async () => {
+    const generation = ++queueReadGenerationRef.current;
+    let workflowGeneration = workflowGenerationRef.current;
+    try {
+      const items = await listRecordingQueue(getQueueLearnerIds());
+      if (
+        !queueMountedRef.current ||
+        generation !== queueReadGenerationRef.current ||
+        workflowGeneration !== workflowGenerationRef.current
+      )
+        return;
+      setQueuedItems(items);
+      let clientAttemptId = interruptedAttemptIdRef.current ?? pendingFeedbackAttemptIdRef.current;
+      const activeItem = clientAttemptId
+        ? items.find((item) => item.clientAttemptId === clientAttemptId)
+        : undefined;
+      if (
+        activeItem &&
+        (activeItem.workflowState === "consumed" ||
+          activeItem.workflowState === "abandoned" ||
+          activeItem.feedbackState === "delivered")
+      ) {
+        workflowGenerationRef.current += 1;
         if (interruptedAttemptIdRef.current === clientAttemptId) {
           interruptedAttemptIdRef.current = null;
         }
         if (pendingFeedbackAttemptIdRef.current === clientAttemptId) {
           pendingFeedbackAttemptIdRef.current = null;
         }
+        setFeedbackPendingDelivery((current) => (current === clientAttemptId ? null : current));
         setRecoveryTarget((current) => clearRecoveryTarget(current, clientAttemptId));
-        setFeedbackPendingDelivery(null);
-      })
-      .catch((deliveryError) => {
-        if (cancelled || generation !== workflowGenerationRef.current) return;
-        const item = queuedItems.find((candidate) => candidate.clientAttemptId === clientAttemptId);
-        if (item) {
-          setRecoveryTarget((current) =>
-            replaceRecoveryTarget(current, toDurablePracticeWorkflow(item)),
-          );
-          setFeedbackRetryPending(true);
-          dispatchPractice({
-            type: "feedback-delivery-failed",
-            message: errorMessage(deliveryError),
-            attemptIndex: item.attemptIndex,
-          });
+        setFeedbackRetryPending(false);
+        if (practiceStageRef.current === "feedback-recovery") {
+          dispatchPractice({ type: "next-prompt" });
         }
-        setError(
-          `Feedback loaded, but recovery state could not be saved: ${errorMessage(deliveryError)}`,
-        );
-        setFeedbackPendingDelivery(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [feedbackPendingDelivery, queuedItems]);
-
-  const reconcileQueue = useCallback(async () => {
-    const generation = ++queueReadGenerationRef.current;
-    try {
-      const items = await listRecordingQueue(getQueueLearnerIds());
-      if (!queueMountedRef.current || generation !== queueReadGenerationRef.current) return;
-      setQueuedItems(items);
-      let clientAttemptId = interruptedAttemptIdRef.current ?? pendingFeedbackAttemptIdRef.current;
+        workflowGeneration = workflowGenerationRef.current;
+        clientAttemptId = null;
+      }
       let adoptedRecovery = false;
       if (
         !clientAttemptId &&
@@ -415,8 +532,17 @@ function Practice() {
           recorderStatusRef.current,
         )
       ) {
-        const [workflow] = await listRecoveryWorkflows(getQueueLearnerIds());
-        if (!queueMountedRef.current || generation !== queueReadGenerationRef.current) return;
+        const [readyWorkflows, pendingWorkflows] = await Promise.all([
+          listRecoveryWorkflows(getQueueLearnerIds()),
+          listPendingRecoveryWorkflows(getQueueLearnerIds()),
+        ]);
+        const [workflow] = selectRecoveryWorkflows([...readyWorkflows, ...pendingWorkflows]);
+        if (
+          !queueMountedRef.current ||
+          generation !== queueReadGenerationRef.current ||
+          workflowGeneration !== workflowGenerationRef.current
+        )
+          return;
         if (
           workflow &&
           canAdoptRecovery(
@@ -431,15 +557,38 @@ function Practice() {
           setLegacyRecoveryAvailable(null);
           setRecoveryTarget(workflow);
           hydrateWorkflowContext(workflow);
-          setFeedbackRetryPending(true);
-          dispatchPractice({
-            type: "recovery-workflow-adopted",
-            workflowId: workflow.clientAttemptId,
-            attemptIndex: workflow.attemptIndex,
-          });
+          if (workflow.syncStatus === "failed") {
+            setFeedbackRetryPending(false);
+            setInterruptedDraftPending(false);
+            setError(workflow.lastError ?? "This recording could not be uploaded.");
+            dispatchPractice({
+              type: "permanent-failure",
+              message: workflow.lastError ?? "This recording could not be uploaded.",
+              attemptIndex: workflow.attemptIndex,
+            });
+          } else if (workflow.syncStatus === "ready") {
+            setFeedbackRetryPending(true);
+            dispatchPractice({
+              type: "recovery-workflow-adopted",
+              workflowId: workflow.clientAttemptId,
+              attemptIndex: workflow.attemptIndex,
+            });
+          } else {
+            setInterruptedDraftPending(true);
+            dispatchPractice({
+              type: "durable-pending-adopted",
+              workflowId: workflow.clientAttemptId,
+              attemptIndex: workflow.attemptIndex,
+            });
+          }
         } else if (!workflow) {
           const [legacyWorkflow] = await listLegacyRecoveryWorkflows(getQueueLearnerIds());
-          if (!queueMountedRef.current || generation !== queueReadGenerationRef.current) return;
+          if (
+            !queueMountedRef.current ||
+            generation !== queueReadGenerationRef.current ||
+            workflowGeneration !== workflowGenerationRef.current
+          )
+            return;
           if (
             canAdoptRecovery(
               practiceStageRef.current,
@@ -493,28 +642,10 @@ function Practice() {
 
   const continueToSecondAttempt = useCallback(async () => {
     const clientAttemptId = feedbackPendingDelivery;
-    const handleDeliveryError = (deliveryError: unknown) => {
-      const item = clientAttemptId
-        ? queuedItems.find((candidate) => candidate.clientAttemptId === clientAttemptId)
-        : undefined;
-      const target = item ? toDurablePracticeWorkflow(item) : recoveryTarget;
-      if (target) {
-        setRecoveryTarget((current) => replaceRecoveryTarget(current, target));
-        setFeedbackRetryPending(true);
-        dispatchPractice({
-          type: "feedback-delivery-failed",
-          message: errorMessage(deliveryError),
-          attemptIndex: target.attemptIndex,
-        });
-      }
-      setError(
-        `Feedback state could not be saved. Retry before continuing: ${errorMessage(deliveryError)}`,
-      );
-    };
     await continueToSecondAttemptAction({
       clientAttemptId,
-      markFeedbackDelivered,
-      onDeliveryError: handleDeliveryError,
+      markFeedbackDelivered: deliverFeedbackOnce,
+      onDeliveryError: () => undefined,
       onSuccess: () => {
         workflowGenerationRef.current += 1;
         if (clientAttemptId && interruptedAttemptIdRef.current === clientAttemptId) {
@@ -523,7 +654,6 @@ function Practice() {
         if (clientAttemptId && pendingFeedbackAttemptIdRef.current === clientAttemptId) {
           pendingFeedbackAttemptIdRef.current = null;
         }
-        setRecoveryTarget((current) => clearRecoveryTarget(current, clientAttemptId));
         setFeedbackPendingDelivery(null);
         setFeedbackRetryPending(false);
         setError(null);
@@ -531,7 +661,7 @@ function Practice() {
         dispatchPractice({ type: "second-attempt-started" });
       },
     });
-  }, [feedbackPendingDelivery, queuedItems, recoveryTarget, recorder]);
+  }, [deliverFeedbackOnce, feedbackPendingDelivery, recorder]);
 
   const ignoreLegacyRecovery = useCallback(async () => {
     const workflow = legacyRecoveryAvailable;
@@ -568,6 +698,7 @@ function Practice() {
   const startOver = useCallback(async () => {
     const target = recoveryTarget;
     workflowGenerationRef.current += 1;
+    queueReadGenerationRef.current += 1;
     if (target) {
       await abandonWorkflow(target.clientAttemptId);
     }
@@ -813,9 +944,35 @@ function Practice() {
         cause instanceof ApiClientError &&
         (cause.code === "queue_busy" || cause.code === "processing_unavailable");
       if (queueWaiting) {
+        const pending = (await listRecordingQueue(getQueueLearnerIds())).find(
+          (item) => item.clientAttemptId === interruptedAttemptIdRef.current,
+        );
+        if (pending) {
+          setRecoveryTarget((current) =>
+            replaceRecoveryTarget(current, toDurablePracticeWorkflow(pending)),
+          );
+        }
         setInterruptedDraftPending(true);
         setError(errorMessage(cause));
-        dispatchPractice({ type: "failed", message: errorMessage(cause), attemptIndex: index });
+        dispatchPractice({ type: "offline", attemptIndex: index });
+        recorder.reset();
+        return;
+      }
+
+      const failedQueuedItem =
+        mode === "api"
+          ? (await listRecordingQueue(getQueueLearnerIds())).find(
+              (item) => item.clientAttemptId === interruptedAttemptIdRef.current,
+            )
+          : undefined;
+      if (failedQueuedItem?.syncStatus === "failed") {
+        const failure = failedQueuedItem.lastError ?? errorMessage(cause);
+        setRecoveryTarget((current) =>
+          replaceRecoveryTarget(current, toDurablePracticeWorkflow(failedQueuedItem)),
+        );
+        setInterruptedDraftPending(false);
+        setError(failure);
+        dispatchPractice({ type: "permanent-failure", message: failure, attemptIndex: index });
         recorder.reset();
         return;
       }
@@ -880,12 +1037,69 @@ function Practice() {
     } finally {
       setBusy(false, "queue");
     }
+    const clientAttemptId =
+      interruptedAttemptIdRef.current ?? recoveryTargetRef.current?.clientAttemptId;
+    const currentItem = clientAttemptId
+      ? (await listRecordingQueue(learnerIds)).find(
+          (item) => item.clientAttemptId === clientAttemptId,
+        )
+      : undefined;
+    if (currentItem?.syncStatus === "failed") {
+      const failure = currentItem.lastError ?? "This recording could not be uploaded.";
+      setRecoveryTarget((current) =>
+        replaceRecoveryTarget(current, toDurablePracticeWorkflow(currentItem)),
+      );
+      setError(failure);
+      dispatchPractice({
+        type: "permanent-failure",
+        message: failure,
+        attemptIndex: currentItem.attemptIndex,
+      });
+      return;
+    }
+    await reconcileQueue();
+  };
+
+  const retryExistingRecording = async () => {
+    dispatchPractice({ type: "retry-existing", attemptIndex: practiceState.attemptIndex });
+    setError(null);
+    await retryOffline();
+  };
+
+  const abandonAndRecordAgain = async () => {
+    const target = recoveryTargetRef.current;
+    if (target) await abandonWorkflow(target.clientAttemptId);
+    workflowGenerationRef.current += 1;
+    queueReadGenerationRef.current += 1;
+    interruptedAttemptIdRef.current = null;
+    pendingFeedbackAttemptIdRef.current = null;
+    setRecoveryTarget(null);
+    setInterruptedDraftPending(false);
+    setFeedbackRetryPending(false);
+    setFeedbackPendingDelivery(null);
+    setError(null);
+    recorder.reset();
+    dispatchPractice({
+      type: "abandon-and-record-again",
+      attemptIndex: target?.attemptIndex ?? practiceState.attemptIndex,
+    });
   };
 
   const current = second ?? first;
   const pendingQueueItems = queuedItems.filter((item) => item.syncStatus !== "ready");
   const failedQueueItems = queuedItems.filter((item) => item.syncStatus === "failed");
   const readyQueueItems = queuedItems.filter((item) => item.syncStatus === "ready");
+  const durablePendingForPrompt =
+    mode === "api"
+      ? queuedItems.find(
+          (item) =>
+            item.promptId === prompt?.id &&
+            item.lang === lang &&
+            (item.syncStatus === "queued" ||
+              item.syncStatus === "uploading" ||
+              item.syncStatus === "processing"),
+        )
+      : undefined;
 
   return (
     <div className="min-h-screen">
@@ -942,7 +1156,42 @@ function Practice() {
         ) : null}
 
         <div className="mt-6 space-y-6">
-          {step === "prompt" ? (
+          {mode === "api" && step === "permanent-failure" ? (
+            <SubmissionFailure
+              workflow={recoveryTarget}
+              error={error}
+              onRetry={() => void retryExistingRecording()}
+              onAbandon={() => void abandonAndRecordAgain()}
+              onStartOver={() => void startOver()}
+            />
+          ) : null}
+
+          {step === "prompt" && durablePendingForPrompt ? (
+            <section className="rounded-3xl border border-warn/40 bg-warn/10 p-6 shadow-lift">
+              <h1 className="font-display text-xl">Recording saved for upload</h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                This answer already has a durable upload. It will not be recorded again.
+              </p>
+              <Button
+                className="mt-5"
+                onClick={() => {
+                  interruptedAttemptIdRef.current = durablePendingForPrompt.clientAttemptId;
+                  setRecoveryTarget(toDurablePracticeWorkflow(durablePendingForPrompt));
+                  hydrateWorkflowContext(toDurablePracticeWorkflow(durablePendingForPrompt));
+                  dispatchPractice({
+                    type: "durable-pending-adopted",
+                    workflowId: durablePendingForPrompt.clientAttemptId,
+                    attemptIndex: durablePendingForPrompt.attemptIndex,
+                  });
+                  void retryOffline();
+                }}
+              >
+                Retry upload
+              </Button>
+            </section>
+          ) : null}
+
+          {step === "prompt" && !durablePendingForPrompt ? (
             <>
               <PromptCard prompt={prompt} mode={mode} />
               <div className="flex flex-wrap items-center gap-3">
@@ -958,6 +1207,7 @@ function Practice() {
                   variant="ghost"
                   onClick={() => {
                     workflowGenerationRef.current += 1;
+                    queueReadGenerationRef.current += 1;
                     clientSessionIdRef.current = crypto.randomUUID();
                     setFeedbackPendingDelivery(null);
                     setSessionId(null);
@@ -1066,6 +1316,7 @@ function Practice() {
                 className="h-14 rounded-full px-7 text-base shadow-tactile"
                 onClick={() => {
                   workflowGenerationRef.current += 1;
+                  queueReadGenerationRef.current += 1;
                   setFirst(null);
                   setSecond(null);
                   setFrozenContext(null);

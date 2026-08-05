@@ -3,6 +3,7 @@ import {
   cleanupRecordingQueue,
   canSyncAttempt,
   isQueueSyncCandidate,
+  markFeedbackDelivered,
   migrateRecordingQueueRecord,
   orderRecordingQueue,
   recoverQueueStatus,
@@ -17,6 +18,12 @@ import {
 describe("offline recording queue boundaries", () => {
   test("is safe when IndexedDB is unavailable (SSR/private browser fallback)", async () => {
     await expect(cleanupRecordingQueue()).resolves.toBeUndefined();
+  });
+
+  test("does not report feedback delivery success without IndexedDB", async () => {
+    await expect(markFeedbackDelivered("attempt-without-idb")).rejects.toThrow(
+      "feedback delivery was not saved",
+    );
   });
 
   test("unsubscribe does not retain queue listeners", () => {
@@ -87,7 +94,11 @@ describe("offline recording queue boundaries", () => {
       "b",
     ]);
     expect(canSyncAttempt(second, [first, second])).toBe(false);
-    expect(canSyncAttempt(second, [{ ...first, syncStatus: "ready" }])).toBe(true);
+    expect(
+      canSyncAttempt(second, [
+        { ...first, syncStatus: "ready", feedbackState: "delivered" as const },
+      ]),
+    ).toBe(true);
     expect(
       canSyncAttempt({ ...second, prerequisiteSatisfied: true }, [
         { ...second, prerequisiteSatisfied: true },
@@ -96,7 +107,14 @@ describe("offline recording queue boundaries", () => {
     expect(
       canSyncAttempt(
         { ...second, learnerId: "device:learner" },
-        [{ ...first, learnerId: "lnr_old", syncStatus: "ready" }],
+        [
+          {
+            ...first,
+            learnerId: "lnr_old",
+            syncStatus: "ready",
+            feedbackState: "delivered" as const,
+          },
+        ],
         ["device:learner", "lnr_old"],
       ),
     ).toBe(true);

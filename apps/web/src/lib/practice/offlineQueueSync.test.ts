@@ -4,7 +4,9 @@ import {
   enqueueRecording,
   getNextRecordingQueuePollAt,
   listDurablePracticeWorkflows,
+  listLegacyUnknownWorkflows,
   listRecordingQueue,
+  adoptLegacyWorkflow,
   syncRecordingQueue,
 } from "./offlineQueue";
 import { startOfflineQueueSyncLoop } from "./offlineQueueSync";
@@ -281,5 +283,34 @@ describe("offline queue sync loop", () => {
     expect(rows[0]?.workflowState).toBe("legacy-unknown");
     expect(rows[0]?.feedbackState).toBe("pending");
     await expect(listDurablePracticeWorkflows(["device:learner-1"])).resolves.toEqual([]);
+    await expect(listLegacyUnknownWorkflows(["device:learner-1"])).resolves.toHaveLength(1);
+
+    await adoptLegacyWorkflow("historical-pending");
+    expect((await listDurablePracticeWorkflows(["device:learner-1"]))[0]?.clientAttemptId).toBe(
+      "historical-pending",
+    );
+  });
+
+  test("cleans unadopted legacy-unknown evidence after its long retention window", async () => {
+    await seedLegacyQueueItem({
+      learnerId: "device:learner-1",
+      clientAttemptId: "historical-expired",
+      sessionId: "session-1",
+      clientSessionId: "session-1",
+      promptId: "prompt-1",
+      lang: "en",
+      attemptIndex: 1,
+      duration: 2,
+      mimeType: "audio/webm",
+      blob: new Blob([], { type: "audio/webm" }),
+      createdAt: 1,
+      syncStatus: "ready",
+      attemptId: "server-historical-expired",
+      feedbackState: "pending",
+    });
+
+    vi.setSystemTime(new Date(31 * 24 * 60 * 60 * 1000));
+    await getNextRecordingQueuePollAt(["device:learner-1"]);
+    await expect(listLegacyUnknownWorkflows(["device:learner-1"])).resolves.toEqual([]);
   });
 });

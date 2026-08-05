@@ -386,7 +386,7 @@ export async function cleanupRecordingQueue(
     (item) =>
       now - item.createdAt > TTL_MS &&
       (item.syncStatus === "ready" || item.syncStatus === "failed") &&
-      !shouldRetainForFeedback(item) &&
+      !shouldRetainForFeedback(item, now) &&
       !(
         item.attemptIndex === 1 &&
         item.syncStatus === "ready" &&
@@ -551,6 +551,39 @@ export async function listDurablePracticeWorkflows(learnerIds?: string | string[
         (b.workflowUpdatedAt ?? b.createdAt) - (a.workflowUpdatedAt ?? a.createdAt) ||
         a.clientAttemptId.localeCompare(b.clientAttemptId),
     );
+}
+
+/** Historical pending feedback is opt-in, never an automatic page takeover. */
+export async function listLegacyUnknownWorkflows(learnerIds?: string | string[]) {
+  return (await listRecordingQueue(learnerIds)).filter(
+    (item) =>
+      item.workflowState === "legacy-unknown" &&
+      item.syncStatus === "ready" &&
+      typeof item.attemptId === "string" &&
+      item.attemptId.length > 0,
+  );
+}
+
+/** User explicitly chose to inspect one migrated historical row. */
+export async function adoptLegacyWorkflow(clientAttemptId: string) {
+  if (typeof indexedDB === "undefined") return;
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  const store = tx.objectStore(STORE);
+  const request = store.get(clientAttemptId);
+  request.onsuccess = () => {
+    const item = request.result as RecordingQueueItem | undefined;
+    if (!item || item.workflowState !== "legacy-unknown" || item.syncStatus !== "ready") return;
+    store.put({
+      ...item,
+      workflowState: "awaiting-feedback",
+      feedbackState: item.feedbackState === "error" ? "error" : "pending",
+      workflowUpdatedAt: Date.now(),
+      revision: (item.revision ?? 0) + 1,
+    });
+  };
+  await waitForTransactionWrite(request, tx);
+  notify();
 }
 
 /** Explicit user action only. Recovery targets are never cleared implicitly. */
@@ -731,6 +764,9 @@ export async function getNextRecordingQueuePollAt(
   learnerIds?: string | string[],
   now = Date.now(),
 ) {
+  // Maintenance must run even when no upload is scheduled; otherwise a
+  // migrated legacy-unknown row with no pending Blob can live forever.
+  await cleanupRecordingQueue(now, new Set(), true);
   const items = queueSchedulableItems(await allItems(), learnerIds);
   if (items.length === 0) return null;
   return items.reduce<number>(

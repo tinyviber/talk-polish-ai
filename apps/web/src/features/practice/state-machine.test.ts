@@ -33,5 +33,45 @@ describe("practice state machine", () => {
     expect(reducePracticeState(initialPracticeState, { type: "ready", attemptIndex: 1 })).toEqual(
       initialPracticeState,
     );
+    const recording = {
+      stage: "recording" as const,
+      attemptIndex: 1 as const,
+      error: null,
+    };
+    expect(
+      reducePracticeState(recording, {
+        type: "feedback-load-failed",
+        message: "late tab event",
+        attemptIndex: 1,
+      }),
+    ).toEqual(recording);
+    expect(
+      reducePracticeState(initialPracticeState, {
+        type: "recovery-workflow-adopted",
+        workflowId: "workflow-b",
+        attemptIndex: 1,
+      }).stage,
+    ).toBe("feedback-recovery");
+    expect(
+      reducePracticeState(recording, {
+        type: "recovery-workflow-adopted",
+        workflowId: "workflow-b",
+        attemptIndex: 1,
+      }),
+    ).toEqual(recording);
+  });
+
+  test("keeps feedback recovery when durable consume fails", () => {
+    const feedback = reducePracticeState(
+      { stage: "feedback", attemptIndex: 1, error: null },
+      { type: "ready", attemptIndex: 1 },
+    );
+    expect(
+      reducePracticeState(feedback, {
+        type: "feedback-delivery-failed",
+        message: "transaction aborted",
+        attemptIndex: 1,
+      }),
+    ).toEqual({ stage: "feedback-recovery", attemptIndex: 1, error: "transaction aborted" });
   });
 });

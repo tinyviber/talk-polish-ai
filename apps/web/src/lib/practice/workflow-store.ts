@@ -1,5 +1,7 @@
 import {
   abandonPracticeWorkflow,
+  adoptLegacyWorkflow,
+  listLegacyUnknownWorkflows,
   listDurablePracticeWorkflows,
   type DurableWorkflowState,
   type RecordingQueueItem,
@@ -32,20 +34,27 @@ export function clearRecoveryTarget(
 /** IndexedDB-backed recovery source. Selection order is newest update, then id. */
 export async function listRecoveryWorkflows(learnerIds: string[]) {
   const items = await listDurablePracticeWorkflows(learnerIds);
-  return selectRecoveryWorkflows(
-    items.map<DurablePracticeWorkflow>((item) => ({
-      learnerId: item.learnerId,
-      clientSessionId: item.clientSessionId,
-      clientAttemptId: item.clientAttemptId,
-      promptId: item.promptId,
-      lang: item.lang,
-      attemptIndex: item.attemptIndex,
-      state: item.workflowState ?? "awaiting-feedback",
-      updatedAt: item.workflowUpdatedAt ?? item.createdAt,
-      sessionId: item.sessionId,
-      attemptId: item.attemptId!,
-    })),
-  );
+  return selectRecoveryWorkflows(items.map(toDurablePracticeWorkflow));
+}
+
+export async function listLegacyRecoveryWorkflows(learnerIds: string[]) {
+  const items = await listLegacyUnknownWorkflows(learnerIds);
+  return selectRecoveryWorkflows(items.map(toDurablePracticeWorkflow));
+}
+
+export function toDurablePracticeWorkflow(item: RecordingQueueItem): DurablePracticeWorkflow {
+  return {
+    learnerId: item.learnerId,
+    clientSessionId: item.clientSessionId,
+    clientAttemptId: item.clientAttemptId,
+    promptId: item.promptId,
+    lang: item.lang,
+    attemptIndex: item.attemptIndex,
+    state: item.workflowState ?? "awaiting-feedback",
+    updatedAt: item.workflowUpdatedAt ?? item.createdAt,
+    sessionId: item.sessionId,
+    attemptId: item.attemptId!,
+  };
 }
 
 /** Stable newest-first selection; ties resolve by clientAttemptId. */
@@ -57,4 +66,8 @@ export function selectRecoveryWorkflows(workflows: DurablePracticeWorkflow[]) {
 
 export async function abandonWorkflow(clientAttemptId: string) {
   await abandonPracticeWorkflow(clientAttemptId);
+}
+
+export async function restoreLegacyWorkflow(clientAttemptId: string) {
+  await adoptLegacyWorkflow(clientAttemptId);
 }

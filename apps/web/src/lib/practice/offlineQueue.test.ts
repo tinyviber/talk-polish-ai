@@ -9,6 +9,10 @@ import {
   subscribeRecordingQueue,
 } from "./offlineQueue";
 import { installFakeIndexedDb } from "./test/fakeIndexedDb";
+import {
+  LEGACY_UNKNOWN_RETENTION_MS,
+  shouldRetainForFeedback,
+} from "./recording-outbox/retention-policy";
 
 describe("offline recording queue boundaries", () => {
   test("is safe when IndexedDB is unavailable (SSR/private browser fallback)", async () => {
@@ -107,6 +111,8 @@ describe("offline recording queue boundaries", () => {
       promptId: "prompt",
       lang: "en" as const,
       attemptIndex: 1 as const,
+      duration: 1,
+      mimeType: "audio/webm",
       syncStatus: "ready" as const,
       createdAt: 1,
     };
@@ -131,6 +137,30 @@ describe("offline recording queue boundaries", () => {
       feedbackState: "pending",
       workflowState: "awaiting-feedback",
     });
+  });
+
+  test("does not retain legacy-unknown evidence forever", () => {
+    const item = {
+      learnerId: "learner",
+      clientAttemptId: "attempt",
+      sessionId: "session",
+      clientSessionId: "session",
+      promptId: "prompt",
+      lang: "en" as const,
+      attemptIndex: 1 as const,
+      duration: 1,
+      mimeType: "audio/webm",
+      syncStatus: "ready" as const,
+      attemptId: "server-attempt",
+      feedbackState: "pending" as const,
+      workflowState: "legacy-unknown" as const,
+      createdAt: 1,
+      blob: new Blob([], { type: "audio/webm" }),
+    };
+    expect(shouldRetainForFeedback(item, item.createdAt + LEGACY_UNKNOWN_RETENTION_MS)).toBe(true);
+    expect(shouldRetainForFeedback(item, item.createdAt + LEGACY_UNKNOWN_RETENTION_MS + 1)).toBe(
+      false,
+    );
   });
 
   test("keeps a root transport subscriber able to notify another tab", async () => {

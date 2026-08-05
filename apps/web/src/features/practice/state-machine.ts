@@ -27,6 +27,8 @@ export type PracticeEvent =
   | { type: "processing"; attemptIndex: 1 | 2 }
   | { type: "ready"; attemptIndex: 1 | 2 }
   | { type: "feedback-load-failed"; message: string; attemptIndex: 1 | 2 }
+  | { type: "feedback-delivery-failed"; message: string; attemptIndex: 1 | 2 }
+  | { type: "recovery-workflow-adopted"; workflowId: string; attemptIndex: 1 | 2 }
   | { type: "feedback-retry-requested" }
   | { type: "offline"; attemptIndex: 1 | 2 }
   | { type: "retry"; attemptIndex: 1 | 2 }
@@ -97,11 +99,41 @@ export function reducePracticeState(state: PracticeState, event: PracticeEvent):
         error: null,
       };
     case "feedback-load-failed":
+      if (
+        (event.attemptIndex === 1 &&
+          state.stage !== "processing" &&
+          state.stage !== "feedback-recovery") ||
+        (event.attemptIndex === 2 &&
+          state.stage !== "processing2" &&
+          state.stage !== "feedback-recovery")
+      )
+        return state;
       return {
         ...state,
         attemptIndex: event.attemptIndex,
         stage: "feedback-recovery",
         error: event.message,
+      };
+    case "feedback-delivery-failed":
+      if (
+        state.stage !== "feedback" &&
+        state.stage !== "result" &&
+        state.stage !== "feedback-recovery"
+      )
+        return state;
+      return {
+        ...state,
+        attemptIndex: event.attemptIndex,
+        stage: "feedback-recovery",
+        error: event.message,
+      };
+    case "recovery-workflow-adopted":
+      if (state.stage !== "prompt") return state;
+      return {
+        ...state,
+        attemptIndex: event.attemptIndex,
+        stage: "feedback-recovery",
+        error: null,
       };
     case "feedback-retry-requested":
       return state.stage === "feedback-recovery" ? { ...state, error: null } : state;

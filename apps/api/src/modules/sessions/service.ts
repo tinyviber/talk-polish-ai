@@ -16,6 +16,8 @@ import {
   type AttemptRow,
   type AudioRow,
 } from "./repository";
+import { attemptRepository } from "../attempts/repository";
+import { isAttemptProcessingStale } from "../attempts/processing-recovery";
 
 export async function createPracticeSession(
   learnerId: string,
@@ -82,9 +84,18 @@ export async function listAttempts(sessionId: string): Promise<Attempt[]> {
 }
 
 export async function getAttempt(id: string, learnerId?: string): Promise<Attempt> {
-  const row = await sessionRepository.findAttempt(id);
+  let row = await sessionRepository.findAttempt(id);
   if (!row) throw ApiError.notFound("Attempt");
   if (learnerId && row.attempt.learnerId !== learnerId) throw ApiError.notFound("Attempt");
+  if (row.attempt.status === "processing" && isAttemptProcessingStale(row.attempt.createdAt)) {
+    // A client may only have a GET left after a lost result acknowledgement.
+    // Reclaim stale processing atomically here so polling cannot strand a row
+    // that was actually rolled back before the result transaction.
+    await attemptRepository.markFailedIfProcessing(id);
+    row = await sessionRepository.findAttempt(id);
+    if (!row) throw ApiError.notFound("Attempt");
+    if (learnerId && row.attempt.learnerId !== learnerId) throw ApiError.notFound("Attempt");
+  }
   return composeAttempt(row.attempt, row.result, row.audio);
 }
 
@@ -97,7 +108,31 @@ export function composeAttempt(
   if (result?.feedback !== undefined) {
     const parsed = feedbackSchema.safeParse(result.feedback);
     if (!parsed.success) throw ApiError.internal("Stored attempt feedback is invalid.");
-    feedback = parsed.data;
+    feedback = {
+      ...parsed.data,
+      ...(parsed.data.pronunciationStatus
+        ? {}
+        : {
+            pronunciationStatus: "unavailable" as const,
+            pronunciationSource: "unavailable" as const,
+          }),
+      ...(parsed.data.speechMetricsStatus
+        ? {}
+        : {
+            speechMetricsStatus: "unavailable" as const,
+            speechMetricsSource: "unavailable" as const,
+          }),
+      ...(parsed.data.sources
+        ? {}
+        : {
+            sources: {
+              overall: "unavailable" as const,
+              text: "unavailable" as const,
+              speechMetrics: "unavailable" as const,
+              pronunciation: "unavailable" as const,
+            },
+          }),
+    };
   }
   let transcription;
   if (result?.transcription !== null && result?.transcription !== undefined) {

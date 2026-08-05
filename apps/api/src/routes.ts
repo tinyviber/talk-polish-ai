@@ -15,8 +15,13 @@ import { promptRoutes } from "./modules/prompts/routes";
 import { sessionRoutes } from "./modules/sessions/routes";
 import { providerRoutes } from "./modules/providers/routes";
 import type { Env } from "./env";
+import { buildRuntime, type Runtime } from "./runtime";
 
-export async function registerRoutes(app: FastifyInstance, config: Env) {
+export async function registerRoutes(
+  app: FastifyInstance,
+  config: Env,
+  runtime: Runtime = buildRuntime(config),
+) {
   const health = async (request: { id: string }) => ({
     status: "ok" as const,
     uptimeSec: Math.round(process.uptime() * 10) / 10,
@@ -73,8 +78,8 @@ export async function registerRoutes(app: FastifyInstance, config: Env) {
   await app.register(learnerRoutes);
   await app.register(promptRoutes);
   await app.register(sessionRoutes);
-  await app.register(attemptRoutes);
+  await app.register(attemptRoutes, { createAttempt: runtime.attemptApplication.createAttempt });
   await app.register(expressionRoutes);
   await app.register(progressRoutes);
-  await app.register(providerRoutes, { config });
+  await app.register(providerRoutes, { config, providerSet: runtime.providers });
 }

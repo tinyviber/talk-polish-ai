@@ -8,13 +8,18 @@ import {
   type CreateAttemptFields,
 } from "@kotoba/contracts";
 import { ApiError } from "../../http/errors";
-import { providers } from "../../providers";
+import { providers, type Providers } from "../../providers";
+import { computeSpeechMetrics } from "../../capabilities/speech-metrics";
+import type { Transcript } from "../../capabilities/speech-to-text";
 import { StorageError } from "../../providers/storage";
 import { getAttempt } from "../sessions/service";
 import { requirePrompt } from "../prompts/service";
 import { enforceProviderRateLimit } from "../providers/rate-limit";
 import { removeOrQueueStorage } from "../../db/storage-cleanup";
 import { attemptRepository } from "./repository";
+import { ATTEMPT_PROCESSING_STALE_MS, isAttemptProcessingStale } from "./processing-recovery";
+
+export { ATTEMPT_PROCESSING_STALE_MS, isAttemptProcessingStale } from "./processing-recovery";
 
 export type UploadedAudio = {
   buffer: Buffer;
@@ -38,7 +43,6 @@ const EXTENSIONS: Record<string, string> = {
   "audio/m4a": "m4a",
 };
 
-export const ATTEMPT_PROCESSING_STALE_MS = 10 * 60 * 1000;
 const STALE_PROCESSING_RETRY_MESSAGE =
   "A previous processing attempt expired before completion. Please retry the upload.";
 
@@ -55,10 +59,6 @@ export function assertSupportedAudio(audio: UploadedAudio, maxBytes = MAX_AUDIO_
     throw ApiError.tooLarge(`Recording is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`);
   }
   return mime;
-}
-
-export function isAttemptProcessingStale(createdAt: Date, now = Date.now()) {
-  return now - createdAt.getTime() >= ATTEMPT_PROCESSING_STALE_MS;
 }
 
 async function recoverStaleProcessingAttempt(
@@ -86,12 +86,13 @@ async function recoverStaleProcessingAttempt(
  * and require an explicit retry so a fresh upload never starts provider work
  * in the same request that decided the old worker was gone.
  */
-export async function createAttempt(
+async function createAttemptWithProviders(
   sessionId: string,
   learnerId: string,
   fields: CreateAttemptFields,
   audio: UploadedAudio | null,
   clientIp?: string,
+  providerSet?: Providers,
 ): Promise<Attempt> {
   const session = await attemptRepository.findSession(sessionId);
   if (!session) throw ApiError.notFound("Practice session");
@@ -135,7 +136,8 @@ export async function createAttempt(
     storage,
     transcription: transcriptionProvider,
     assessment: assessmentProvider,
-  } = providers();
+    speechToText,
+  } = providerSet ?? providers();
   enforceProviderRateLimit(learnerId, "attempt", clientIp);
 
   let audioId: string | null = null;
@@ -156,6 +158,7 @@ export async function createAttempt(
     }
   }
 
+  let commitState: "known-uncommitted" | "known-committed" | "commit-unknown" = "known-uncommitted";
   try {
     const inserted = await attemptRepository.insertProcessing({
       attemptId,
@@ -164,7 +167,7 @@ export async function createAttempt(
       attemptIndex,
       clientAttemptId: clientAttemptId ?? null,
       durationSec: fields.durationSec,
-      mocked: false,
+      mocked: !speechToText && transcriptionProvider.name === "mock-asr",
       storageKey,
       audio: audio ? { buffer: audio.buffer, mimeType: audio.mimeType } : null,
     });
@@ -196,19 +199,35 @@ export async function createAttempt(
     const audioRef = audio
       ? { storageKey: storageKey!, mimeType: audio.mimeType, bytes: audio.buffer.byteLength }
       : null;
-    const transcript = await transcriptionProvider.transcribe({
-      lang: prompt.lang,
-      promptId: prompt.id,
-      attemptIndex,
-      durationSec: fields.durationSec,
-      audio: audioRef,
-    });
+    const transcript =
+      speechToText && storageKey
+        ? await transcribeWithPureSpeechToText(
+            speechToText,
+            storage,
+            storageKey,
+            audio!.mimeType,
+            prompt.lang,
+          )
+        : await transcriptionProvider.transcribe({
+            lang: prompt.lang,
+            promptId: prompt.id,
+            attemptIndex,
+            durationSec: fields.durationSec,
+            audio: audioRef,
+          });
     const assessed = await assessmentProvider.assess({
       transcript: transcript.text,
       prompt,
       lang: prompt.lang,
       attemptIndex,
       durationSec: fields.durationSec,
+      metrics: computeSpeechMetrics({
+        text: transcript.text,
+        locale: prompt.lang === "ja" ? "ja-JP" : "en-US",
+        durationSec: fields.durationSec,
+        segments: transcript.transcription?.segments,
+        words: transcript.transcription?.wordTimestamps,
+      }),
     });
     let feedback;
     try {
@@ -228,6 +247,7 @@ export async function createAttempt(
     if (transcription && !transcription.success) {
       throw ApiError.processingUnavailable("Speech transcription returned invalid metadata.");
     }
+    commitState = "commit-unknown";
     await attemptRepository.persistResult({
       attemptId,
       learnerId,
@@ -241,6 +261,23 @@ export async function createAttempt(
       feedback,
     });
   } catch (error) {
+    if (commitState === "commit-unknown") {
+      // The result transaction may have committed even when its acknowledgement
+      // was lost. Never delete the attempt/audio until that outcome is known.
+      try {
+        const committed = await getAttempt(attemptId, learnerId);
+        if (committed.status === "ready") {
+          commitState = "known-committed";
+          return committed;
+        }
+      } catch {
+        // Commit state is unknown. Preserve both rows and storage; a retry with
+        // the same clientAttemptId will read the existing result if committed.
+      }
+      throw ApiError.processingUnavailable(
+        "Attempt processing may have completed. Retry the same recording to recover its result.",
+      );
+    }
     try {
       await attemptRepository.removeAttempt(attemptId, audioId);
     } catch (cleanupError) {
@@ -277,4 +314,63 @@ export async function createAttempt(
   }
 
   return getAttempt(attemptId, learnerId);
+}
+
+async function transcribeWithPureSpeechToText(
+  speechToText: NonNullable<Providers["speechToText"]>,
+  storage: Providers["storage"],
+  storageKey: string,
+  mimeType: string,
+  lang: "en" | "ja",
+) {
+  const body = await storage.get(storageKey);
+  if (!body) throw ApiError.processingUnavailable("Stored recording is unavailable.");
+  const result = await speechToText.transcribe({
+    audio: body,
+    mimeType,
+    locale: lang === "ja" ? "ja-JP" : "en-US",
+    granularity: "word",
+  });
+  return mapSpeechToTextResult(result);
+}
+
+function mapSpeechToTextResult(result: Transcript) {
+  return {
+    text: result.text,
+    transcription:
+      result.segments || result.words || result.confidence !== undefined
+        ? {
+            ...(result.segments ? { segments: result.segments } : {}),
+            ...(result.words ? { wordTimestamps: result.words } : {}),
+            ...(result.confidence !== undefined ? { confidence: result.confidence } : {}),
+          }
+        : undefined,
+    mocked: false,
+    provider: result.provider,
+  };
+}
+
+export function createAttemptApplication(providerSet: Providers) {
+  return {
+    createAttempt(
+      sessionId: string,
+      learnerId: string,
+      fields: CreateAttemptFields,
+      audio: UploadedAudio | null,
+      clientIp?: string,
+    ) {
+      return createAttemptWithProviders(sessionId, learnerId, fields, audio, clientIp, providerSet);
+    },
+  };
+}
+
+/** Compatibility entry point for callers that have not moved to the composition root. */
+export function createAttempt(
+  sessionId: string,
+  learnerId: string,
+  fields: CreateAttemptFields,
+  audio: UploadedAudio | null,
+  clientIp?: string,
+) {
+  return createAttemptWithProviders(sessionId, learnerId, fields, audio, clientIp);
 }

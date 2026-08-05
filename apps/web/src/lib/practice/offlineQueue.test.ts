@@ -3,14 +3,27 @@ import {
   cleanupRecordingQueue,
   canSyncAttempt,
   isQueueSyncCandidate,
+  markFeedbackDelivered,
+  migrateRecordingQueueRecord,
   orderRecordingQueue,
   recoverQueueStatus,
   subscribeRecordingQueue,
 } from "./offlineQueue";
+import { installFakeIndexedDb } from "./test/fakeIndexedDb";
+import {
+  LEGACY_UNKNOWN_RETENTION_MS,
+  shouldRetainForFeedback,
+} from "./recording-outbox/retention-policy";
 
 describe("offline recording queue boundaries", () => {
   test("is safe when IndexedDB is unavailable (SSR/private browser fallback)", async () => {
     await expect(cleanupRecordingQueue()).resolves.toBeUndefined();
+  });
+
+  test("does not report feedback delivery success without IndexedDB", async () => {
+    await expect(markFeedbackDelivered("attempt-without-idb")).rejects.toThrow(
+      "feedback delivery was not saved",
+    );
   });
 
   test("unsubscribe does not retain queue listeners", () => {
@@ -20,6 +33,27 @@ describe("offline recording queue boundaries", () => {
     });
     unsubscribe();
     expect(calls).toBe(0);
+  });
+
+  test("closes the cross-tab channel when the last subscriber leaves", () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    const close = vi.fn();
+    class FakeBroadcastChannel {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      postMessage() {}
+      close = close;
+    }
+    vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel);
+
+    try {
+      const unsubscribe = subscribeRecordingQueue(() => {});
+      unsubscribe();
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      if (originalBroadcastChannel === undefined)
+        delete (globalThis as typeof globalThis & { BroadcastChannel?: unknown }).BroadcastChannel;
+      else vi.stubGlobal("BroadcastChannel", originalBroadcastChannel);
+    }
   });
 
   test("never leaves an interrupted upload stranded", () => {
@@ -60,7 +94,11 @@ describe("offline recording queue boundaries", () => {
       "b",
     ]);
     expect(canSyncAttempt(second, [first, second])).toBe(false);
-    expect(canSyncAttempt(second, [{ ...first, syncStatus: "ready" }])).toBe(true);
+    expect(
+      canSyncAttempt(second, [
+        { ...first, syncStatus: "ready", feedbackState: "delivered" as const },
+      ]),
+    ).toBe(true);
     expect(
       canSyncAttempt({ ...second, prerequisiteSatisfied: true }, [
         { ...second, prerequisiteSatisfied: true },
@@ -69,10 +107,151 @@ describe("offline recording queue boundaries", () => {
     expect(
       canSyncAttempt(
         { ...second, learnerId: "device:learner" },
-        [{ ...first, learnerId: "lnr_old", syncStatus: "ready" }],
+        [
+          {
+            ...first,
+            learnerId: "lnr_old",
+            syncStatus: "ready",
+            feedbackState: "delivered" as const,
+          },
+        ],
         ["device:learner", "lnr_old"],
       ),
     ).toBe(true);
+  });
+
+  test("does not invent delivery for an explicitly pending v4 feedback row", () => {
+    const base = {
+      learnerId: "learner",
+      clientAttemptId: "attempt",
+      sessionId: "session",
+      clientSessionId: "session",
+      promptId: "prompt",
+      lang: "en" as const,
+      attemptIndex: 1 as const,
+      duration: 1,
+      mimeType: "audio/webm",
+      syncStatus: "ready" as const,
+      createdAt: 1,
+    };
+    expect(migrateRecordingQueueRecord(base, 4)).toMatchObject({
+      feedbackState: "delivered",
+      workflowState: "consumed",
+    });
+    expect(migrateRecordingQueueRecord({ ...base, feedbackState: "pending" }, 4)).toMatchObject({
+      feedbackState: "pending",
+      workflowState: "legacy-unknown",
+    });
+    expect(
+      migrateRecordingQueueRecord(
+        {
+          ...base,
+          feedbackState: "pending",
+          workflowState: "awaiting-feedback",
+        },
+        5,
+      ),
+    ).toMatchObject({
+      feedbackState: "pending",
+      workflowState: "awaiting-feedback",
+    });
+  });
+
+  test("does not retain legacy-unknown evidence forever", () => {
+    const item = {
+      learnerId: "learner",
+      clientAttemptId: "attempt",
+      sessionId: "session",
+      clientSessionId: "session",
+      promptId: "prompt",
+      lang: "en" as const,
+      attemptIndex: 1 as const,
+      duration: 1,
+      mimeType: "audio/webm",
+      syncStatus: "ready" as const,
+      attemptId: "server-attempt",
+      feedbackState: "pending" as const,
+      workflowState: "legacy-unknown" as const,
+      createdAt: 1,
+      blob: new Blob([], { type: "audio/webm" }),
+    };
+    expect(shouldRetainForFeedback(item, item.createdAt + LEGACY_UNKNOWN_RETENTION_MS)).toBe(true);
+    expect(shouldRetainForFeedback(item, item.createdAt + LEGACY_UNKNOWN_RETENTION_MS + 1)).toBe(
+      false,
+    );
+  });
+
+  test("keeps a root transport subscriber able to notify another tab", async () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    const channels = new Map<string, Set<FakeBroadcastChannel>>();
+    class FakeBroadcastChannel {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      private readonly peers: Set<FakeBroadcastChannel>;
+
+      constructor(private readonly name: string) {
+        this.peers = channels.get(name) ?? new Set();
+        this.peers.add(this);
+        channels.set(name, this.peers);
+      }
+
+      postMessage(data: unknown) {
+        for (const peer of this.peers) {
+          if (peer !== this) queueMicrotask(() => peer.onmessage?.({ data } as MessageEvent));
+        }
+      }
+
+      close() {
+        this.peers.delete(this);
+      }
+    }
+
+    const restoreIndexedDb = installFakeIndexedDb();
+    vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel);
+    vi.resetModules();
+    const tabA = await import("./offlineQueue");
+    vi.resetModules();
+    const tabB = await import("./offlineQueue");
+
+    try {
+      await tabA.__resetRecordingQueueForTests();
+      let tabBChanges = 0;
+      const unsubscribeRootTransport = tabA.subscribeRecordingQueue(() => {});
+      const unsubscribePractice = tabB.subscribeRecordingQueue(() => {
+        tabBChanges += 1;
+      });
+      const recording = {
+        learnerId: "device:learner-1",
+        clientAttemptId: "cross-tab-ready",
+        sessionId: null,
+        clientSessionId: "session-1",
+        promptId: "prompt-1",
+        lang: "en" as const,
+        attemptIndex: 1 as const,
+        duration: 2,
+        mimeType: "audio/webm",
+        blob: new Blob(["audio"], { type: "audio/webm" }),
+        createdAt: 1,
+      };
+      await tabA.enqueueRecording(recording);
+      await tabA.markRecordingReady(recording.clientAttemptId, {
+        attemptId: "server-cross-tab-ready",
+        sessionId: "session-1",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(tabBChanges).toBeGreaterThan(0);
+      unsubscribePractice();
+      unsubscribeRootTransport();
+    } finally {
+      await tabA.__resetRecordingQueueForTests();
+      await tabB.__resetRecordingQueueForTests();
+      restoreIndexedDb();
+      if (originalBroadcastChannel === undefined) {
+        delete (globalThis as typeof globalThis & { BroadcastChannel?: unknown }).BroadcastChannel;
+      } else {
+        vi.stubGlobal("BroadcastChannel", originalBroadcastChannel);
+      }
+    }
   });
 
   test("waits for transaction commit so an abort after request success never looks durable", async () => {

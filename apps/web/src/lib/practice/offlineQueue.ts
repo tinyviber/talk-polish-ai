@@ -1,85 +1,56 @@
-import type { Lang } from "./types";
+import type {
+  DurableWorkflowState,
+  FeedbackState,
+  QueueStatus,
+  RecordingQueueItem,
+} from "./recording-outbox/model";
+import {
+  isFeedbackOutstanding,
+  isQueueSyncCandidate,
+  recoverQueueStatus,
+} from "./recording-outbox/transition-policy";
+import {
+  PROCESSING_POLL_DELAYS_MS,
+  TRANSIENT_RETRY_DELAYS_MS,
+  backoffDelay,
+} from "./recording-outbox/retry-policy";
+import { shouldRetainForFeedback } from "./recording-outbox/retention-policy";
 
-export type QueueStatus =
-  "local-draft" | "queued" | "uploading" | "processing" | "ready" | "failed";
-export type RecordingQueueItem = {
-  /** Learner namespace; prevents a later token/device from reading old blobs. */
-  learnerId: string;
-  clientAttemptId: string;
-  /** Server session id once known; null while the session was created offline. */
-  sessionId: string | null;
-  /** Client-generated session idempotency key, used to create the session on reconnect. */
-  clientSessionId: string;
-  promptId: string;
-  lang: Lang;
-  attemptIndex: 1 | 2;
-  duration: number;
-  mimeType: string;
-  blob: Blob;
-  createdAt: number;
-  syncStatus: QueueStatus;
-  attemptId?: string | undefined;
-  lastError?: string | undefined;
-  /** Bytes are dropped once the attempt is safely stored server-side. */
-  blobDiscarded?: boolean | undefined;
-  /** Durable wake-up time for future processing polls and transient retries. */
-  nextPollAt?: number | undefined;
-  /** Exponential backoff step while the server is still processing. */
-  processingPollIndex?: number | undefined;
-  /** Exponential backoff step after a transient upload/read failure. */
-  transientRetryIndex?: number | undefined;
-  /** Attempt 1 was confirmed ready before this attempt was queued offline. */
-  prerequisiteSatisfied?: boolean | undefined;
-  /**
-   * Durable feedback-delivery state for a server-side ready attempt.
-   * `pending` — the server has the attempt but this device has not rendered
-   * its feedback yet; `error` — a feedback read failed and must be retried;
-   * `delivered` — feedback reached the UI and the slot is finished.
-   */
-  feedbackState?: FeedbackState | undefined;
-  feedbackLastError?: string | undefined;
-  feedbackUpdatedAt?: number | undefined;
-};
-
-export type FeedbackState = "pending" | "delivered" | "error";
-
-/** A ready attempt whose feedback has not yet been shown on any tab. */
-export function isFeedbackOutstanding(item: RecordingQueueItem) {
-  return (
-    item.syncStatus === "ready" &&
-    typeof item.attemptId === "string" &&
-    item.attemptId.length > 0 &&
-    (item.feedbackState ?? "pending") !== "delivered"
-  );
-}
-
-
-export function isQueueSyncCandidate(status: QueueStatus) {
-  return status === "queued" || status === "uploading" || status === "processing";
-}
-
-export function recoverQueueStatus(status: QueueStatus): QueueStatus {
-  return status === "uploading" ? "queued" : status;
-}
+export type {
+  DurableWorkflowState,
+  FeedbackState,
+  QueueStatus,
+  RecordingQueueItem,
+} from "./recording-outbox/model";
+export {
+  isFeedbackOutstanding,
+  isQueueSyncCandidate,
+  recoverQueueStatus,
+} from "./recording-outbox/transition-policy";
 
 const DB_NAME = "kotoba-loop-offline";
 const STORE = "recordings";
 const LEASE_STORE = "syncLeases";
-const DB_VERSION = 4;
+const DB_VERSION = 6;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
 const LEASE_MS = 30_000;
-const PROCESSING_POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
-const TRANSIENT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 const LEASE_MISS_RETRY_DELAY_MS = 1_500;
 const LEASE_MISS_JITTER_MS = 750;
+const QUEUE_CHANGE_STORAGE_KEY = "kotoba.queue.change.v1";
 const listeners = new Set<() => void>();
 let dbPromise: Promise<IDBDatabase> | null = null;
 let queueChannel: BroadcastChannel | null = null;
 let syncOwnerId: string | null = null;
 let syncTrailingPassRequested = false;
+let storageListenerInstalled = false;
 
 function ensureQueueChannel() {
+  if (listeners.size === 0) return null;
+  if (typeof window !== "undefined" && !storageListenerInstalled) {
+    window.addEventListener("storage", onStorageChange);
+    storageListenerInstalled = true;
+  }
   if (typeof BroadcastChannel === "undefined") return null;
   queueChannel ??= new BroadcastChannel("kotoba-loop-recording-queue");
   queueChannel.onmessage ??= () => {
@@ -91,8 +62,33 @@ function ensureQueueChannel() {
   return queueChannel;
 }
 
+function closeQueueChannelIfUnused() {
+  if (listeners.size > 0) return;
+  queueChannel?.close();
+  queueChannel = null;
+  if (typeof window !== "undefined" && storageListenerInstalled) {
+    window.removeEventListener("storage", onStorageChange);
+  }
+  storageListenerInstalled = false;
+}
+
+function onStorageChange(event: StorageEvent) {
+  if (event.key !== QUEUE_CHANGE_STORAGE_KEY) return;
+  listeners.forEach((listener) => listener());
+  window.dispatchEvent(new CustomEvent("kotoba:queue-change", { detail: { internal: false } }));
+}
+
 function broadcastChange() {
-  ensureQueueChannel()?.postMessage({ type: "queue-change" });
+  if (listeners.size === 0) return;
+  const channel = ensureQueueChannel();
+  channel?.postMessage({ type: "queue-change" });
+  try {
+    if (!channel && typeof window !== "undefined") {
+      window.localStorage.setItem(QUEUE_CHANGE_STORAGE_KEY, String(Date.now()));
+    }
+  } catch {
+    // BroadcastChannel remains primary; storage may be disabled by policy.
+  }
 }
 
 function notify(internal = false) {
@@ -115,6 +111,7 @@ export function canSyncAttempt(
   learnerIds?: string | string[],
 ) {
   if (item.attemptIndex === 1) return true;
+  // Durable evidence captured only when attempt one was already consumed.
   if (item.prerequisiteSatisfied) return true;
   const allowedLearnerIds = normalizeLearnerIds(learnerIds ?? item.learnerId);
   return items.some(
@@ -122,7 +119,8 @@ export function canSyncAttempt(
       learnerMatches(candidate, allowedLearnerIds) &&
       candidate.clientSessionId === item.clientSessionId &&
       candidate.attemptIndex === 1 &&
-      candidate.syncStatus === "ready",
+      candidate.syncStatus === "ready" &&
+      (candidate.feedbackState === "delivered" || candidate.workflowState === "consumed"),
   );
 }
 
@@ -131,7 +129,7 @@ function normalizeLearnerIds(learnerIds?: string | string[]) {
 }
 
 function getBackoffDelay(delays: readonly number[], index?: number) {
-  return delays[Math.min(index ?? 0, delays.length - 1)]!;
+  return backoffDelay(delays, index);
 }
 
 function clearDeferredSyncState(item: RecordingQueueItem): RecordingQueueItem {
@@ -145,6 +143,69 @@ function clearDeferredSyncState(item: RecordingQueueItem): RecordingQueueItem {
 
 function sessionDependencyKey(clientSessionId: string) {
   return clientSessionId;
+}
+
+/**
+ * Normalize rows from older queue schemas without turning historical uploads
+ * into new recovery work. Only rows that explicitly carried the v5 feedback
+ * workflow are eligible for automatic feedback recovery.
+ */
+export function migrateRecordingQueueRecord(
+  value: Record<string, unknown>,
+  oldVersion: number,
+): Record<string, unknown> {
+  const legacy = !value["learnerId"];
+  const ready = value["syncStatus"] === "ready";
+  const feedbackState = value["feedbackState"];
+  const isPreFeedbackWorkflowSchema = oldVersion < 5;
+  const explicitFeedbackPending =
+    ready && (feedbackState === "pending" || feedbackState === "error");
+  const explicitAwaitingFeedback =
+    ready &&
+    !isPreFeedbackWorkflowSchema &&
+    value["workflowState"] === "awaiting-feedback" &&
+    (feedbackState === "pending" || feedbackState === "error");
+  const legacyUnknownFeedback = explicitFeedbackPending && !explicitAwaitingFeedback;
+  const clientSessionId =
+    typeof value["clientSessionId"] === "string" && value["clientSessionId"]
+      ? value["clientSessionId"]
+      : typeof value["sessionId"] === "string" && value["sessionId"]
+        ? `legacy-session:${value["sessionId"]}`
+        : `legacy-attempt:${String(value["clientAttemptId"] ?? "unknown")}`;
+  const workflowState = legacy
+    ? "abandoned"
+    : legacyUnknownFeedback
+      ? "legacy-unknown"
+      : explicitAwaitingFeedback
+        ? "awaiting-feedback"
+        : value["workflowState"] === "consumed"
+          ? "consumed"
+          : value["workflowState"] === "abandoned"
+            ? "abandoned"
+            : ready
+              ? "consumed"
+              : "awaiting-upload";
+
+  return {
+    ...value,
+    clientSessionId,
+    ...(legacy
+      ? {
+          learnerId: "legacy",
+          syncStatus: "failed",
+          lastError: "This recording needs to be re-recorded after the app update.",
+        }
+      : {}),
+    ...(ready && !explicitFeedbackPending ? { feedbackState: "delivered" } : {}),
+    workflowState,
+    workflowUpdatedAt:
+      typeof value["workflowUpdatedAt"] === "number"
+        ? value["workflowUpdatedAt"]
+        : typeof value["feedbackUpdatedAt"] === "number"
+          ? value["feedbackUpdatedAt"]
+          : value["createdAt"],
+    revision: typeof value["revision"] === "number" ? value["revision"] : 0,
+  };
 }
 
 function scheduleProcessingPoll(item: RecordingQueueItem, now = Date.now()): RecordingQueueItem {
@@ -202,7 +263,8 @@ function openDb(): Promise<IDBDatabase> {
 
   const promise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
+      const oldVersion = (event as IDBVersionChangeEvent).oldVersion;
       const existed = request.result.objectStoreNames.contains(STORE);
       if (!existed) request.result.createObjectStore(STORE, { keyPath: "clientAttemptId" });
       if (!request.result.objectStoreNames.contains(LEASE_STORE)) {
@@ -219,22 +281,9 @@ function openDb(): Promise<IDBDatabase> {
         const cursor = cursorRequest.result;
         if (!cursor) return;
         const value = cursor.value as Record<string, unknown>;
-        if (!value["learnerId"]) {
-          cursor.update({
-            ...value,
-            learnerId: "legacy",
-            syncStatus: "failed",
-            lastError: "This recording needs to be re-recorded after the app update.",
-          });
-        } else if (value["syncStatus"] === "ready" && value["feedbackState"] === undefined) {
-          // v3 rows predate durable feedback tracking. A ready row from that
-          // era may or may not have been shown; treat it as outstanding so the
-          // learner can still recover the feedback instead of losing it.
-          cursor.update({ ...value, feedbackState: "pending" });
-        }
+        cursor.update(migrateRecordingQueueRecord(value, oldVersion));
         cursor.continue();
       };
-
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -290,22 +339,27 @@ function waitForTransactionWrite<T>(request: IDBRequest<T>, tx: IDBTransaction) 
   });
 }
 
-async function put(item: RecordingQueueItem, internal = false) {
+async function put(item: RecordingQueueItem, internal = false): Promise<RecordingQueueItem | null> {
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
   const store = tx.objectStore(STORE);
   let wrote = false;
+  let persisted: RecordingQueueItem | null = null;
   const request = store.get(item.clientAttemptId);
   request.onsuccess = () => {
     const current = request.result as RecordingQueueItem | undefined;
     // A late worker must never move a completed attempt back to an
     // in-flight/error state after another tab has finished it.
     if (current?.syncStatus === "ready") return;
-    store.put(item);
+    if (current?.workflowState === "abandoned" || current?.workflowState === "consumed") return;
+    if (item.revision !== undefined && item.revision < (current?.revision ?? 0)) return;
+    persisted = { ...item, revision: (current?.revision ?? 0) + 1 };
+    store.put(persisted);
     wrote = true;
   };
   await waitForTransactionWrite(request, tx);
   if (wrote) notify(internal);
+  return persisted;
 }
 
 async function remove(clientAttemptId: string, internal = false) {
@@ -334,7 +388,7 @@ export async function cleanupRecordingQueue(
     (item) =>
       now - item.createdAt > TTL_MS &&
       (item.syncStatus === "ready" || item.syncStatus === "failed") &&
-      !isFeedbackOutstanding(item) &&
+      !shouldRetainForFeedback(item, now) &&
       !(
         item.attemptIndex === 1 &&
         item.syncStatus === "ready" &&
@@ -346,9 +400,14 @@ export async function cleanupRecordingQueue(
 }
 
 /** Recover a tab that was suspended after marking an item uploading. */
-export async function recoverInterruptedUploads(internal = false) {
+export async function recoverInterruptedUploads(internal = false, learnerIds?: string | string[]) {
   const items = await allItems();
-  for (const item of items.filter((candidate) => candidate.syncStatus === "uploading")) {
+  const allowedLearnerIds = normalizeLearnerIds(learnerIds);
+  for (const item of items.filter(
+    (candidate) =>
+      candidate.syncStatus === "uploading" &&
+      (allowedLearnerIds.length === 0 || learnerMatches(candidate, allowedLearnerIds)),
+  )) {
     await put(
       {
         ...clearDeferredSyncState(item),
@@ -412,11 +471,14 @@ export async function enqueueRecording(
           learnerMatches(item, allowedLearnerIds) &&
           item.clientSessionId === input.clientSessionId &&
           item.attemptIndex === 1 &&
-          item.syncStatus === "ready",
+          item.syncStatus === "ready" &&
+          (item.feedbackState === "delivered" || item.workflowState === "consumed"),
       ));
   await put({
     ...input,
     ...(input.attemptIndex === 2 ? { prerequisiteSatisfied } : {}),
+    workflowState: "awaiting-upload",
+    workflowUpdatedAt: Date.now(),
     syncStatus: "queued",
   });
   return input.clientAttemptId;
@@ -440,6 +502,8 @@ export async function markRecordingReady(
     blobDiscarded: true,
     feedbackState: item.feedbackState === "delivered" ? "delivered" : "pending",
     feedbackUpdatedAt: Date.now(),
+    workflowState: item.workflowState === "abandoned" ? "abandoned" : "awaiting-feedback",
+    workflowUpdatedAt: Date.now(),
   });
 }
 
@@ -458,21 +522,123 @@ async function updateFeedbackState(
   feedbackState: FeedbackState,
   feedbackLastError?: string,
 ) {
-  if (typeof indexedDB === "undefined") return;
-  const item = (await allItems()).find(
-    (candidate) => candidate.clientAttemptId === clientAttemptId,
-  );
-  if (!item || item.feedbackState === "delivered") return;
-  // `put` refuses to overwrite ready rows, so write feedback state directly.
+  if (typeof indexedDB === "undefined") {
+    throw new Error("IndexedDB unavailable; feedback delivery was not saved.");
+  }
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
-  const request = tx
-    .objectStore(STORE)
-    .put({ ...item, feedbackState, feedbackLastError, feedbackUpdatedAt: Date.now() });
+  const store = tx.objectStore(STORE);
+  const request = store.get(clientAttemptId);
+  request.onsuccess = () => {
+    const item = request.result as RecordingQueueItem | undefined;
+    if (!item || item.feedbackState === "delivered" || item.workflowState === "abandoned") return;
+    // Read and write happen in one IDB transaction. A late error cannot regress
+    // a feedback row already consumed by another tab.
+    store.put({
+      ...item,
+      feedbackState,
+      feedbackLastError,
+      feedbackUpdatedAt: Date.now(),
+      workflowState: feedbackState === "delivered" ? "consumed" : "awaiting-feedback",
+      workflowUpdatedAt: Date.now(),
+      revision: (item.revision ?? 0) + 1,
+    });
+  };
   await waitForTransactionWrite(request, tx);
   notify();
 }
 
+export async function listDurablePracticeWorkflows(learnerIds?: string | string[]) {
+  return (await listRecordingQueue(learnerIds))
+    .filter(
+      (item) =>
+        item.workflowState === "awaiting-feedback" &&
+        item.syncStatus === "ready" &&
+        isFeedbackOutstanding(item),
+    )
+    .sort(
+      (a, b) =>
+        (b.workflowUpdatedAt ?? b.createdAt) - (a.workflowUpdatedAt ?? a.createdAt) ||
+        a.clientAttemptId.localeCompare(b.clientAttemptId),
+    );
+}
+
+/** In-flight or permanently failed rows retain their original recording slot. */
+export async function listPendingPracticeWorkflows(learnerIds?: string | string[]) {
+  return (await listRecordingQueue(learnerIds))
+    .filter(
+      (item) =>
+        (item.syncStatus === "queued" ||
+          item.syncStatus === "uploading" ||
+          item.syncStatus === "processing" ||
+          item.syncStatus === "failed") &&
+        item.workflowState !== "abandoned" &&
+        item.workflowState !== "consumed",
+    )
+    .sort(
+      (a, b) =>
+        (b.workflowUpdatedAt ?? b.createdAt) - (a.workflowUpdatedAt ?? a.createdAt) ||
+        a.clientAttemptId.localeCompare(b.clientAttemptId),
+    );
+}
+
+/** Historical pending feedback is opt-in, never an automatic page takeover. */
+export async function listLegacyUnknownWorkflows(learnerIds?: string | string[]) {
+  return (await listRecordingQueue(learnerIds)).filter(
+    (item) =>
+      item.workflowState === "legacy-unknown" &&
+      item.syncStatus === "ready" &&
+      typeof item.attemptId === "string" &&
+      item.attemptId.length > 0,
+  );
+}
+
+/** User explicitly chose to inspect one migrated historical row. */
+export async function adoptLegacyWorkflow(clientAttemptId: string) {
+  if (typeof indexedDB === "undefined") return;
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  const store = tx.objectStore(STORE);
+  const request = store.get(clientAttemptId);
+  request.onsuccess = () => {
+    const item = request.result as RecordingQueueItem | undefined;
+    if (!item || item.workflowState !== "legacy-unknown" || item.syncStatus !== "ready") return;
+    store.put({
+      ...item,
+      workflowState: "awaiting-feedback",
+      feedbackState: item.feedbackState === "error" ? "error" : "pending",
+      workflowUpdatedAt: Date.now(),
+      revision: (item.revision ?? 0) + 1,
+    });
+  };
+  await waitForTransactionWrite(request, tx);
+  notify();
+}
+
+/** Explicit user action only. Recovery targets are never cleared implicitly. */
+export async function abandonPracticeWorkflow(clientAttemptId: string) {
+  if (typeof indexedDB === "undefined") return;
+  const db = await openDb();
+  const tx = db.transaction(STORE, "readwrite");
+  const store = tx.objectStore(STORE);
+  const request = store.get(clientAttemptId);
+  request.onsuccess = () => {
+    const item = request.result as RecordingQueueItem | undefined;
+    if (!item || item.workflowState === "consumed") return;
+    store.put({
+      ...item,
+      workflowState: "abandoned",
+      workflowUpdatedAt: Date.now(),
+      revision: (item.revision ?? 0) + 1,
+      feedbackLastError: undefined,
+      ...(item.syncStatus === "ready"
+        ? { blob: new Blob([], { type: item.mimeType }), blobDiscarded: true }
+        : {}),
+    });
+  };
+  await waitForTransactionWrite(request, tx);
+  notify();
+}
 
 export async function markRecordingFailed(clientAttemptId: string, message: string) {
   const item = (await allItems()).find(
@@ -508,6 +674,7 @@ export function subscribeRecordingQueue(listener: () => void) {
   ensureQueueChannel();
   return () => {
     listeners.delete(listener);
+    closeQueueChannelIfUnused();
   };
 }
 
@@ -516,11 +683,17 @@ export async function retryQueuedRecordings(learnerIds?: string | string[]) {
   const items = (await allItems()).filter((item) => learnerMatches(item, learnerIds));
   await Promise.all(
     items
-      .filter((item) => item.syncStatus === "failed")
+      .filter(
+        (item) =>
+          item.syncStatus === "failed" ||
+          item.syncStatus === "queued" ||
+          item.syncStatus === "uploading" ||
+          item.syncStatus === "processing",
+      )
       .map((item) =>
         put({
           ...clearDeferredSyncState(item),
-          syncStatus: "queued",
+          syncStatus: item.syncStatus === "processing" ? "processing" : "queued",
           lastError: undefined,
         }),
       ),
@@ -626,6 +799,9 @@ export async function getNextRecordingQueuePollAt(
   learnerIds?: string | string[],
   now = Date.now(),
 ) {
+  // Maintenance must run even when no upload is scheduled; otherwise a
+  // migrated legacy-unknown row with no pending Blob can live forever.
+  await cleanupRecordingQueue(now, new Set(), true);
   const items = queueSchedulableItems(await allItems(), learnerIds);
   if (items.length === 0) return null;
   return items.reduce<number>(
@@ -656,30 +832,19 @@ export async function syncRecordingQueue(
     )
       return;
     const queueLearnerIds = normalizeLearnerIds(learnerIds);
-    await recoverInterruptedUploads(true);
+    await recoverInterruptedUploads(true, queueLearnerIds);
     await cleanupRecordingQueue(Date.now(), new Set(), true);
     const queueItems = orderRecordingQueue(await allItems());
     const items = queueItems.filter(
       (item) => learnerMatches(item, queueLearnerIds) && isQueueSyncCandidate(item.syncStatus),
     );
-    const readySessionKeys = new Set(
-      queueItems
-        .filter((item) => learnerMatches(item, queueLearnerIds))
-        .filter((item) => item.attemptIndex === 1 && item.syncStatus === "ready")
-        .map((item) => item.clientSessionId),
-    );
     const now = Date.now();
     for (const item of items) {
       if (item.nextPollAt !== undefined && item.nextPollAt > now) continue;
-      if (
-        item.attemptIndex === 2 &&
-        !item.prerequisiteSatisfied &&
-        !readySessionKeys.has(item.clientSessionId) &&
-        !canSyncAttempt(item, queueItems, queueLearnerIds)
-      )
-        continue;
+      if (item.attemptIndex === 2 && !canSyncAttempt(item, queueItems, queueLearnerIds)) continue;
+      let syncing: RecordingQueueItem | null = null;
       try {
-        const syncing =
+        const candidate =
           item.syncStatus === "processing"
             ? item
             : ({
@@ -687,7 +852,8 @@ export async function syncRecordingQueue(
                 syncStatus: "uploading",
                 lastError: undefined,
               } as RecordingQueueItem);
-        if (syncing !== item) await put(syncing, true);
+        syncing = await put(candidate, true);
+        if (!syncing) continue;
         const attempt = await upload(syncing);
         const synced = attempt.status === "ready";
         const nextItem =
@@ -706,18 +872,22 @@ export async function syncRecordingQueue(
                 // Free the device once the server owns the recording; the metadata
                 // row stays so the UI can still report the completed upload.
                 ...(synced
-                  ? { blob: new Blob([], { type: syncing.mimeType }), blobDiscarded: true }
-                  : {}),
+                  ? {
+                      blob: new Blob([], { type: syncing.mimeType }),
+                      blobDiscarded: true,
+                      workflowState: (syncing.workflowState === "abandoned"
+                        ? "abandoned"
+                        : "awaiting-feedback") as DurableWorkflowState,
+                      workflowUpdatedAt: Date.now(),
+                    }
+                  : {
+                      workflowState: (syncing.workflowState === "abandoned"
+                        ? "abandoned"
+                        : "awaiting-upload") as DurableWorkflowState,
+                      workflowUpdatedAt: Date.now(),
+                    }),
               };
-        await put(
-          {
-            ...nextItem,
-          },
-          true,
-        );
-        if (attempt.status === "ready") {
-          if (item.attemptIndex === 1) readySessionKeys.add(item.clientSessionId);
-        }
+        await put({ ...nextItem }, true);
         if (attempt.status === "ready" && typeof window !== "undefined") {
           window.dispatchEvent(
             new CustomEvent("kotoba:queue-ready", {
@@ -736,20 +906,21 @@ export async function syncRecordingQueue(
         const message = error instanceof Error ? error.message : "Upload failed";
         // Network/5xx failures can resume automatically. Permanent 4xx and
         // validation failures stay failed until the user explicitly retries.
+        const current = syncing ?? item;
         await put(
           isTransientUploadError(error)
             ? scheduleTransientRetry(
-                item.syncStatus === "processing"
-                  ? item
+                current.syncStatus === "processing"
+                  ? current
                   : ({
-                      ...clearDeferredSyncState(item),
+                      ...clearDeferredSyncState(current),
                       syncStatus: "uploading",
                       lastError: undefined,
                     } as RecordingQueueItem),
                 message,
               )
             : {
-                ...clearDeferredSyncState(item),
+                ...clearDeferredSyncState(current),
                 syncStatus: "failed",
                 lastError: message,
               },
@@ -813,8 +984,7 @@ export async function syncRecordingQueue(
 
 export async function __resetRecordingQueueForTests() {
   listeners.clear();
-  queueChannel?.close();
-  queueChannel = null;
+  closeQueueChannelIfUnused();
   syncOwnerId = null;
   syncInFlight = null;
   syncTrailingPassRequested = false;

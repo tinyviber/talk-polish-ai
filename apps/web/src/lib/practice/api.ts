@@ -293,7 +293,9 @@ export async function uploadQueuedAttempt(item: {
 }) {
   if (item.syncStatus === "processing" && item.attemptId) {
     const attempt = await getAttempt(item.attemptId);
-    return { attempt, sessionId: attempt.sessionId };
+    // GET performs stale recovery server-side. A recovered failed row is
+    // reclaimable, so replay the original bytes with the same idempotency key.
+    if (attempt.status !== "failed") return { attempt, sessionId: attempt.sessionId };
   }
   // A recording captured while offline may have no server session yet.
   const sessionId = item.sessionId ?? (await createSession(item.promptId, item.clientSessionId)).id;

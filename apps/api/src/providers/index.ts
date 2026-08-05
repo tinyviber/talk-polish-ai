@@ -6,13 +6,20 @@ import { createMockTranscriptionProvider } from "./mock/transcription";
 import { createMockTtsProvider } from "./mock/tts";
 import { createOpenAICompatibleAssessmentProvider } from "./openai-assessment";
 import { createOpenAICompatibleTranscriptionProvider } from "./openai-transcription";
-import { createOpenAICompatibleTtsProvider } from "./openai-tts";
+import { createOpenAICompatibleTextToSpeech } from "./openai-text-to-speech";
+import { createOpenAICompatibleTextModel } from "./openai-text-model";
+import { createOpenAICompatibleSpeechToText } from "./openai-speech-to-text";
+import { createStructuredGenerator } from "../capabilities/structured-generator";
+import { createSpeechSynthesisService } from "../modules/speech-synthesis/service";
 import { localLlmConfig } from "./llm-config";
 import { createRealtimeProvider, type RealtimeProvider } from "./realtime";
 import type { AssessmentProvider } from "./assessment";
 import type { AudioStorageProvider } from "./storage";
 import type { TranscriptionProvider } from "./transcription";
 import type { TextToSpeechProvider } from "./tts";
+import type { TextModel } from "../capabilities/text-model";
+import type { StructuredGenerator } from "../capabilities/structured-generator";
+import type { SpeechToText } from "../capabilities/speech-to-text";
 
 export type Providers = {
   transcription: TranscriptionProvider;
@@ -20,17 +27,17 @@ export type Providers = {
   tts: TextToSpeechProvider;
   storage: AudioStorageProvider;
   realtime: RealtimeProvider;
+  textModel?: TextModel;
+  structuredGenerator?: StructuredGenerator;
+  speechToText?: SpeechToText;
 };
-
-let cached: Providers | undefined;
 
 /**
  * Single place where provider implementations are chosen from configuration.
  * Add new drivers here — nothing else in the codebase constructs a provider.
+ * The composition root owns lifetime; this function never hides a process singleton.
  */
 export function providers(config = env()): Providers {
-  if (cached) return cached;
-
   const storage =
     config.AUDIO_STORAGE_DRIVER === "s3"
       ? createS3AudioStorage({
@@ -71,18 +78,36 @@ export function providers(config = env()): Providers {
     maxAttempts: config.HTTP_MAX_ATTEMPTS,
   };
 
-  cached = {
+  const textModel =
+    config.ASSESSMENT_PROVIDER === "openai-compatible"
+      ? createOpenAICompatibleTextModel(chat)
+      : undefined;
+  const structuredGenerator = textModel ? createStructuredGenerator(textModel) : undefined;
+  const speechToText =
+    config.TRANSCRIPTION_PROVIDER === "openai-compatible"
+      ? createOpenAICompatibleSpeechToText(transcription)
+      : undefined;
+
+  return {
     transcription:
       config.TRANSCRIPTION_PROVIDER === "openai-compatible"
         ? createOpenAICompatibleTranscriptionProvider(transcription, storage)
         : createMockTranscriptionProvider(),
     assessment:
       config.ASSESSMENT_PROVIDER === "openai-compatible"
-        ? createOpenAICompatibleAssessmentProvider(chat)
+        ? createOpenAICompatibleAssessmentProvider(chat, {
+            model: textModel,
+            generator: structuredGenerator,
+          })
         : createMockAssessmentProvider(),
     tts:
       config.TTS_PROVIDER === "openai-compatible"
-        ? createOpenAICompatibleTtsProvider(tts, storage)
+        ? createSpeechSynthesisService({
+            textToSpeech: createOpenAICompatibleTextToSpeech(tts),
+            storage,
+            model: tts.model ?? "openai-compatible",
+            defaultVoice: tts.voice,
+          })
         : createMockTtsProvider(),
     storage,
     realtime: createRealtimeProvider({
@@ -93,12 +118,15 @@ export function providers(config = env()): Providers {
       protocol: config.REALTIME_PROTOCOL,
       timeoutMs: config.REALTIME_TIMEOUT_MS,
     }),
+    textModel,
+    structuredGenerator,
+    speechToText,
   };
-  return cached;
 }
 
+/** @deprecated Kept as source compatibility for older tests; providers are no longer cached. */
 export function resetProvidersForTests() {
-  cached = undefined;
+  // No hidden provider state to reset.
 }
 
 export type {
@@ -106,4 +134,7 @@ export type {
   AudioStorageProvider,
   TranscriptionProvider,
   TextToSpeechProvider,
+  TextModel,
+  StructuredGenerator,
+  SpeechToText,
 };

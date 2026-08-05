@@ -24,7 +24,7 @@ export async function getProgress(learnerId: string): Promise<Progress> {
   const byId = new Map<string, SessionRecord>();
   for (const row of rows) {
     if (row.score === null || row.attemptIndex === null) continue;
-    const date = row.createdAt.toISOString().slice(0, 10);
+    const date = row.day;
     const existing = byId.get(row.sessionId) ?? {
       id: row.sessionId,
       lang: row.lang as Lang,

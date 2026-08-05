@@ -9,6 +9,7 @@ import {
 import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { requireLearnerAuth } from "../../auth";
 import type { Env } from "../../env";
+import type { Providers } from "../../providers";
 import { createProviderApplication } from "./service";
 import { z } from "zod";
 
@@ -16,9 +17,9 @@ const providerDiagnosticsQuerySchema = z.object({ probe: z.enum(["true", "false"
 
 export async function providerRoutes(
   app: FastifyInstance,
-  options: FastifyPluginOptions & { config: Env },
+  options: FastifyPluginOptions & { config: Env; providerSet?: Providers },
 ) {
-  const service = createProviderApplication(options.config);
+  const service = createProviderApplication(options.config, options.providerSet);
 
   app.get(
     "/api/providers/diagnostics",

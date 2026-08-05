@@ -12,6 +12,8 @@ import {
 import { ApiError } from "../../http/errors";
 import { withDb } from "../../http/with-db";
 import { FAILED_ATTEMPT_AUDIO_RETENTION_MS } from "../../db/storage-cleanup";
+import { createProgressProjector } from "../progress/projector";
+import { toAttemptReadyEvent } from "./application/submit-speaking-attempt";
 
 export type StoredAudio = {
   buffer: Buffer;
@@ -196,14 +198,17 @@ export const attemptRepository = {
           overallScore: input.overallScore,
           feedback: input.feedback,
         });
-        await tx.insert(progressEvents).values({
-          id: `prg_${randomUUID()}`,
-          learnerId: input.learnerId,
-          sessionId: input.sessionId,
-          attemptIndex: input.attemptIndex,
-          score: input.overallScore,
-          day: new Date().toISOString().slice(0, 10),
-        });
+        const readyEvent = toAttemptReadyEvent(input);
+        await createProgressProjector(async (event) => {
+          await tx.insert(progressEvents).values({
+            id: `prg_${randomUUID()}`,
+            learnerId: event.learnerId,
+            sessionId: event.sessionId,
+            attemptIndex: event.attemptIndex,
+            score: event.overallScore,
+            day: new Date().toISOString().slice(0, 10),
+          });
+        }).project(readyEvent);
       }),
     );
   },

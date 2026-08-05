@@ -5,13 +5,17 @@ import {
   idParamsSchema,
   sessionIdParamsSchema,
 } from "@kotoba/contracts";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { requireLearnerAuth } from "../../auth";
 import { ApiError } from "../../http/errors";
 import { createAttempt, type UploadedAudio } from "./service";
 import { getAttempt } from "../sessions/service";
 
-export async function attemptRoutes(app: FastifyInstance) {
+export async function attemptRoutes(
+  app: FastifyInstance,
+  options: FastifyPluginOptions & { createAttempt?: typeof createAttempt } = {},
+) {
+  const submitAttempt = options.createAttempt ?? createAttempt;
   app.post(
     "/api/sessions/:sessionId/attempts",
     {
@@ -64,7 +68,7 @@ export async function attemptRoutes(app: FastifyInstance) {
           parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
         );
       }
-      const attempt = await createAttempt(
+      const attempt = await submitAttempt(
         params.sessionId,
         learner.id,
         parsed.data,

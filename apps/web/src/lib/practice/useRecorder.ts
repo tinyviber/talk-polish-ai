@@ -73,6 +73,9 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
     timerRef.current = null;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
+    // Blob construction copies the recording payload. Drop chunk references
+    // immediately so a submitted/reset take cannot pin its full audio buffer.
+    chunksRef.current = [];
     trackCleanupRef.current.splice(0).forEach((dispose) => dispose());
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;

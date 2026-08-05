@@ -3,7 +3,10 @@ import {
   __resetRecordingQueueForTests,
   enqueueRecording,
   getNextRecordingQueuePollAt,
+  listDurablePracticeWorkflows,
+  listLegacyUnknownWorkflows,
   listRecordingQueue,
+  adoptLegacyWorkflow,
   syncRecordingQueue,
 } from "./offlineQueue";
 import { startOfflineQueueSyncLoop } from "./offlineQueueSync";
@@ -57,6 +60,25 @@ async function putQueueItemDirectly(item: Record<string, unknown>) {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error ?? new Error("queue seed aborted"));
+    tx.objectStore("recordings").put(item);
+  });
+  db.close();
+}
+
+async function seedLegacyQueueItem(item: Record<string, unknown>) {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open("kotoba-loop-offline", 4);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore("recordings", { keyPath: "clientAttemptId" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("recordings", "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("legacy queue seed aborted"));
     tx.objectStore("recordings").put(item);
   });
   db.close();
@@ -214,5 +236,81 @@ describe("offline queue sync loop", () => {
     expect(vi.getTimerCount()).toBe(0);
     stop();
     await flushMicrotasks(20);
+  });
+
+  test("migrates a historical ready row as consumed instead of replaying feedback", async () => {
+    await seedLegacyQueueItem({
+      learnerId: "device:learner-1",
+      clientAttemptId: "historical-ready",
+      sessionId: "session-1",
+      clientSessionId: "session-1",
+      promptId: "prompt-1",
+      lang: "en",
+      attemptIndex: 1,
+      duration: 2,
+      mimeType: "audio/webm",
+      blob: new Blob([], { type: "audio/webm" }),
+      createdAt: 1,
+      syncStatus: "ready",
+      attemptId: "server-historical-ready",
+    });
+
+    const rows = await listRecordingQueue("device:learner-1");
+    expect(rows[0]?.workflowState).toBe("consumed");
+    expect(rows[0]?.feedbackState).toBe("delivered");
+    await expect(listDurablePracticeWorkflows(["device:learner-1"])).resolves.toEqual([]);
+  });
+
+  test("does not silently consume a v4 row that explicitly awaited feedback", async () => {
+    await seedLegacyQueueItem({
+      learnerId: "device:learner-1",
+      clientAttemptId: "historical-pending",
+      sessionId: "session-1",
+      clientSessionId: "session-1",
+      promptId: "prompt-1",
+      lang: "en",
+      attemptIndex: 1,
+      duration: 2,
+      mimeType: "audio/webm",
+      blob: new Blob([], { type: "audio/webm" }),
+      createdAt: 1,
+      syncStatus: "ready",
+      attemptId: "server-historical-pending",
+      feedbackState: "pending",
+    });
+
+    const rows = await listRecordingQueue("device:learner-1");
+    expect(rows[0]?.workflowState).toBe("legacy-unknown");
+    expect(rows[0]?.feedbackState).toBe("pending");
+    await expect(listDurablePracticeWorkflows(["device:learner-1"])).resolves.toEqual([]);
+    await expect(listLegacyUnknownWorkflows(["device:learner-1"])).resolves.toHaveLength(1);
+
+    await adoptLegacyWorkflow("historical-pending");
+    expect((await listDurablePracticeWorkflows(["device:learner-1"]))[0]?.clientAttemptId).toBe(
+      "historical-pending",
+    );
+  });
+
+  test("cleans unadopted legacy-unknown evidence after its long retention window", async () => {
+    await seedLegacyQueueItem({
+      learnerId: "device:learner-1",
+      clientAttemptId: "historical-expired",
+      sessionId: "session-1",
+      clientSessionId: "session-1",
+      promptId: "prompt-1",
+      lang: "en",
+      attemptIndex: 1,
+      duration: 2,
+      mimeType: "audio/webm",
+      blob: new Blob([], { type: "audio/webm" }),
+      createdAt: 1,
+      syncStatus: "ready",
+      attemptId: "server-historical-expired",
+      feedbackState: "pending",
+    });
+
+    vi.setSystemTime(new Date(31 * 24 * 60 * 60 * 1000));
+    await getNextRecordingQueuePollAt(["device:learner-1"]);
+    await expect(listLegacyUnknownWorkflows(["device:learner-1"])).resolves.toEqual([]);
   });
 });

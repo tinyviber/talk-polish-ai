@@ -20,6 +20,7 @@ export async function diagnoseProviders(
     checkedAt,
     ...(databaseUp ? {} : { errorCode: "connection" }),
   };
+  const transcription = current.speechToText ?? current.transcription;
 
   return {
     requestId,
@@ -44,12 +45,12 @@ export async function diagnoseProviders(
     ),
     transcription: await capability(
       "transcription",
-      current.transcription.name,
-      current.transcription.check,
+      transcription.name,
+      transcription.check,
       config.TRANSCRIPTION_PROVIDER !== "mock",
       activeProbe,
       checkedAt,
-      current.transcription.probe,
+      transcription.probe,
     ),
     tts: await capability(
       "tts",

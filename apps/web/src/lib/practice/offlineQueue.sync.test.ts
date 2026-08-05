@@ -5,9 +5,13 @@ import {
   enqueueRecording,
   getNextRecordingQueuePollAt,
   getRecordingQueueLeaseKey,
+  listDurablePracticeWorkflows,
   listRecordingQueue,
+  markFeedbackDelivered,
+  markFeedbackError,
   markRecordingFailed,
   markRecordingReady,
+  abandonPracticeWorkflow,
   removeQueuedRecording,
   syncRecordingQueue,
 } from "./offlineQueue";
@@ -187,6 +191,68 @@ describe("offline queue sync behavior", () => {
     expect((await listRecordingQueue(input.learnerId))[0]?.syncStatus).toBe("ready");
   });
 
+  test("persists feedback recovery states across reload-like reads", async () => {
+    const input = createRecording("attempt-feedback-recovery");
+    await enqueueRecording(input);
+    await markRecordingReady(input.clientAttemptId, {
+      attemptId: "server-feedback-recovery",
+      sessionId: "session-1",
+    });
+
+    expect(
+      (await listDurablePracticeWorkflows(input.learnerId)).map((item) => item.clientAttemptId),
+    ).toEqual([input.clientAttemptId]);
+
+    await markFeedbackError(input.clientAttemptId, "feedback request failed");
+    const failed = (await listRecordingQueue(input.learnerId))[0]!;
+    expect(failed.feedbackState).toBe("error");
+    expect(failed.workflowState).toBe("awaiting-feedback");
+    expect(failed.feedbackLastError).toBe("feedback request failed");
+
+    await markFeedbackDelivered(input.clientAttemptId);
+    expect(await listDurablePracticeWorkflows(input.learnerId)).toEqual([]);
+    expect((await listRecordingQueue(input.learnerId))[0]?.workflowState).toBe("consumed");
+
+    const abandoned = createRecording("attempt-feedback-abandoned");
+    await enqueueRecording(abandoned);
+    await markRecordingReady(abandoned.clientAttemptId, {
+      attemptId: "server-feedback-abandoned",
+      sessionId: "session-1",
+    });
+    await abandonPracticeWorkflow(abandoned.clientAttemptId);
+    expect(await listDurablePracticeWorkflows(input.learnerId)).toEqual([]);
+    expect(
+      (await listRecordingQueue(input.learnerId)).find(
+        (item) => item.clientAttemptId === abandoned.clientAttemptId,
+      )?.workflowState,
+    ).toBe("abandoned");
+  });
+
+  test("does not upload attempt two until attempt one feedback is consumed", async () => {
+    const first = createRecording("attempt-gate-1");
+    await enqueueRecording(first);
+    await markRecordingReady(first.clientAttemptId, {
+      attemptId: "server-attempt-gate-1",
+      sessionId: "session-1",
+    });
+
+    const second = createRecording("attempt-gate-2", { attemptIndex: 2 });
+    await enqueueRecording(second);
+    const upload = vi.fn(async (item) => ({
+      id: `server-${item.clientAttemptId}`,
+      status: "ready" as const,
+      sessionId: "session-1",
+    }));
+
+    await syncRecordingQueue(upload, first.learnerId);
+    expect(upload).not.toHaveBeenCalled();
+
+    await markFeedbackDelivered(first.clientAttemptId);
+    await syncRecordingQueue(upload, first.learnerId);
+    expect(upload).toHaveBeenCalledOnce();
+    expect(upload.mock.calls[0]?.[0].clientAttemptId).toBe(second.clientAttemptId);
+  });
+
   test("keeps scheduling processing polls beyond 15.5 seconds", async () => {
     await enqueueRecording(createRecording("attempt-processing"));
 
@@ -231,6 +297,7 @@ describe("offline queue sync behavior", () => {
       attemptId: "server-attempt-1",
       sessionId: "session-1",
     });
+    await markFeedbackDelivered("attempt-1");
     vi.setSystemTime(new Date(8 * 24 * 60 * 60 * 1000));
     await enqueueRecording(
       createRecording("attempt-2", {

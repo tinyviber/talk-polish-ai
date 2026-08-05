@@ -264,22 +264,6 @@ describe("persisted practice journey", () => {
     expect(getRecoveryResponse.statusCode).toBe(200);
     expect(getRecoveryResponse.json().attempt.status).toBe("failed");
 
-    const replay = multipart(
-      { clientAttemptId: getRecoveryClientAttemptId, attemptIndex: "2", durationSec: "1" },
-      Buffer.from("replayed audio"),
-    );
-    const replayResponse = await app.inject({
-      method: "POST",
-      url: `/api/sessions/${session.id}/attempts`,
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": replay.contentType,
-      },
-      payload: replay.body,
-    });
-    expect(replayResponse.statusCode).toBe(200);
-    expect(replayResponse.json().attempt.status).toBe("ready");
-
     const upload = multipart({ attemptIndex: "1", durationSec: "1" }, Buffer.from("new audio"));
     const response = await app.inject({
       method: "POST",

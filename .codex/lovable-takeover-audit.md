@@ -77,7 +77,7 @@
 
 ## Independent review conclusions integrated
 
-- Recovery reviewers identified unused feedback transitions, cold-start loss, cross-tab regression, canonical enqueue IDs, and TTL gaps. Current queue uses IndexedDB v5 workflow state, atomic feedback updates, revisions, stable selection, explicit abandon, and canonical ID adoption.
+- Recovery reviewers identified unused feedback transitions, cold-start loss, cross-tab regression, canonical enqueue IDs, and TTL gaps. Current queue uses IndexedDB v6 workflow state, conservative v3/v4 migration, atomic feedback updates, revisions, stable selection, explicit abandon, and canonical ID adoption.
 - Speech/LLM reviewers identified product-aware ASR, provider-owned TTS cache, missing metrics provenance, and transcript-only pronunciation risk. Current pure ports, metrics provenance, nullable pronunciation, speaking module, and application-owned TTS service address these boundaries.
 - Compatibility/test reviewers found historical provenance ambiguity, missing contract subpath exports, direct route-stage rendering gaps, progress projection scaffolding, ambiguous commit cleanup, and skipped environment-backed tests. Current changes normalize historical feedback, export split contracts, render recording/offline stages, wire progress event projection, re-read committed attempts before cleanup, and document skipped tests.
 

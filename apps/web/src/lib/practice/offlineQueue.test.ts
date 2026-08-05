@@ -3,6 +3,7 @@ import {
   cleanupRecordingQueue,
   canSyncAttempt,
   isQueueSyncCandidate,
+  migrateRecordingQueueRecord,
   orderRecordingQueue,
   recoverQueueStatus,
   subscribeRecordingQueue,
@@ -73,6 +74,37 @@ describe("offline recording queue boundaries", () => {
         ["device:learner", "lnr_old"],
       ),
     ).toBe(true);
+  });
+
+  test("only preserves explicitly pending v5 feedback during migration", () => {
+    const base = {
+      learnerId: "learner",
+      clientAttemptId: "attempt",
+      sessionId: "session",
+      clientSessionId: "session",
+      promptId: "prompt",
+      lang: "en" as const,
+      attemptIndex: 1 as const,
+      syncStatus: "ready" as const,
+      createdAt: 1,
+    };
+    expect(migrateRecordingQueueRecord(base, 4)).toMatchObject({
+      feedbackState: "delivered",
+      workflowState: "consumed",
+    });
+    expect(
+      migrateRecordingQueueRecord(
+        {
+          ...base,
+          feedbackState: "pending",
+          workflowState: "awaiting-feedback",
+        },
+        5,
+      ),
+    ).toMatchObject({
+      feedbackState: "pending",
+      workflowState: "awaiting-feedback",
+    });
   });
 
   test("waits for transaction commit so an abort after request success never looks durable", async () => {

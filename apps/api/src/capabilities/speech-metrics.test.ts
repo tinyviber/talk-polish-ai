@@ -23,12 +23,17 @@ describe("speech metrics", () => {
     expect(result.longestPauseSec).toBeCloseTo(1.2);
   });
 
-  test("keeps transcript-derived metrics while marking timing unavailable", () => {
-    const result = computeSpeechMetrics({ text: "こんにちは", locale: "ja-JP" });
-    expect(result.status).toBe("degraded");
-    expect(result.source).toBe("transcript");
-    expect(result.words).toBe(1);
+  test("does not pretend Japanese character runs are words or WPM", () => {
+    const result = computeSpeechMetrics({
+      text: "あの人はこんにちは。まあ、元気です。",
+      locale: "ja-JP",
+      durationSec: 30,
+    });
+    expect(result.status).toBe("unavailable");
+    expect(result.source).toBe("unavailable");
+    expect(result.words).toBeUndefined();
     expect(result.wpm).toBeUndefined();
     expect(result.longestPauseSec).toBeUndefined();
+    expect(result.fillers).toBe(1);
   });
 });

@@ -303,6 +303,62 @@ describe("attempt recovery", () => {
       ),
     ).toBe(true);
   });
+
+  test("preserves attempt and audio when result commit status is unknown", async () => {
+    let resultReadCount = 0;
+    state.persistResult = async () => {
+      state.persistCalls += 1;
+      throw ApiError.database("The result acknowledgement was lost.");
+    };
+    state.getAttempt = async (id) => {
+      resultReadCount += 1;
+      if (resultReadCount === 1)
+        throw ApiError.database("The database is temporarily unavailable.");
+      return createReadyAttempt(id);
+    };
+
+    await expect(
+      createAttempt(
+        sessionId,
+        learnerId,
+        {
+          attemptIndex: 1,
+          durationSec: 12,
+          clientAttemptId: "client-commit-unknown",
+          mocked: false,
+        },
+        audio,
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 503,
+      code: "processing_unavailable",
+      message: expect.stringContaining("same recording"),
+    });
+
+    expect(state.cleanupCalls).toHaveLength(0);
+
+    state.findByClientId = async () => ({
+      id: "att_committed",
+      sessionId,
+      attemptIndex: 1,
+      status: "ready",
+      clientAttemptId: "client-commit-unknown",
+      createdAt: new Date(),
+    });
+    const recovered = await createAttempt(
+      sessionId,
+      learnerId,
+      {
+        attemptIndex: 1,
+        durationSec: 12,
+        clientAttemptId: "client-commit-unknown",
+        mocked: false,
+      },
+      audio,
+    );
+    expect(recovered.id).toBe("att_committed");
+    expect(state.persistCalls).toBe(1);
+  });
 });
 
 function createReadyAttempt(id: string): Attempt {

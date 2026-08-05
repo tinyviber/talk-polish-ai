@@ -31,7 +31,7 @@ export {
 const DB_NAME = "kotoba-loop-offline";
 const STORE = "recordings";
 const LEASE_STORE = "syncLeases";
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BYTES = 100 * 1024 * 1024;
 const LEASE_MS = 30_000;
@@ -131,6 +131,64 @@ function sessionDependencyKey(clientSessionId: string) {
   return clientSessionId;
 }
 
+/**
+ * Normalize rows from older queue schemas without turning historical uploads
+ * into new recovery work. Only rows that explicitly carried the v5 feedback
+ * workflow are eligible for automatic feedback recovery.
+ */
+export function migrateRecordingQueueRecord(
+  value: Record<string, unknown>,
+  oldVersion: number,
+): Record<string, unknown> {
+  const legacy = !value["learnerId"];
+  const ready = value["syncStatus"] === "ready";
+  const feedbackState = value["feedbackState"];
+  const isPreFeedbackWorkflowSchema = oldVersion < 5;
+  const explicitAwaitingFeedback =
+    ready &&
+    !isPreFeedbackWorkflowSchema &&
+    value["workflowState"] === "awaiting-feedback" &&
+    (feedbackState === "pending" || feedbackState === "error");
+  const clientSessionId =
+    typeof value["clientSessionId"] === "string" && value["clientSessionId"]
+      ? value["clientSessionId"]
+      : typeof value["sessionId"] === "string" && value["sessionId"]
+        ? `legacy-session:${value["sessionId"]}`
+        : `legacy-attempt:${String(value["clientAttemptId"] ?? "unknown")}`;
+  const workflowState = legacy
+    ? "abandoned"
+    : explicitAwaitingFeedback
+      ? "awaiting-feedback"
+      : value["workflowState"] === "consumed"
+        ? "consumed"
+        : value["workflowState"] === "abandoned"
+          ? "abandoned"
+          : ready
+            ? "consumed"
+            : "awaiting-upload";
+
+  return {
+    ...value,
+    clientSessionId,
+    ...(legacy
+      ? {
+          learnerId: "legacy",
+          syncStatus: "failed",
+          lastError: "This recording needs to be re-recorded after the app update.",
+        }
+      : {}),
+    ...(ready && !explicitAwaitingFeedback ? { feedbackState: "delivered" } : {}),
+    workflowState,
+    workflowUpdatedAt:
+      typeof value["workflowUpdatedAt"] === "number"
+        ? value["workflowUpdatedAt"]
+        : typeof value["feedbackUpdatedAt"] === "number"
+          ? value["feedbackUpdatedAt"]
+          : value["createdAt"],
+    revision: typeof value["revision"] === "number" ? value["revision"] : 0,
+  };
+}
+
 function scheduleProcessingPoll(item: RecordingQueueItem, now = Date.now()): RecordingQueueItem {
   const processingPollIndex = item.processingPollIndex ?? 0;
   return {
@@ -186,7 +244,8 @@ function openDb(): Promise<IDBDatabase> {
 
   const promise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
+      const oldVersion = (event as IDBVersionChangeEvent).oldVersion;
       const existed = request.result.objectStoreNames.contains(STORE);
       if (!existed) request.result.createObjectStore(STORE, { keyPath: "clientAttemptId" });
       if (!request.result.objectStoreNames.contains(LEASE_STORE)) {
@@ -203,44 +262,7 @@ function openDb(): Promise<IDBDatabase> {
         const cursor = cursorRequest.result;
         if (!cursor) return;
         const value = cursor.value as Record<string, unknown>;
-        const legacy = !value["learnerId"];
-        const ready = value["syncStatus"] === "ready";
-        const feedbackState = value["feedbackState"];
-        const clientSessionId =
-          typeof value["clientSessionId"] === "string" && value["clientSessionId"]
-            ? value["clientSessionId"]
-            : typeof value["sessionId"] === "string" && value["sessionId"]
-              ? `legacy-session:${value["sessionId"]}`
-              : `legacy-attempt:${String(value["clientAttemptId"] ?? "unknown")}`;
-        const workflowState = legacy
-          ? "abandoned"
-          : value["workflowState"] === "consumed"
-            ? "consumed"
-            : value["workflowState"] === "abandoned"
-              ? "abandoned"
-              : ready && feedbackState !== "delivered"
-                ? "awaiting-feedback"
-                : "awaiting-upload";
-        cursor.update({
-          ...value,
-          clientSessionId,
-          ...(legacy
-            ? {
-                learnerId: "legacy",
-                syncStatus: "failed",
-                lastError: "This recording needs to be re-recorded after the app update.",
-              }
-            : {}),
-          ...(ready && feedbackState === undefined ? { feedbackState: "pending" } : {}),
-          workflowState,
-          workflowUpdatedAt:
-            typeof value["workflowUpdatedAt"] === "number"
-              ? value["workflowUpdatedAt"]
-              : typeof value["feedbackUpdatedAt"] === "number"
-                ? value["feedbackUpdatedAt"]
-                : value["createdAt"],
-          revision: typeof value["revision"] === "number" ? value["revision"] : 0,
-        });
+        cursor.update(migrateRecordingQueueRecord(value, oldVersion));
         cursor.continue();
       };
     };

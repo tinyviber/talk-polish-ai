@@ -3,6 +3,7 @@ import {
   __resetRecordingQueueForTests,
   enqueueRecording,
   getNextRecordingQueuePollAt,
+  listDurablePracticeWorkflows,
   listRecordingQueue,
   syncRecordingQueue,
 } from "./offlineQueue";
@@ -57,6 +58,25 @@ async function putQueueItemDirectly(item: Record<string, unknown>) {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error ?? new Error("queue seed aborted"));
+    tx.objectStore("recordings").put(item);
+  });
+  db.close();
+}
+
+async function seedLegacyQueueItem(item: Record<string, unknown>) {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open("kotoba-loop-offline", 4);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore("recordings", { keyPath: "clientAttemptId" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("recordings", "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("legacy queue seed aborted"));
     tx.objectStore("recordings").put(item);
   });
   db.close();
@@ -214,5 +234,28 @@ describe("offline queue sync loop", () => {
     expect(vi.getTimerCount()).toBe(0);
     stop();
     await flushMicrotasks(20);
+  });
+
+  test("migrates a historical ready row as consumed instead of replaying feedback", async () => {
+    await seedLegacyQueueItem({
+      learnerId: "device:learner-1",
+      clientAttemptId: "historical-ready",
+      sessionId: "session-1",
+      clientSessionId: "session-1",
+      promptId: "prompt-1",
+      lang: "en",
+      attemptIndex: 1,
+      duration: 2,
+      mimeType: "audio/webm",
+      blob: new Blob([], { type: "audio/webm" }),
+      createdAt: 1,
+      syncStatus: "ready",
+      attemptId: "server-historical-ready",
+    });
+
+    const rows = await listRecordingQueue("device:learner-1");
+    expect(rows[0]?.workflowState).toBe("consumed");
+    expect(rows[0]?.feedbackState).toBe("delivered");
+    await expect(listDurablePracticeWorkflows(["device:learner-1"])).resolves.toEqual([]);
   });
 });

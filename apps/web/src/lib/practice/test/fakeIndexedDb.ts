@@ -170,13 +170,23 @@ export function installFakeIndexedDb() {
       };
       queueMicrotask(() => {
         const current = databases.get(name);
+        const oldVersion = current?.version ?? 0;
         const nextVersion = version ?? current?.version ?? 1;
         const needsUpgrade = !current || nextVersion > current.version;
         const data = current ?? { version: nextVersion, stores: new Map<string, StoreData>() };
         data.version = nextVersion;
         databases.set(name, data);
         request.result = createDatabase(data) as IDBDatabase;
-        if (needsUpgrade) request.onupgradeneeded?.(new Event("upgradeneeded"));
+        if (needsUpgrade) {
+          request.transaction = createTransaction(
+            data,
+            Array.from(data.stores.keys()),
+          ) as unknown as IDBTransaction;
+          const event = new Event("upgradeneeded");
+          Object.defineProperty(event, "oldVersion", { value: oldVersion });
+          Object.defineProperty(event, "newVersion", { value: nextVersion });
+          request.onupgradeneeded?.(event);
+        }
         queueMicrotask(() => request.onsuccess?.(new Event("success")));
       });
       return request as unknown as IDBOpenDBRequest;

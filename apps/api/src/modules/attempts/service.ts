@@ -160,6 +160,7 @@ async function createAttemptWithProviders(
     }
   }
 
+  let commitState: "known-uncommitted" | "known-committed" | "commit-unknown" = "known-uncommitted";
   try {
     const inserted = await attemptRepository.insertProcessing({
       attemptId,
@@ -248,6 +249,7 @@ async function createAttemptWithProviders(
     if (transcription && !transcription.success) {
       throw ApiError.processingUnavailable("Speech transcription returned invalid metadata.");
     }
+    commitState = "commit-unknown";
     await attemptRepository.persistResult({
       attemptId,
       learnerId,
@@ -261,11 +263,22 @@ async function createAttemptWithProviders(
       feedback,
     });
   } catch (error) {
-    try {
-      const committed = await getAttempt(attemptId, learnerId);
-      if (committed.status === "ready") return committed;
-    } catch {
-      // Preserve cleanup path when the database cannot confirm commit state.
+    if (commitState === "commit-unknown") {
+      // The result transaction may have committed even when its acknowledgement
+      // was lost. Never delete the attempt/audio until that outcome is known.
+      try {
+        const committed = await getAttempt(attemptId, learnerId);
+        if (committed.status === "ready") {
+          commitState = "known-committed";
+          return committed;
+        }
+      } catch {
+        // Commit state is unknown. Preserve both rows and storage; a retry with
+        // the same clientAttemptId will read the existing result if committed.
+      }
+      throw ApiError.processingUnavailable(
+        "Attempt processing may have completed. Retry the same recording to recover its result.",
+      );
     }
     try {
       await attemptRepository.removeAttempt(attemptId, audioId);

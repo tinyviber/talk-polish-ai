@@ -50,7 +50,7 @@ composition roots construct all concrete adapters and inject ports
 ## Migration order and file scope
 
 1. **Audit/docs + baseline** — complete. Refs protected; audit includes twelve independent review roles.
-2. **Durable recovery first** — complete for P1/P2 path: IndexedDB v5 workflow state, atomic feedback updates, revisions, migration normalization, stable recovery selection, consumed/abandoned, retry without upload, new-session start-over, ready-Blob discard, storage-event fallback.
+2. **Durable recovery first** — complete for P1/P2 path: IndexedDB v6 workflow state, conservative v3/v4 migration, atomic feedback updates, revisions, stable recovery selection, consumed/abandoned, retry without upload, new-session start-over, ready-Blob discard, storage-event fallback.
 3. **State-machine boundary** — complete for semantic transition guard; route now renders recording, recorded, feedback-recovery, and offline-recovery stages. Controller extraction remains follow-up.
 4. **Capability ports** — complete initial ports for TextModel, StructuredGenerator, SpeechToText, TextToSpeech, SpeechMetrics; old adapters remain compatibility surface.
 5. **LLM/speaking** — complete initial speaking module and transport facade; explicit output shape, bounded JSON repair, language/attempt behavior, metric/provenance assembly.

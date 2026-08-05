@@ -21,8 +21,19 @@ export type SpeechMetricsInput = {
 };
 
 export function computeSpeechMetrics(input: SpeechMetricsInput): SpeechMetrics {
-  const words = tokenize(input.text, input.locale);
+  const japanese = input.locale?.toLowerCase().startsWith("ja") === true;
   const fillers = countFillers(input.text, input.locale);
+  // Japanese has no whitespace word boundary. Until a real morphological
+  // tokenizer is part of the runtime, exposing character runs as "words" (and
+  // deriving WPM from them) creates confidently wrong feedback.
+  if (japanese) {
+    return {
+      status: "unavailable",
+      source: "unavailable",
+      ...(fillers ? { fillers } : {}),
+    };
+  }
+  const words = tokenize(input.text, input.locale);
   const timed = input.words?.filter(hasTime) ?? input.segments?.filter(hasTime) ?? [];
   const hasTimestamps = timed.length > 0;
   const pauses = hasTimestamps ? pauseMetrics(timed) : null;
@@ -58,8 +69,8 @@ function tokenize(text: string, locale?: string) {
 
 function countFillers(text: string, locale?: string) {
   const pattern = locale?.toLowerCase().startsWith("ja")
-    ? /(?:えーと|あの|その|まあ)/giu
-    : /(?:um|uh|er|like|you know)/giu;
+    ? /(?<![\p{L}\p{N}])(えーと|あの|その|まあ)(?![\p{L}\p{N}])/giu
+    : /(?<![\p{L}\p{N}])(um|uh|er|like|you know)(?![\p{L}\p{N}])/giu;
   return text.match(pattern)?.length ?? 0;
 }
 

@@ -51,6 +51,12 @@ import {
   listRecoveryWorkflows,
   type DurablePracticeWorkflow,
 } from "@/lib/practice/workflow-store";
+import {
+  hydratePracticeWorkflow,
+  queueIdentityForAttempt,
+  selectFrozenPrompt,
+  type FrozenPracticeContext,
+} from "@/lib/practice/workflow-context";
 import { FeedbackRecovery } from "@/features/practice/components/FeedbackRecovery";
 
 export const Route = createFileRoute("/practice")({
@@ -185,6 +191,9 @@ function Practice() {
   const [feedbackRetryPending, setFeedbackRetryPending] = useState(false);
   const [feedbackPendingDelivery, setFeedbackPendingDelivery] = useState<string | null>(null);
   const [recoveryTarget, setRecoveryTarget] = useState<DurablePracticeWorkflow | null>(null);
+  // Once a session starts, prompt/language identity must not follow the
+  // mutable store. This is also the context restored after a cold start.
+  const [frozenContext, setFrozenContext] = useState<FrozenPracticeContext | null>(null);
   const { setBusy } = usePwa();
   const interruptedAttemptIdRef = useRef<string | null>(null);
   const pendingFeedbackAttemptIdRef = useRef<string | null>(null);
@@ -196,20 +205,34 @@ function Practice() {
   // still be attached to one practice session once the device reconnects.
   const clientSessionIdRef = useRef<string | null>(null);
 
-  const lang = state.lang ?? "en";
+  const lang = frozenContext?.lang ?? state.lang ?? "en";
   const languagePrompts = useMemo(
     () => prompts.filter((prompt) => prompt.lang === lang),
     [lang, prompts],
   );
   // Frozen at mount so the prompt never changes mid-session when a session is recorded.
   const [baseIndex] = useState(() => state.sessions.filter((s) => s.lang === lang).length);
-  const prompt = languagePrompts[(baseIndex + promptOffset) % Math.max(1, languagePrompts.length)];
+  const prompt = selectFrozenPrompt(
+    prompts,
+    frozenContext,
+    languagePrompts[(baseIndex + promptOffset) % Math.max(1, languagePrompts.length)] ?? null,
+  );
   const jp = lang === "ja";
+  const hydrateWorkflowContext = useCallback((workflow: DurablePracticeWorkflow) => {
+    const context = hydratePracticeWorkflow(workflow);
+    clientSessionIdRef.current = workflow.clientSessionId;
+    setFrozenContext(context);
+    setSessionId(workflow.sessionId);
+  }, []);
   const saveInterruptedDraft = useCallback(
     async (draft: RecorderDraft) => {
       if (mode !== "api" || !prompt) return;
       const clientSessionId = clientSessionIdRef.current;
       if (!clientSessionId) return;
+      const attemptIndex: 1 | 2 = step === "record2" ? 2 : 1;
+      const identity = frozenContext
+        ? queueIdentityForAttempt(frozenContext, attemptIndex)
+        : { clientSessionId, promptId: prompt.id, lang, attemptIndex };
       const learnerId = getQueueLearnerId();
       const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
       interruptedAttemptIdRef.current = clientAttemptId;
@@ -222,10 +245,10 @@ function Practice() {
             learnerId,
             clientAttemptId,
             sessionId,
-            clientSessionId,
-            promptId: prompt.id,
-            lang,
-            attemptIndex: step === "record2" ? 2 : 1,
+            clientSessionId: identity.clientSessionId,
+            promptId: identity.promptId,
+            lang: identity.lang,
+            attemptIndex: identity.attemptIndex,
             duration: draft.durationSec,
             mimeType: draft.mimeType,
             blob: draft.blob,
@@ -241,7 +264,7 @@ function Practice() {
         setBusy(false, "draft-save");
       }
     },
-    [lang, mode, prompt, sessionId, setBusy, step],
+    [frozenContext, lang, mode, prompt, sessionId, setBusy, step],
   );
   const recorder = useRecorder({ mode, onInterruptedRecording: saveInterruptedDraft });
   const [queuedItems, setQueuedItems] = useState<RecordingQueueItem[]>([]);
@@ -393,7 +416,7 @@ function Practice() {
           clientAttemptId = workflow.clientAttemptId;
           interruptedAttemptIdRef.current = workflow.clientAttemptId;
           setRecoveryTarget(workflow);
-          setSessionId(workflow.sessionId);
+          hydrateWorkflowContext(workflow);
           setFeedbackRetryPending(true);
           dispatchPractice({
             type: "feedback-load-failed",
@@ -407,7 +430,7 @@ function Practice() {
     } catch {
       // A later online/visibility/queue event retries the durable read.
     }
-  }, [mode, resolveReadyAttempt]);
+  }, [hydrateWorkflowContext, mode, resolveReadyAttempt]);
 
   useEffect(() => {
     queueMountedRef.current = true;
@@ -469,6 +492,7 @@ function Practice() {
     setInterruptedDraftPending(false);
     setFirst(null);
     setSecond(null);
+    setFrozenContext(null);
     setSessionId(null);
     setError(null);
     recorder.reset();
@@ -535,6 +559,7 @@ function Practice() {
       const generation = workflowGenerationRef.current;
       const clientSessionId = clientSessionIdRef.current ?? crypto.randomUUID();
       clientSessionIdRef.current = clientSessionId;
+      setFrozenContext({ clientSessionId, sessionId: null, promptId: prompt.id, lang });
       try {
         const session = await createSession(prompt.id, clientSessionId);
         if (
@@ -569,8 +594,19 @@ function Practice() {
     dispatchPractice({ type: "submit", attemptIndex: index });
     dispatchPractice({ type: "processing", attemptIndex: index });
     const clientAttemptId = interruptedAttemptIdRef.current ?? crypto.randomUUID();
+    const identity = frozenContext
+      ? queueIdentityForAttempt(frozenContext, index)
+      : {
+          clientSessionId: clientSessionIdRef.current!,
+          promptId: prompt?.id ?? "",
+          lang,
+          attemptIndex: index,
+        };
     try {
       if (!prompt) throw new Error("No prompt is selected.");
+      if (mode === "api" && frozenContext) {
+        clientSessionIdRef.current = frozenContext.clientSessionId;
+      }
       let attempt: Attempt;
       if (mode === "api") {
         if (!sessionId && !clientSessionIdRef.current) {
@@ -591,10 +627,10 @@ function Practice() {
               learnerId: getQueueLearnerId(),
               clientAttemptId,
               sessionId,
-              clientSessionId: clientSessionIdRef.current!,
-              promptId: prompt.id,
-              lang,
-              attemptIndex: index,
+              clientSessionId: identity.clientSessionId,
+              promptId: identity.promptId,
+              lang: identity.lang,
+              attemptIndex: identity.attemptIndex,
               duration: recorder.seconds || 1,
               mimeType: recorder.audioBlob.type || "audio/webm",
               blob: recorder.audioBlob,
@@ -707,10 +743,10 @@ function Practice() {
               learnerId,
               clientAttemptId,
               sessionId,
-              clientSessionId: clientSessionIdRef.current,
-              promptId: prompt.id,
-              lang,
-              attemptIndex: index,
+              clientSessionId: identity.clientSessionId,
+              promptId: identity.promptId,
+              lang: identity.lang,
+              attemptIndex: identity.attemptIndex,
               duration: recorder.seconds || 1,
               mimeType: recorder.audioBlob.type || "audio/webm",
               blob: recorder.audioBlob,
@@ -823,6 +859,7 @@ function Practice() {
                     setSessionId(null);
                     setFirst(null);
                     setSecond(null);
+                    setFrozenContext(null);
                     setPromptOffset((o) => o + 1);
                     dispatchPractice({ type: "next-prompt" });
                   }}
@@ -935,6 +972,7 @@ function Practice() {
                   workflowGenerationRef.current += 1;
                   setFirst(null);
                   setSecond(null);
+                  setFrozenContext(null);
                   setPromptOffset((o) => o + 1);
                   setSessionId(mode === "demo" ? `s-${Date.now()}` : null);
                   clientSessionIdRef.current = crypto.randomUUID();

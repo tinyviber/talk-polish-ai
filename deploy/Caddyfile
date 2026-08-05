@@ -25,7 +25,14 @@ example.com {
   @static-assets path /icons/* /fonts/*
   header @static-assets Cache-Control "public, max-age=31536000, immutable"
 
-  handle /api/* { reverse_proxy 127.0.0.1:3333 }
+  handle /api/* {
+    request_body { max_size 25MB }
+    reverse_proxy 127.0.0.1:3333 {
+      transport http {
+        response_header_timeout 180s
+      }
+    }
+  }
   handle /realtime/* { reverse_proxy 127.0.0.1:3001 }
   handle { reverse_proxy 127.0.0.1:3000 }
 }

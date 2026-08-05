@@ -23,6 +23,19 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: bun run build
+      - name: Verify web release artifacts
+        run: |
+          test -f apps/web/.output/server/index.mjs
+          test -f apps/web/.output/public/sw.js
+          test -f apps/web/.output/public/manifest.webmanifest
+          test -f apps/web/.output/public/offline.html
+          node <<'NODE'
+          const fs = require("node:fs");
+          const sw = fs.readFileSync("apps/web/.output/public/sw.js", "utf8");
+          if (!sw.includes("offline.html") || !/assets\/[^"']+\.(?:js|css)/.test(sw)) {
+            throw new Error("PWA service worker is missing offline or hashed app-shell precache entries");
+          }
+          NODE
       - run: bun run build:docker
 
   integration:

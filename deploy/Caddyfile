@@ -26,13 +26,25 @@ example.com {
   header @static-assets Cache-Control "public, max-age=31536000, immutable"
 
   handle /api/* {
-    request_body { max_size 25MB }
+    # Fastify accepts up to MAX_UPLOAD_BYTES (25 MiB by default). The proxy
+    # limits the entire multipart body, so leave room for multipart overhead.
+    request_body {
+      max_size 30MiB
+    }
     reverse_proxy 127.0.0.1:3333 {
       transport http {
-        response_header_timeout 180s
+        # AI processing can legally exceed 180s; allow up to 420s for the
+        # upstream response headers and request/response I/O.
+        response_header_timeout 420s
+        read_timeout 420s
+        write_timeout 420s
       }
     }
   }
-  handle /realtime/* { reverse_proxy 127.0.0.1:3001 }
-  handle { reverse_proxy 127.0.0.1:3000 }
+  handle /realtime/* {
+    reverse_proxy 127.0.0.1:3001
+  }
+  handle {
+    reverse_proxy 127.0.0.1:3000
+  }
 }

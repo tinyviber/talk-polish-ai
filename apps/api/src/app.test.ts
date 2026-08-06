@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { MAX_AUDIO_BYTES } from "@kotoba/contracts";
 import type { FastifyInstance } from "fastify";
-import { buildApp } from "./app";
+import { buildApp, MULTIPART_REQUEST_MARGIN_BYTES, requestBodyLimit } from "./app";
+import { env } from "./env";
 
 let app: FastifyInstance;
 
 beforeAll(async () => {
-  app = await buildApp();
+  app = await buildApp({ ...env(), MAX_UPLOAD_BYTES: MAX_AUDIO_BYTES });
 });
 
 afterAll(async () => {
@@ -13,6 +15,15 @@ afterAll(async () => {
 });
 
 describe("API boundary", () => {
+  test("uses a 30 MiB default body budget and grows with the file limit", () => {
+    expect(app.initialConfig.bodyLimit).toBe(MAX_AUDIO_BYTES + MULTIPART_REQUEST_MARGIN_BYTES);
+
+    const largerUploadLimit = MAX_AUDIO_BYTES * 2;
+    expect(requestBodyLimit(largerUploadLimit)).toBe(
+      largerUploadLimit + MULTIPART_REQUEST_MARGIN_BYTES,
+    );
+  });
+
   test("returns safe validation errors", async () => {
     const response = await app.inject({
       method: "POST",

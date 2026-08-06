@@ -12,6 +12,18 @@ import { closeDatabase } from "./db/client";
 import { ApiError, toErrorResponse } from "./http/errors";
 import { registerRoutes } from "./routes";
 
+const BYTES_PER_MEBIBYTE = 1024 * 1024;
+
+/**
+ * Multipart request overhead allowance: 25 MiB audio + 5 MiB metadata/headers
+ * keeps the complete request within the 30 MiB proxy contract by default.
+ */
+export const MULTIPART_REQUEST_MARGIN_BYTES = 5 * BYTES_PER_MEBIBYTE;
+
+export function requestBodyLimit(maxUploadBytes: number) {
+  return maxUploadBytes + MULTIPART_REQUEST_MARGIN_BYTES;
+}
+
 export async function buildApp(config: Env = env()) {
   const app = Fastify({
     // Caddy/Nginx is the only trusted proxy in production. Enable this only
@@ -29,7 +41,7 @@ export async function buildApp(config: Env = env()) {
         censor: "[REDACTED]",
       },
     },
-    bodyLimit: config.MAX_UPLOAD_BYTES + 1024 * 1024,
+    bodyLimit: requestBodyLimit(config.MAX_UPLOAD_BYTES),
   }).withTypeProvider<ZodTypeProvider>();
 
   app.setValidatorCompiler(validatorCompiler);

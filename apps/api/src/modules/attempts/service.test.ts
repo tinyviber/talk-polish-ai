@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { PROMPTS, fixtureFeedback, type Attempt } from "@kotoba/contracts";
+import { MAX_AUDIO_BYTES, PROMPTS, fixtureFeedback, type Attempt } from "@kotoba/contracts";
 import { ApiError } from "../../http/errors";
 import { attemptRepository } from "./repository";
 
@@ -157,7 +157,9 @@ mock.module("./repository", () => ({
   },
 }));
 
-const { ATTEMPT_PROCESSING_STALE_MS, createAttempt } = await import("./service");
+const { ATTEMPT_PROCESSING_STALE_MS, createAttempt, createAttemptApplication } =
+  await import("./service");
+const { providers } = await import("../../providers");
 
 beforeEach(() => {
   state.cleanupCalls = [];
@@ -184,6 +186,25 @@ beforeEach(() => {
 });
 
 describe("attempt recovery", () => {
+  test("uses the runtime upload limit while keeping the compatibility default", async () => {
+    const configuredMaxBytes = MAX_AUDIO_BYTES + 1;
+    const audioOverDefaultLimit = { ...audio, buffer: Buffer.alloc(configuredMaxBytes) };
+    const fields = { attemptIndex: 1 as const, durationSec: 12, mocked: false };
+
+    await expect(
+      createAttempt(sessionId, learnerId, fields, audioOverDefaultLimit),
+    ).rejects.toMatchObject({ code: "payload_too_large" });
+
+    await expect(
+      createAttemptApplication(providers(), configuredMaxBytes).createAttempt(
+        sessionId,
+        learnerId,
+        fields,
+        audioOverDefaultLimit,
+      ),
+    ).resolves.toMatchObject({ status: "ready" });
+  });
+
   test("fails stale processing slots before starting new provider work", async () => {
     const staleAttempt = {
       id: "att_stale",

@@ -53,6 +53,7 @@ const envSchema = z.object({
   S3_FORCE_PATH_STYLE: envBoolean(true),
   S3_REQUEST_TIMEOUT_MS: positiveInt(10_000),
   S3_MAX_ATTEMPTS: positiveInt(3),
+  /** Defaults to MAX_UPLOAD_BYTES; set explicitly to enforce a stricter S3 limit. */
   S3_MAX_OBJECT_BYTES: positiveInt(25 * 1024 * 1024),
   S3_KEY_PREFIX: z.string().default(""),
   REALTIME_FEATURE_ENABLED: envBoolean(false),
@@ -75,9 +76,14 @@ let cached: Env | undefined;
 
 export function env(): Env {
   if (!cached) {
-    const parsed = envSchema.safeParse({
+    const rawEnv: Record<string, string | undefined> = {
       ...process.env,
       APP_VERSION: process.env.APP_VERSION ?? process.env.npm_package_version ?? "0.1.0",
+    };
+    const parsed = envSchema.safeParse({
+      ...rawEnv,
+      // Keep S3 reads aligned with the upload boundary unless explicitly overridden.
+      S3_MAX_OBJECT_BYTES: rawEnv.S3_MAX_OBJECT_BYTES ?? rawEnv.MAX_UPLOAD_BYTES,
     });
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);

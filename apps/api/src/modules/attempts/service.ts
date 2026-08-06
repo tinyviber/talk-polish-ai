@@ -93,6 +93,7 @@ async function createAttemptWithProviders(
   audio: UploadedAudio | null,
   clientIp?: string,
   providerSet?: Providers,
+  maxUploadBytes = MAX_AUDIO_BYTES,
 ): Promise<Attempt> {
   const session = await attemptRepository.findSession(sessionId);
   if (!session) throw ApiError.notFound("Practice session");
@@ -143,7 +144,7 @@ async function createAttemptWithProviders(
   let audioId: string | null = null;
   let storageKey: string | null = null;
   if (audio) {
-    const mime = assertSupportedAudio(audio);
+    const mime = assertSupportedAudio(audio, maxUploadBytes);
     const ext = EXTENSIONS[mime] ?? "bin";
     try {
       const stored = await storage.put({
@@ -350,7 +351,7 @@ function mapSpeechToTextResult(result: Transcript) {
   };
 }
 
-export function createAttemptApplication(providerSet: Providers) {
+export function createAttemptApplication(providerSet: Providers, maxUploadBytes = MAX_AUDIO_BYTES) {
   return {
     createAttempt(
       sessionId: string,
@@ -359,7 +360,15 @@ export function createAttemptApplication(providerSet: Providers) {
       audio: UploadedAudio | null,
       clientIp?: string,
     ) {
-      return createAttemptWithProviders(sessionId, learnerId, fields, audio, clientIp, providerSet);
+      return createAttemptWithProviders(
+        sessionId,
+        learnerId,
+        fields,
+        audio,
+        clientIp,
+        providerSet,
+        maxUploadBytes,
+      );
     },
   };
 }

@@ -14,6 +14,6 @@ export function buildRuntime(config: Env): Runtime {
   return {
     config,
     providers: providerSet,
-    attemptApplication: createAttemptApplication(providerSet),
+    attemptApplication: createAttemptApplication(providerSet, config.MAX_UPLOAD_BYTES),
   };
 }

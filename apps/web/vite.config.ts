@@ -12,9 +12,12 @@ export default defineConfig({
     plugins: [
       VitePWA({
         // Nitro publishes the client build (hashed assets, icons, fonts,
-        // offline.html) under dist/client. Workbox must read that directory or
-        // the precache manifest ships empty and offline navigation breaks.
-        outDir: "dist/client",
+        // offline.html) under .output/public. Workbox must read that directory
+        // or the precache manifest ships without the real app shell.
+        // Nitro publishes the production web client under .output/public.
+        // Keep Workbox output in same directory so final Node server artifact
+        // includes sw.js and precache sees hashed client assets.
+        outDir: ".output/public",
         registerType: "prompt",
         strategies: "injectManifest",
         srcDir: "src",

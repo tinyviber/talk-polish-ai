@@ -90,6 +90,14 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          for file in README.md docs/deployment-pwa.md deploy/Caddyfile; do
+            grep -Fq 'max_size 30MiB' "$file"
+          done
+          if grep -Fq 'max_size 30MB' README.md docs/deployment-pwa.md; then
+            echo 'README/docs must not use decimal Caddy body-size units' >&2
+            exit 1
+          fi
+
           nginx_tmp_dir="$(mktemp -d)"
           cleanup() {
             rm -rf "$nginx_tmp_dir"
@@ -117,7 +125,7 @@ jobs:
 
           docker run --rm \
             -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            caddy:2-alpine \
+            caddy:2.11-alpine \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: bun run build:docker
 

@@ -1,0 +1,97 @@
+name: Publish images to TCR Personal
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - codex/finish-durable-ai-architecture
+
+concurrency:
+  group: publish-tcr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TCR_REGISTRY: ccr.ccs.tencentyun.com
+  TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE || 'kotoba' }}
+  API_REPOSITORY: ${{ vars.TCR_API_REPOSITORY || 'kotoba-api' }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate TCR repository settings
+        run: |
+          set -Eeuo pipefail
+          test -n "$TCR_NAMESPACE"
+          test -n "$API_REPOSITORY"
+
+      - name: Login to TCR Personal
+        env:
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TCR_USERNAME"
+          test -n "$TCR_PASSWORD"
+          printf '%s' "$TCR_PASSWORD" \
+            | docker login "$TCR_REGISTRY" \
+                --username "$TCR_USERNAME" \
+                --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # These are the images used by docker-compose.yml on the deployment host.
+      - name: Mirror runtime images to TCR
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mirror() {
+            source_image="$1"
+            target_image="$2"
+
+            docker pull "$source_image"
+            docker tag "$source_image" "$target_image"
+            docker push "$target_image"
+          }
+
+          image_prefix="$TCR_REGISTRY/$TCR_NAMESPACE"
+
+          mirror \
+            postgres:16-alpine \
+            "$image_prefix/postgres:16-alpine"
+
+          mirror \
+            minio/minio:RELEASE.2024-12-18T13-15-44Z \
+            "$image_prefix/minio:RELEASE.2024-12-18T13-15-44Z"
+
+          mirror \
+            minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1 \
+            "$image_prefix/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1"
+
+      - name: Extract API image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.TCR_REGISTRY }}/${{ env.TCR_NAMESPACE }}/${{ env.API_REPOSITORY }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=kotoba-api
+          cache-to: type=gha,mode=max,scope=kotoba-api

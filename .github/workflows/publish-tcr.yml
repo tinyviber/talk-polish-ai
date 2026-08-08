@@ -2,6 +2,12 @@ name: Publish images to TCR Personal
 
 on:
   workflow_dispatch:
+    inputs:
+      sync_runtime_images:
+        description: Mirror missing pinned PostgreSQL and MinIO images to TCR
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
@@ -49,8 +55,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # These are the images used by docker-compose.yml on the deployment host.
-      # Pull from Docker Hub only when the pinned target tag is missing in TCR.
+      # Only run this on an explicit manual request. Normal application pushes
+      # must not wait for Docker Hub or re-sync unchanged runtime dependencies.
       - name: Mirror missing runtime images to TCR
+        if: github.event_name == 'workflow_dispatch' && inputs.sync_runtime_images == true
         shell: bash
         run: |
           set -Eeuo pipefail

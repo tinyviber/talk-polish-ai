@@ -9,7 +9,9 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/contracts packages/contracts
-RUN bun install --frozen-lockfile
+RUN sed -i 's#https://europe-west1-npm.pkg.dev/lovable-core-prod/sandbox-npm-cache/#https://registry.npmmirror.com/#g' bun.lock \
+    && printf '\nregistry = "https://registry.npmmirror.com"\n' >> bunfig.toml \
+    && bun install --frozen-lockfile
 
 COPY apps/api apps/api
 RUN bun run build:api

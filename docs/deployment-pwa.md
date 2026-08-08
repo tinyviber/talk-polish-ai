@@ -1,22 +1,99 @@
-# PWA deployment notes
+# Daily Story production notes
 
-Serve the web app and Fastify API on the same HTTPS origin whenever possible. Build production with `VITE_APP_MODE=api` and an empty `VITE_API_URL`; the web client then uses relative `/api` requests. Set `VITE_API_URL` only when the API is intentionally on another origin and configure CORS explicitly.
+Run web and API under one HTTPS origin. Production builds use
+`VITE_APP_MODE=api` and an empty `VITE_API_URL`, so Daily Story always calls
+relative `/api/daily-story/*` endpoints. Do not point a production Daily Story
+build at another origin: browser-held provider credentials must pass only
+through same-origin API requests.
 
-`bun run build:web` writes the client bundle (hashed assets, icons, fonts, `offline.html`, `manifest.webmanifest`, `sw.js`) to `apps/web/.output/public` and the SSR Node server bundle to `apps/web/.output/server`. Workbox reads `.output/public`, so the precache manifest covers the real shipped shell; check the build log for `precache N entries` and verify `sw.js` contains hashed `assets/` URLs before shipping. The Vite config explicitly uses Nitro's `node-server` preset. Fastify remains on `3333`. Keep these limits distinct:
+## Browser and cache policy
 
-- The maximum audio file is 25 MiB (`MAX_UPLOAD_BYTES=25*1024*1024` by default). This is the file-size limit enforced by Fastify/multipart and storage.
-- The maximum complete multipart HTTP request body is 30 MiB, which includes the audio plus multipart fields and framing. Caddy's experimental `request_body` directive requires Caddy >=2.10; configure the reverse proxy as `client_max_body_size 30m` in Nginx or `request_body { max_size 30MiB }` in Caddy. Do not use the 25 MiB audio limit as the proxy request-body limit.
+Provider configuration is stored only in versioned IndexedDB on current
+browser device. It must not appear in environment variables, deployment files,
+server logs, database rows, localStorage, Cache Storage, React Query
+persistence, or recording outbox. Browser reload may retain only stable,
+non-secret conversation snapshots; no audio Blob survives it.
 
-The checked-in Nginx and Caddy proxy baseline for `/api/*` is 420s for the current synchronous provider pipeline. Derive the required value from `TRANSCRIPTION_TIMEOUT_MS×HTTP_MAX_ATTEMPTS + CHAT_TIMEOUT_MS×HTTP_MAX_ATTEMPTS×2 + backoff + S3/DB/storage余量`; the margin must include `S3_REQUEST_TIMEOUT_MS×S3_MAX_ATTEMPTS`, database persistence, and proxy idle-read behavior. With the defaults of 60,000ms, 30,000ms, and 3 attempts, the provider portion is 360s before backoff and storage, so 420s is a baseline with margin, not a universal guarantee. Recompute it and choose a larger value when provider, retry, or storage settings require it. If `MAX_UPLOAD_BYTES`, `TRANSCRIPTION_TIMEOUT_MS`, `CHAT_TIMEOUT_MS`, `HTTP_MAX_ATTEMPTS`, or related timeout/retry settings change, update the proxy body-size and timeout limits at the same time. Updating only the API configuration is invalid: the proxy can reject an otherwise valid multipart request or close it before the API finishes. Apply the checked-in proxy snippets with the documented 30 MiB/420s values, or update both values together when customizing them. The Nginx example's `map` belongs in the `http {}` block (Caddy needs no equivalent).
+Service worker rules are mandatory:
 
-The attempt endpoint is currently synchronous: the upload request waits for storage, transcription, assessment, and persistence, then returns the result. A possible long-term design is `202 Accepted` plus status polling, but that is only a future option; it is not implemented, so do not configure or document the deployment as though polling already exists.
+- every `/api/*` request is NetworkOnly;
+- authenticated, POST, multipart, Daily Story, and TTS/audio requests are
+  never cached;
+- navigation remains NetworkFirst with checked-in offline page fallback;
+- cache namespace changes clean legacy navigation/prompt caches before release.
 
-Publish the web output as a release, not by replacing a live directory. For example: build in a staging checkout, move `apps/web/.output` to `/srv/kotoba/releases/<build-id>/web/.output`, atomically switch `/srv/kotoba/current` to that release, then run `node /srv/kotoba/current/web/.output/server/index.mjs`. Keep the previous release until the new worker activates and health checks pass.
+Keep `sw.js`, `manifest.webmanifest`, and `offline.html` revalidated
+(`no-cache`). Hashed assets, local fonts, and icons may be immutable.
 
-`deploy/Caddyfile` and `deploy/nginx.conf` include HTTPS, security headers, and the required cache policy. `sw.js`, `manifest.webmanifest`, and `offline.html` must be revalidated (`no-cache`) so a new service worker can detect updates. Vite-hashed JS/CSS and static icons/fonts can be immutable. Never proxy or cache authenticated audio, recordings, feedback, diagnostics, provider, realtime, or POST routes in an edge cache. API responses default to `private, no-store`; only public prompts may be short-lived.
+## Proxy baseline
 
-The service worker uses `injectManifest` and `registerType: prompt`. It precaches the hashed shell plus the offline page, icons, and local fonts. Navigation is NetworkFirst with `/offline.html` fallback; public `GET /api/prompts` has a short bounded cache. All other `/api` routes are NetworkOnly. Deploy the new build atomically, keep the previous build available until the new worker activates, and bump the cache names in `apps/web/src/sw.ts` when changing cache semantics.
+[deploy/Caddyfile](../deploy/Caddyfile) and
+[deploy/nginx.conf](../deploy/nginx.conf) are examples, not production server
+configuration. Retain real domain, certificates, reverse-proxy targets, and
+timeouts when carrying over the narrowly reviewed headers. Never copy the
+placeholder Caddy site block onto a live host.
 
-Do not auto-reload while recording, uploading, or processing. The UI asks for update confirmation and disables confirmation while busy. If an update is stuck, close active recording/processing, accept the prompt, and verify the new `sw.js` response is not served from a stale proxy cache.
+TanStack streaming output has a small, request-specific bootstrap script; a
+static hash cannot cover it. Web creates a cryptographically random nonce for
+each HTML response, applies it to every script tag, and emits exactly one CSP:
 
-The IndexedDB outbox is scoped by `learnerId` and uses a client-generated `clientAttemptId`; startup after learner bootstrap, restored visibility, network recovery, and manual retry perform foreground sync. Background Sync is not required. Lifecycle recovery is best-effort: an iOS force-kill or OS suspension can discard in-memory chunks even though visibility, pagehide, track, MediaRecorder, and AudioContext interruptions attempt to finalize a Blob.
+```text
+default-src 'self'; connect-src 'self'; script-src 'self' 'nonce-<fresh-value>'
+```
+
+`script-src 'unsafe-inline'` is forbidden. CI proves one CSP header exists,
+limits `connect-src` to self, binds every script tag to its response nonce, and
+uses a different nonce for a second response. Caddy/Nginx
+must forward this upstream header unchanged; do not add a proxy-level static
+CSP, because multiple CSP headers intersect and static `script-src 'self'`
+would block nonce-bound stream scripts. Existing `style-src 'unsafe-inline'`
+is limited to style compatibility; it is not a script exception. Realtime is
+hidden, so do not re-add `wss:` or broad `https:` to `connect-src`.
+
+`/api/*` needs enough room for one 25 MiB audio file plus multipart framing:
+
+- Caddy >=2.10: `request_body { max_size 30MiB }`
+- Nginx: `client_max_body_size 30m`
+
+Current 420s proxy timeout is legacy synchronous-pipeline baseline. Recompute
+it with actual Daily Story upstream retry, ASR, chat, and network bounds before
+changing either proxy. Keep app and proxy limits paired.
+
+## Image release identity
+
+API and web Dockerfiles accept only TCR-mirrored Bun/Node runtime defaults and
+use npm mirror during install. The image workflow runs only for `main` or
+immutable `deploy/*` tag pushes:
+
+1. Branch `codex/daily-story-conversation` full CI passes at exact 40-char
+   head SHA. The publish workflow waits for and independently queries `ci.yml`;
+   it refuses the tag unless both `checks` and `integration` succeeded for that
+   SHA.
+2. Operator pushes annotated `deploy/<that-sha>` tag at same commit.
+3. Workflow peels and validates tag, downloads codeload source by verified
+   commit SHA, then publishes `sha-<40-char-sha>` convenience tags.
+4. Workflow summary records API/web immutable `repository@sha256:...` values.
+5. Host sets only `API_IMAGE` and `WEB_IMAGE` to those exact digest values.
+
+Do not deploy `latest`, a short SHA, mutable tag, local build, or a digest not
+recorded by matching workflow/tag. Details for Tencent Cloud host operations
+are intentionally in ignored `docs/deploy-tencent-cloud.local.md`.
+
+## Release checks
+
+Before app recreation, confirm host Compose resolves expected API/web images;
+record current image values and container digests. Back up active Caddyfile to
+a SHA-named server-local file, validate/reload only reviewed header change, and
+verify live CSP/cache headers. On a Caddy validation, reload, or header failure,
+restore/reload that backup before touching app containers.
+
+Recreate only `api` and `web` with Compose `--force-recreate`. Do not use
+`docker compose down -v`, alter PostgreSQL/MinIO volumes, change secrets, or
+run an unplanned migration. Smoke HTTPS `/`, `/api/health/live`,
+`/api/health/ready`, PWA manifest/shell, Daily-only UI, Settings gate, strict
+CSP, and browser IndexedDB save/reload. The sentinel configuration value used
+for browser verification must never be printed or sent upstream.
+
+If app boot, readiness, proxy, or CSP fails, restore recorded Caddyfile and
+API/web digest values, then recreate affected services. Image rollback does
+not require database rollback because Daily Story adds no migration.

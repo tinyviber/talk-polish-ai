@@ -45,12 +45,26 @@ const envSchema = z.object({
   TTS_TIMEOUT_MS: positiveInt(30_000),
   HTTP_MAX_ATTEMPTS: positiveInt(3),
   PROVIDER_RATE_LIMIT_PER_MINUTE: positiveInt(20),
+  /** Daily Story limits are intentionally separate from legacy provider routes. */
+  DAILY_STORY_RATE_LIMIT_PER_MINUTE: positiveInt(12),
+  DAILY_STORY_PROVIDER_CHECK_RATE_LIMIT_PER_MINUTE: positiveInt(3),
+  DAILY_STORY_CONCURRENT_REQUESTS: positiveInt(2),
+  /**
+   * Server-owned finite production origin allowlist for browser-supplied Daily
+   * provider URLs. Dynamic origins stay disabled until a Bun transport proof is
+   * shipped as a release gate.
+   */
+  DAILY_PROVIDER_ALLOWED_ORIGINS: z
+    .string()
+    .default("https://api.deepseek.com,https://api.siliconflow.cn"),
   S3_ENDPOINT: optionalString().default("http://127.0.0.1:9000"),
   S3_REGION: z.string().default("us-east-1"),
   S3_BUCKET: z.string().min(1).default("kotoba-audio"),
   S3_ACCESS_KEY_ID: optionalString(),
   S3_SECRET_ACCESS_KEY: optionalString(),
   S3_FORCE_PATH_STYLE: envBoolean(true),
+  /** Allow only the Docker Compose `http://minio:9000` service in production. */
+  S3_ALLOW_INSECURE_INTERNAL: envBoolean(false),
   S3_REQUEST_TIMEOUT_MS: positiveInt(10_000),
   S3_MAX_ATTEMPTS: positiveInt(3),
   /** Defaults to MAX_UPLOAD_BYTES; set explicitly to enforce a stricter S3 limit. */
@@ -123,10 +137,10 @@ export function env(): Env {
       if (value) assertProviderUrl(name, value, parsed.data.NODE_ENV === "production");
     }
     if (parsed.data.AUDIO_STORAGE_DRIVER === "s3" && parsed.data.S3_ENDPOINT) {
-      assertProviderUrl(
-        "S3_ENDPOINT",
+      assertS3Endpoint(
         parsed.data.S3_ENDPOINT,
         parsed.data.NODE_ENV === "production",
+        parsed.data.S3_ALLOW_INSECURE_INTERNAL,
       );
     }
     if (parsed.data.REALTIME_URL) {
@@ -169,6 +183,32 @@ export function assertProductionSecret(secret: string) {
 }
 
 function assertProviderUrl(name: string, value: string, production: boolean) {
+  const parsed = parseHttpUrl(name, value);
+  if (production && parsed.protocol !== "https:") {
+    throw new Error(`${name} must use HTTPS in production.`);
+  }
+}
+
+function assertS3Endpoint(value: string, production: boolean, allowInsecureInternal: boolean) {
+  const parsed = parseHttpUrl("S3_ENDPOINT", value);
+  if (!production || parsed.protocol === "https:") return;
+  if (
+    allowInsecureInternal &&
+    parsed.protocol === "http:" &&
+    parsed.hostname === "minio" &&
+    parsed.port === "9000" &&
+    parsed.pathname === "/" &&
+    !parsed.search &&
+    !parsed.hash
+  ) {
+    return;
+  }
+  throw new Error(
+    "S3_ENDPOINT must use HTTPS in production unless it is the Docker-internal http://minio:9000 endpoint with S3_ALLOW_INSECURE_INTERNAL=true.",
+  );
+}
+
+function parseHttpUrl(name: string, value: string) {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -178,9 +218,7 @@ function assertProviderUrl(name: string, value: string, production: boolean) {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new Error(`${name} must be an HTTP(S) URL without embedded credentials.`);
   }
-  if (production && parsed.protocol !== "https:") {
-    throw new Error(`${name} must use HTTPS in production.`);
-  }
+  return parsed;
 }
 
 function assertRealtimeUrl(value: string, production: boolean) {

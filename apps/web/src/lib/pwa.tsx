@@ -96,13 +96,11 @@ export function PwaProvider({ children }: { children: ReactNode }) {
     <PwaContext.Provider value={{ busy, setBusy }}>
       {children}
       {offlineReady ? (
-        <PwaNotice onDismiss={() => setOfflineReady(false)}>
-          Offline practice shell is ready.
-        </PwaNotice>
+        <PwaNotice onDismiss={() => setOfflineReady(false)}>离线页面已准备好。</PwaNotice>
       ) : null}
       {needRefresh ? (
         <PwaNotice
-          actionLabel={busy ? "Busy" : "Update"}
+          actionLabel={busy ? "处理中" : "更新"}
           actionDisabled={busy}
           onAction={() => {
             if (!busyRef.current) {
@@ -112,17 +110,17 @@ export function PwaProvider({ children }: { children: ReactNode }) {
           }}
           onDismiss={() => setNeedRefresh(false)}
         >
-          A new Kotoba Loop version is available. Finish your recording first.
+          有新版本可用。请先完成当前操作。
         </PwaNotice>
       ) : null}
       {!installed && (installEvent || ios) ? (
-        <PwaNotice actionLabel="Install" onAction={() => void install()} onDismiss={dismissInstall}>
-          Add Kotoba Loop to your home screen for quick practice.
+        <PwaNotice actionLabel="安装" onAction={() => void install()} onDismiss={dismissInstall}>
+          添加每日故事对话到主屏幕。
         </PwaNotice>
       ) : null}
       {iosGuide ? (
         <PwaNotice onDismiss={() => setIosGuide(false)}>
-          On iPhone or iPad, tap Share, then “Add to Home Screen”.
+          在 iPhone 或 iPad 上，点“分享”，再点“添加到主屏幕”。
         </PwaNotice>
       ) : null}
     </PwaContext.Provider>

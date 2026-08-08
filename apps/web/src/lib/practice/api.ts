@@ -157,6 +157,9 @@ async function fetchWithRetry(
   const retryLimit = method === "GET" || method === "HEAD" ? READ_RETRY_LIMIT : 0;
   for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
     const controller = new AbortController();
+    const abortFromCaller = () => controller.abort();
+    if (init.signal?.aborted) controller.abort();
+    else init.signal?.addEventListener("abort", abortFromCaller, { once: true });
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(apiUrl(path), {
@@ -185,9 +188,15 @@ async function fetchWithRetry(
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     } finally {
       clearTimeout(timer);
+      init.signal?.removeEventListener("abort", abortFromCaller);
     }
   }
   throw new ApiClientError("The API request failed.", 0);
+}
+
+/** Shared authenticated transport for isolated feature modules. Keeps learner token memory-only. */
+export async function authenticatedApiFetch(path: string, init: RequestInit = {}) {
+  return fetchWithRetry(path, init, true);
 }
 
 function apiErrorFromResponse(response: Response, payload: unknown, prefix: string) {

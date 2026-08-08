@@ -89,7 +89,16 @@ export async function buildApp(config: Env = env()) {
     }
 
     if (hasZodFastifySchemaValidationErrors(error)) {
-      const details = error.validation.map((issue) => issue.message);
+      // Daily Story bodies carry browser-local provider credentials. Zod's enum
+      // messages include the rejected value, so returning them would reflect a
+      // key accidentally entered into an invalid field. Keep this boundary
+      // deliberately generic; clients already map HTTP 422 to a safe message.
+      const isDailyStoryRequest = (request.url.split("?", 1)[0] ?? request.url).startsWith(
+        "/api/daily-story/",
+      );
+      const details = isDailyStoryRequest
+        ? undefined
+        : error.validation.map((issue) => issue.message);
       const validation = ApiError.validation("Request validation failed.", details);
       reply.status(validation.statusCode).send(toErrorResponse(validation, request.id));
       return;

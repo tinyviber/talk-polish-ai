@@ -84,9 +84,10 @@ Dynamic inline scripts must carry that exact nonce; third-party scripts remain
 forbidden. Caddy/Nginx forward this web response header and must not append a
 second static CSP, because policies intersect and would block nonce-bound
 scripts. `style-src 'unsafe-inline'` remains only for shell styling
-compatibility and does not permit scripts. Keep complete multipart request
-limit at 30 MiB while individual audio file limit is 25 MiB; adjust proxy
-timeout and body limits together when API limits change.
+compatibility and does not permit scripts. Caddy uses
+`request_body { max_size 30MiB }`: keep that complete multipart request limit
+at 30 MiB while individual audio file limit is 25 MiB; adjust proxy timeout
+and body limits together when API limits change.
 
 See [docs/deployment-pwa.md](docs/deployment-pwa.md) for release safeguards.
 

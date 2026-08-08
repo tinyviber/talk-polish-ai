@@ -1,4 +1,5 @@
-FROM oven/bun:1.2.17
+ARG BUN_BASE_IMAGE=ccr.ccs.tencentyun.com/kotoba/oven-bun:1.2.17
+FROM ${BUN_BASE_IMAGE}
 
 WORKDIR /app
 ENV NODE_ENV=production

@@ -61,6 +61,20 @@ jobs:
                 --username "$TCR_USERNAME" \
                 --password-stdin
 
+      - name: Mirror Bun base image to TCR
+        run: |
+          set -Eeuo pipefail
+          base_image="$TCR_REGISTRY/$TCR_NAMESPACE/oven-bun:1.2.17"
+
+          if docker manifest inspect "$base_image" >/dev/null 2>&1; then
+            echo "TCR hit: $base_image"
+          else
+            echo "TCR miss: $base_image; mirroring oven/bun:1.2.17"
+            docker pull oven/bun:1.2.17
+            docker tag oven/bun:1.2.17 "$base_image"
+            docker push "$base_image"
+          fi
+
       - name: Set up Docker Buildx
         run: |
           set -Eeuo pipefail
@@ -161,6 +175,7 @@ jobs:
           docker buildx build \
             --file apps/api/Dockerfile \
             --platform linux/amd64 \
+            --build-arg "BUN_BASE_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/oven-bun:1.2.17" \
             --tag "$API_IMAGE:latest" \
             --tag "$API_IMAGE:$API_SHA_TAG" \
             --progress plain \

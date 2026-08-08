@@ -1,4 +1,5 @@
 ARG BUN_BASE_IMAGE=ccr.ccs.tencentyun.com/kotoba/oven-bun:1.2.17
+ARG NODE_RUNTIME_IMAGE=ccr.ccs.tencentyun.com/kotoba/node:22-alpine
 
 FROM ${BUN_BASE_IMAGE} AS build
 
@@ -21,7 +22,7 @@ RUN sed -i 's#https://europe-west1-npm.pkg.dev/lovable-core-prod/sandbox-npm-cac
 COPY apps/web apps/web
 RUN bun run build:web
 
-FROM ${BUN_BASE_IMAGE} AS runtime
+FROM ${NODE_RUNTIME_IMAGE} AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production

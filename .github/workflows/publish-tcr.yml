@@ -80,6 +80,20 @@ jobs:
             docker pull oven/bun:1.2.17
             docker tag oven/bun:1.2.17 "$base_image"
             docker push "$base_image"
+
+      - name: Mirror Node runtime image to TCR
+        run: |
+          set -Eeuo pipefail
+          runtime_image="$TCR_REGISTRY/$TCR_NAMESPACE/node:22-alpine"
+
+          if docker manifest inspect "$runtime_image" >/dev/null 2>&1; then
+            echo "TCR hit: $runtime_image"
+          else
+            echo "TCR miss: $runtime_image; mirroring node:22-alpine"
+            docker pull node:22-alpine
+            docker tag node:22-alpine "$runtime_image"
+            docker push "$runtime_image"
+          fi
           fi
 
       - name: Set up Docker Buildx
@@ -282,6 +296,7 @@ jobs:
             --file apps/web/Dockerfile \
             --platform linux/amd64 \
             --build-arg "BUN_BASE_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/oven-bun:1.2.17" \
+            --build-arg "NODE_RUNTIME_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/node:22-alpine" \
             --build-arg VITE_APP_MODE=api \
             --build-arg VITE_API_URL= \
             --tag "$WEB_IMAGE:latest" \

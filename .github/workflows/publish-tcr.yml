@@ -154,7 +154,13 @@ jobs:
           )
 
           before_dir="$RUNNER_TEMP/repo-before"
-          download_repo "$EVENT_BEFORE" "$before_dir"
+          before_archive="$RUNNER_TEMP/repo-before-$EVENT_BEFORE.tar.gz"
+          mkdir -p "$before_dir"
+          curl -fL --http1.1 --retry 5 --retry-all-errors \
+            --connect-timeout 10 --max-time 180 \
+            -o "$before_archive" \
+            "https://codeload.github.com/$GITHUB_REPOSITORY/tar.gz/$EVENT_BEFORE"
+          tar -xzf "$before_archive" --strip-components=1 -C "$before_dir"
 
           api_changed=false
           for path in "${api_paths[@]}"; do

@@ -31,24 +31,21 @@ jobs:
       - name: Checkout repository
         run: |
           set -Eeuo pipefail
-          git init .
-          git config advice.detachedHead false
-          git remote remove origin >/dev/null 2>&1 || true
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          download_repo() {
+            ref="$1"
+            destination="$2"
+            archive="$RUNNER_TEMP/repo-$ref.tar.gz"
 
-          fetch_ok=false
-          for attempt in 1 2 3 4 5; do
-            if git -c http.version=HTTP/1.1 fetch --no-tags --depth=2 origin "$GITHUB_SHA"; then
-              fetch_ok=true
-              break
-            fi
-            echo "GitHub fetch failed; retry $attempt/5"
-            sleep $((attempt * 5))
-          done
-          test "$fetch_ok" = true
+            mkdir -p "$destination"
+            curl -fL --http1.1 --retry 5 --retry-all-errors \
+              --connect-timeout 10 --max-time 180 \
+              -o "$archive" \
+              "https://codeload.github.com/$GITHUB_REPOSITORY/tar.gz/$ref"
+            tar -xzf "$archive" --strip-components=1 -C "$destination"
+          }
 
-          git checkout --detach --force "$GITHUB_SHA"
-          git clean -ffdx
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          download_repo "$GITHUB_SHA" "$GITHUB_WORKSPACE"
 
       - name: Validate TCR repository settings
         run: |
@@ -156,11 +153,23 @@ jobs:
             packages/contracts
           )
 
-          if ! git cat-file -e "$EVENT_BEFORE^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "$EVENT_BEFORE"
-          fi
+          before_dir="$RUNNER_TEMP/repo-before"
+          download_repo "$EVENT_BEFORE" "$before_dir"
 
-          if git diff --quiet "$EVENT_BEFORE" "$CURRENT_SHA" -- "${api_paths[@]}"; then
+          api_changed=false
+          for path in "${api_paths[@]}"; do
+            current_path="$GITHUB_WORKSPACE/$path"
+            before_path="$before_dir/$path"
+
+            if [ -e "$current_path" ] || [ -e "$before_path" ]; then
+              if ! diff -qr "$current_path" "$before_path" >/dev/null 2>&1; then
+                api_changed=true
+                break
+              fi
+            fi
+          done
+
+          if [ "$api_changed" = false ]; then
             echo "api_changed=false" >> "$GITHUB_OUTPUT"
             echo "API image: unchanged; skip build and push"
           else

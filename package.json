@@ -17,7 +17,7 @@
     "build:web": "bun --filter @kotoba/web build",
     "start:web": "bun --filter @kotoba/web start",
     "build:api": "bun --filter @kotoba/api build",
-    "build:docker": "docker build -f apps/api/Dockerfile -t kotoba-api:ci . && docker build -f apps/web/Dockerfile -t kotoba-web:ci .",
+    "build:docker": "docker build --build-arg BUN_BASE_IMAGE=oven/bun:1.2.17 -f apps/api/Dockerfile -t kotoba-api:ci . && docker build --build-arg BUN_BASE_IMAGE=oven/bun:1.2.17 --build-arg NODE_RUNTIME_IMAGE=node:22-alpine -f apps/web/Dockerfile -t kotoba-web:ci .",
     "lint": "eslint .",
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun --filter '*' test",

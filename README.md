@@ -69,6 +69,11 @@ docker build -f apps/api/Dockerfile -t kotoba-api:local .
 docker build -f apps/web/Dockerfile -t kotoba-web:local .
 ```
 
+`bun run build:docker` is the GitHub-hosted CI smoke build. It explicitly
+overrides those base-image arguments with public pinned Bun/Node images because
+CI has no TCR credentials; production defaults and publish builds remain
+TCR-only.
+
 Use [deploy/Caddyfile](deploy/Caddyfile) or
 [deploy/nginx.conf](deploy/nginx.conf) only as reviewed examples. They use
 `example.com`; never overwrite server Caddy/Nginx configuration, site address,

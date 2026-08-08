@@ -29,9 +29,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          git init .
+          git config advice.detachedHead false
+          git remote remove origin >/dev/null 2>&1 || true
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          git checkout --detach --force "$GITHUB_SHA"
+          git clean -ffdx
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Validate TCR repository settings
         run: |
@@ -53,7 +62,13 @@ jobs:
                 --password-stdin
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        run: |
+          set -Eeuo pipefail
+          if ! docker buildx inspect txc-builder >/dev/null 2>&1; then
+            docker buildx create --name txc-builder --driver docker-container
+          fi
+          docker buildx use txc-builder
+          docker buildx inspect --bootstrap
 
       # These are the images used by docker-compose.yml on the deployment host.
       # Only run this on an explicit manual request. Normal application pushes
@@ -134,34 +149,27 @@ jobs:
       - name: Extract API image metadata
         id: meta
         if: steps.api_changes.outputs.api_changed == 'true'
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.TCR_REGISTRY }}/${{ env.TCR_NAMESPACE }}/${{ env.API_REPOSITORY }}
-          tags: |
-            type=sha,prefix=sha-,format=short
-            type=raw,value=latest
+        run: |
+          set -Eeuo pipefail
+          echo "API_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/$API_REPOSITORY" >> "$GITHUB_ENV"
+          echo "API_SHA_TAG=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
 
       - name: Build API image
         if: steps.api_changes.outputs.api_changed == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: apps/api/Dockerfile
-          platforms: linux/amd64
-          load: true
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          progress: plain
-          cache-from: type=gha,scope=kotoba-api
-          cache-to: type=gha,mode=max,scope=kotoba-api
+        run: |
+          set -Eeuo pipefail
+          docker buildx build \
+            --file apps/api/Dockerfile \
+            --platform linux/amd64 \
+            --tag "$API_IMAGE:latest" \
+            --tag "$API_IMAGE:$API_SHA_TAG" \
+            --progress plain \
+            --load \
+            .
 
       - name: Push API image to TCR
         if: steps.api_changes.outputs.api_changed == 'true'
-        env:
-          API_IMAGE: ${{ env.TCR_REGISTRY }}/${{ env.TCR_NAMESPACE }}/${{ env.API_REPOSITORY }}
         run: |
           set -Eeuo pipefail
-          api_sha_tag="sha-${GITHUB_SHA:0:7}"
           docker push "$API_IMAGE:latest"
-          docker push "$API_IMAGE:$api_sha_tag"
+          docker push "$API_IMAGE:$API_SHA_TAG"

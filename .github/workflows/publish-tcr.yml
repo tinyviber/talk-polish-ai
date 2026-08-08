@@ -21,6 +21,7 @@ env:
   TCR_REGISTRY: ccr.ccs.tencentyun.com
   TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE || 'kotoba' }}
   API_REPOSITORY: ${{ vars.TCR_API_REPOSITORY || 'kotoba-api' }}
+  WEB_REPOSITORY: ${{ vars.TCR_WEB_REPOSITORY || 'kotoba-web' }}
 
 jobs:
   publish:
@@ -52,6 +53,7 @@ jobs:
           set -Eeuo pipefail
           test -n "$TCR_NAMESPACE"
           test -n "$API_REPOSITORY"
+          test -n "$WEB_REPOSITORY"
 
       - name: Login to TCR Personal
         env:
@@ -191,6 +193,66 @@ jobs:
           echo "API_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/$API_REPOSITORY" >> "$GITHUB_ENV"
           echo "API_SHA_TAG=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
 
+      - name: Detect web image changes
+        id: web_changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -Eeuo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ -z "$EVENT_BEFORE" ] || [[ "$EVENT_BEFORE" =~ ^0+$ ]]; then
+            echo "web_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Web image: rebuild (manual run)"
+            exit 0
+          fi
+
+          web_paths=(
+            .dockerignore
+            package.json
+            bun.lock
+            bunfig.toml
+            apps/web
+            packages/contracts
+          )
+
+          before_dir="$RUNNER_TEMP/repo-before-web"
+          before_archive="$RUNNER_TEMP/repo-before-web-$EVENT_BEFORE.tar.gz"
+          mkdir -p "$before_dir"
+          curl -fL --http1.1 --retry 5 --retry-all-errors \
+            --connect-timeout 10 --max-time 180 \
+            -o "$before_archive" \
+            "https://codeload.github.com/$GITHUB_REPOSITORY/tar.gz/$EVENT_BEFORE"
+          tar -xzf "$before_archive" --strip-components=1 -C "$before_dir"
+
+          web_changed=false
+          for path in "${web_paths[@]}"; do
+            current_path="$GITHUB_WORKSPACE/$path"
+            before_path="$before_dir/$path"
+
+            if [ -e "$current_path" ] || [ -e "$before_path" ]; then
+              if ! diff -qr "$current_path" "$before_path" >/dev/null 2>&1; then
+                web_changed=true
+                break
+              fi
+            fi
+          done
+
+          echo "web_changed=$web_changed" >> "$GITHUB_OUTPUT"
+          if [ "$web_changed" = true ]; then
+            echo "Web image: relevant files changed; rebuild"
+          else
+            echo "Web image: unchanged; skip build and push"
+          fi
+
+      - name: Extract web image metadata
+        id: web_meta
+        if: steps.web_changes.outputs.web_changed == 'true'
+        run: |
+          set -Eeuo pipefail
+          echo "WEB_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/$WEB_REPOSITORY" >> "$GITHUB_ENV"
+          echo "WEB_SHA_TAG=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
       - name: Build API image
         if: steps.api_changes.outputs.api_changed == 'true'
         run: |
@@ -211,3 +273,26 @@ jobs:
           set -Eeuo pipefail
           docker push "$API_IMAGE:latest"
           docker push "$API_IMAGE:$API_SHA_TAG"
+
+      - name: Build web image
+        if: steps.web_changes.outputs.web_changed == 'true'
+        run: |
+          set -Eeuo pipefail
+          docker buildx build \
+            --file apps/web/Dockerfile \
+            --platform linux/amd64 \
+            --build-arg "BUN_BASE_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/oven-bun:1.2.17" \
+            --build-arg VITE_APP_MODE=api \
+            --build-arg VITE_API_URL= \
+            --tag "$WEB_IMAGE:latest" \
+            --tag "$WEB_IMAGE:$WEB_SHA_TAG" \
+            --progress plain \
+            --load \
+            .
+
+      - name: Push web image to TCR
+        if: steps.web_changes.outputs.web_changed == 'true'
+        run: |
+          set -Eeuo pipefail
+          docker push "$WEB_IMAGE:latest"
+          docker push "$WEB_IMAGE:$WEB_SHA_TAG"

@@ -51,6 +51,8 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: optionalString(),
   S3_SECRET_ACCESS_KEY: optionalString(),
   S3_FORCE_PATH_STYLE: envBoolean(true),
+  /** Permit HTTP only for a same-network MinIO service explicitly named `minio`. */
+  S3_ALLOW_INSECURE_INTERNAL: envBoolean(false),
   S3_REQUEST_TIMEOUT_MS: positiveInt(10_000),
   S3_MAX_ATTEMPTS: positiveInt(3),
   /** Defaults to MAX_UPLOAD_BYTES; set explicitly to enforce a stricter S3 limit. */
@@ -126,8 +128,17 @@ export function env(): Env {
       assertProviderUrl(
         "S3_ENDPOINT",
         parsed.data.S3_ENDPOINT,
-        parsed.data.NODE_ENV === "production",
+        parsed.data.NODE_ENV === "production" && !parsed.data.S3_ALLOW_INSECURE_INTERNAL,
       );
+      if (
+        parsed.data.NODE_ENV === "production" &&
+        parsed.data.S3_ALLOW_INSECURE_INTERNAL &&
+        isInsecureInternalS3Endpoint(parsed.data.S3_ENDPOINT) === false
+      ) {
+        throw new Error(
+          "S3_ALLOW_INSECURE_INTERNAL is only allowed for an HTTP endpoint named minio, localhost, or 127.0.0.1.",
+        );
+      }
     }
     if (parsed.data.REALTIME_URL) {
       assertRealtimeUrl(parsed.data.REALTIME_URL, parsed.data.NODE_ENV === "production");
@@ -196,6 +207,18 @@ function assertRealtimeUrl(value: string, production: boolean) {
   if (production && parsed.protocol !== "wss:") {
     throw new Error("REALTIME_URL must use WSS in production.");
   }
+}
+
+function isInsecureInternalS3Endpoint(value: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === "http:" && ["minio", "localhost", "127.0.0.1"].includes(parsed.hostname)
+  );
 }
 
 function optionalString() {

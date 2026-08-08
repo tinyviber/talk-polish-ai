@@ -31,7 +31,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
 
       - name: Validate TCR repository settings
         run: |
@@ -118,6 +118,10 @@ jobs:
             apps/web/package.json
             packages/contracts
           )
+
+          if ! git cat-file -e "$EVENT_BEFORE^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$EVENT_BEFORE"
+          fi
 
           if git diff --quiet "$EVENT_BEFORE" "$CURRENT_SHA" -- "${api_paths[@]}"; then
             echo "api_changed=false" >> "$GITHUB_OUTPUT"

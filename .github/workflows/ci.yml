@@ -146,8 +146,8 @@ jobs:
               if (inlineScriptCount === 0) {
                 throw new Error("Production shell did not exercise nonce protection for streamed inline scripts");
               }
-              exit 0
           NODE
+              exit 0
             fi
             if (( attempt == 30 )); then
               echo "Production web server did not respond successfully on port 3000" >&2

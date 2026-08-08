@@ -7,8 +7,10 @@ WORKDIR /app
 ENV NODE_ENV=production
 ARG VITE_APP_MODE=api
 ARG VITE_API_URL=
+ARG VITE_BUILD_ID=dev
 ENV VITE_APP_MODE=$VITE_APP_MODE
 ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_BUILD_ID=$VITE_BUILD_ID
 
 COPY package.json bun.lock bunfig.toml ./
 COPY apps/api/package.json apps/api/package.json

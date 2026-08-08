@@ -22,6 +22,8 @@ import {
 } from "../lib/practice/offlineQueue";
 import { startOfflineQueueSyncLoop } from "../lib/practice/offlineQueueSync";
 
+const BUILD_ID = import.meta.env["VITE_BUILD_ID"] ?? "dev";
+
 function NotFoundComponent() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -109,7 +111,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     links: [
       {
         rel: "stylesheet",
-        href: appCss,
+        href: `${appCss}?v=${BUILD_ID}`,
       },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
       { rel: "manifest", href: "/manifest.webmanifest" },
@@ -133,7 +135,7 @@ function RootShell({ children }: { children: ReactNode }) {
       <head>
         <HeadContent />
       </head>
-      <body>
+      <body data-build={BUILD_ID}>
         {children}
         <Scripts />
       </body>

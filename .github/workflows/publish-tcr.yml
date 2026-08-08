@@ -299,6 +299,7 @@ jobs:
             --build-arg "NODE_RUNTIME_IMAGE=$TCR_REGISTRY/$TCR_NAMESPACE/node:22-alpine" \
             --build-arg VITE_APP_MODE=api \
             --build-arg VITE_API_URL= \
+            --build-arg "VITE_BUILD_ID=$GITHUB_SHA" \
             --tag "$WEB_IMAGE:latest" \
             --tag "$WEB_IMAGE:$WEB_SHA_TAG" \
             --progress plain \

@@ -29,18 +29,26 @@ jobs:
 
     steps:
       - name: Checkout repository
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
           git init .
           git config advice.detachedHead false
           git remote remove origin >/dev/null 2>&1 || true
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+
+          fetch_ok=false
+          for attempt in 1 2 3 4 5; do
+            if git -c http.version=HTTP/1.1 fetch --no-tags --depth=2 origin "$GITHUB_SHA"; then
+              fetch_ok=true
+              break
+            fi
+            echo "GitHub fetch failed; retry $attempt/5"
+            sleep $((attempt * 5))
+          done
+          test "$fetch_ok" = true
+
           git checkout --detach --force "$GITHUB_SHA"
           git clean -ffdx
-          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Validate TCR repository settings
         run: |

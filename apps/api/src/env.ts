@@ -63,6 +63,8 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: optionalString(),
   S3_SECRET_ACCESS_KEY: optionalString(),
   S3_FORCE_PATH_STYLE: envBoolean(true),
+  /** Allow only the Docker Compose `http://minio:9000` service in production. */
+  S3_ALLOW_INSECURE_INTERNAL: envBoolean(false),
   S3_REQUEST_TIMEOUT_MS: positiveInt(10_000),
   S3_MAX_ATTEMPTS: positiveInt(3),
   /** Defaults to MAX_UPLOAD_BYTES; set explicitly to enforce a stricter S3 limit. */
@@ -135,10 +137,10 @@ export function env(): Env {
       if (value) assertProviderUrl(name, value, parsed.data.NODE_ENV === "production");
     }
     if (parsed.data.AUDIO_STORAGE_DRIVER === "s3" && parsed.data.S3_ENDPOINT) {
-      assertProviderUrl(
-        "S3_ENDPOINT",
+      assertS3Endpoint(
         parsed.data.S3_ENDPOINT,
         parsed.data.NODE_ENV === "production",
+        parsed.data.S3_ALLOW_INSECURE_INTERNAL,
       );
     }
     if (parsed.data.REALTIME_URL) {
@@ -181,6 +183,32 @@ export function assertProductionSecret(secret: string) {
 }
 
 function assertProviderUrl(name: string, value: string, production: boolean) {
+  const parsed = parseHttpUrl(name, value);
+  if (production && parsed.protocol !== "https:") {
+    throw new Error(`${name} must use HTTPS in production.`);
+  }
+}
+
+function assertS3Endpoint(value: string, production: boolean, allowInsecureInternal: boolean) {
+  const parsed = parseHttpUrl("S3_ENDPOINT", value);
+  if (!production || parsed.protocol === "https:") return;
+  if (
+    allowInsecureInternal &&
+    parsed.protocol === "http:" &&
+    parsed.hostname === "minio" &&
+    parsed.port === "9000" &&
+    parsed.pathname === "/" &&
+    !parsed.search &&
+    !parsed.hash
+  ) {
+    return;
+  }
+  throw new Error(
+    "S3_ENDPOINT must use HTTPS in production unless it is the Docker-internal http://minio:9000 endpoint with S3_ALLOW_INSECURE_INTERNAL=true.",
+  );
+}
+
+function parseHttpUrl(name: string, value: string) {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -190,9 +218,7 @@ function assertProviderUrl(name: string, value: string, production: boolean) {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new Error(`${name} must be an HTTP(S) URL without embedded credentials.`);
   }
-  if (production && parsed.protocol !== "https:") {
-    throw new Error(`${name} must use HTTPS in production.`);
-  }
+  return parsed;
 }
 
 function assertRealtimeUrl(value: string, production: boolean) {

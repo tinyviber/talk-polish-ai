@@ -25,6 +25,7 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -136,15 +137,27 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest
 
-      - name: Build and push API image
+      - name: Build API image
         if: steps.api_changes.outputs.api_changed == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: apps/api/Dockerfile
           platforms: linux/amd64
-          push: true
+          load: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          progress: plain
           cache-from: type=gha,scope=kotoba-api
           cache-to: type=gha,mode=max,scope=kotoba-api
+
+      - name: Push API image to TCR
+        if: steps.api_changes.outputs.api_changed == 'true'
+        env:
+          API_IMAGE: ${{ env.TCR_REGISTRY }}/${{ env.TCR_NAMESPACE }}/${{ env.API_REPOSITORY }}
+        run: |
+          set -Eeuo pipefail
+          api_sha_tag="sha-${GITHUB_SHA:0:7}"
+          docker push "$API_IMAGE:latest"
+          docker push "$API_IMAGE:$api_sha_tag"

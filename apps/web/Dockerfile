@@ -32,4 +32,4 @@ ENV PORT=3000
 COPY --from=build /app/apps/web/.output apps/web/.output
 
 EXPOSE 3000
-CMD ["bun", "apps/web/.output/server/index.mjs"]
+CMD ["node", "apps/web/.output/server/index.mjs"]

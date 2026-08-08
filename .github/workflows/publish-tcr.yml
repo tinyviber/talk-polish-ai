@@ -80,6 +80,7 @@ jobs:
             docker pull oven/bun:1.2.17
             docker tag oven/bun:1.2.17 "$base_image"
             docker push "$base_image"
+          fi
 
       - name: Mirror Node runtime image to TCR
         run: |
@@ -93,7 +94,6 @@ jobs:
             docker pull node:22-alpine
             docker tag node:22-alpine "$runtime_image"
             docker push "$runtime_image"
-          fi
           fi
 
       - name: Set up Docker Buildx

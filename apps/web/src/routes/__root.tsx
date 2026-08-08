@@ -11,32 +11,22 @@ import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
-import { PracticeStoreProvider } from "../lib/practice/store";
 import { Toaster } from "../components/ui/sonner";
-import { PwaProvider, usePwa } from "../lib/pwa";
-import { getQueueLearnerIds, uploadQueuedAttempt } from "../lib/practice/api";
-import {
-  getNextRecordingQueuePollAt,
-  subscribeRecordingQueue,
-  syncRecordingQueue,
-} from "../lib/practice/offlineQueue";
-import { startOfflineQueueSyncLoop } from "../lib/practice/offlineQueueSync";
+import { PwaProvider } from "../lib/pwa";
 
 function NotFoundComponent() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
         <h1 className="text-7xl font-bold text-foreground">404</h1>
-        <h2 className="mt-4 text-xl font-semibold text-foreground">Page not found</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          The page you're looking for doesn't exist or has been moved.
-        </p>
+        <h2 className="mt-4 text-xl font-semibold text-foreground">页面不存在</h2>
+        <p className="mt-2 text-sm text-muted-foreground">你访问的页面不存在，或已移动。</p>
         <div className="mt-6">
           <Link
             to="/"
             className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
-            Go home
+            返回首页
           </Link>
         </div>
       </div>
@@ -54,12 +44,8 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          This page didn't load
-        </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Something went wrong on our end. You can try refreshing or head back home.
-        </p>
+        <h1 className="text-xl font-semibold tracking-tight text-foreground">页面加载失败</h1>
+        <p className="mt-2 text-sm text-muted-foreground">页面出现问题。请刷新重试，或返回首页。</p>
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
             onClick={() => {
@@ -68,13 +54,13 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
             }}
             className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
-            Try again
+            重试
           </button>
           <a
             href="/"
             className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
           >
-            Go home
+            返回首页
           </a>
         </div>
       </div>
@@ -87,24 +73,23 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
-      { title: "Kotoba Loop — speaking practice" },
+      { title: "每日故事对话 — Kotoba Loop" },
       {
         name: "description",
-        content: "Practice speaking English and Japanese out loud with instant, focused coaching.",
+        content: "从真实故事开始，进行简单自然的英语对话。",
       },
-      { property: "og:title", content: "Kotoba Loop — speaking practice" },
+      { property: "og:title", content: "每日故事对话 — Kotoba Loop" },
       {
         property: "og:description",
-        content: "Practice speaking English and Japanese out loud with instant, focused coaching.",
+        content: "从真实故事开始，进行简单自然的英语对话。",
       },
       { property: "og:type", content: "website" },
       { name: "theme-color", content: "#f7f1e5" },
-      { name: "application-name", content: "Kotoba Loop" },
+      { name: "application-name", content: "每日故事对话" },
       { name: "apple-mobile-web-app-capable", content: "yes" },
       { name: "apple-mobile-web-app-status-bar-style", content: "default" },
-      { name: "apple-mobile-web-app-title", content: "Kotoba Loop" },
+      { name: "apple-mobile-web-app-title", content: "每日故事对话" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
     ],
     links: [
       {
@@ -129,7 +114,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 function RootShell({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <head>
         <HeadContent />
       </head>
@@ -146,38 +131,10 @@ function RootComponent() {
 
   return (
     <PwaProvider>
-      <OfflineQueueSync />
       <QueryClientProvider client={queryClient}>
-        <PracticeStoreProvider>
-          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-          <Outlet />
-          <Toaster position="top-center" />
-        </PracticeStoreProvider>
+        <Outlet />
+        <Toaster position="top-center" />
       </QueryClientProvider>
     </PwaProvider>
   );
-}
-
-function OfflineQueueSync() {
-  const { setBusy } = usePwa();
-  useEffect(() => {
-    // Keep one transport subscriber for the root sync owner even when this
-    // tab has no Practice page mounted.
-    const unsubscribeTransport = subscribeRecordingQueue(() => {});
-    const stop = startOfflineQueueSyncLoop({
-      getLearnerIds: getQueueLearnerIds,
-      getNextPollAt: getNextRecordingQueuePollAt,
-      syncQueue: (learnerIds) =>
-        syncRecordingQueue(async (item) => {
-          const { attempt, sessionId } = await uploadQueuedAttempt(item);
-          return { id: attempt.id, status: attempt.status, sessionId };
-        }, learnerIds),
-      setBusy,
-    });
-    return () => {
-      unsubscribeTransport();
-      stop();
-    };
-  }, [setBusy]);
-  return null;
 }

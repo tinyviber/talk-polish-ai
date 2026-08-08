@@ -19,6 +19,9 @@ dist-ssr
 llm_config.json
 data/
 
+# Local-only deployment runbook; may contain private infrastructure details.
+docs/deploy-tencent-cloud.local.md
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

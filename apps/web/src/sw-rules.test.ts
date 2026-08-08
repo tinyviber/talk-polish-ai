@@ -24,6 +24,9 @@ describe("service worker cache boundaries", () => {
       "/api/sessions/ses_1/attempts",
       "/api/audio/recordings/aud_1",
       "/api/providers/diagnostics",
+      "/api/daily-story/start",
+      "/api/daily-story/transcribe",
+      "/api/daily-story/tts",
       "/realtime/session",
     ]) {
       expect(isNetworkOnlyPath(new URL(`https://app.example.com${path}`))).toBe(true);

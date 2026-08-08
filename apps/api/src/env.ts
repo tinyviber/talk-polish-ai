@@ -45,6 +45,18 @@ const envSchema = z.object({
   TTS_TIMEOUT_MS: positiveInt(30_000),
   HTTP_MAX_ATTEMPTS: positiveInt(3),
   PROVIDER_RATE_LIMIT_PER_MINUTE: positiveInt(20),
+  /** Daily Story limits are intentionally separate from legacy provider routes. */
+  DAILY_STORY_RATE_LIMIT_PER_MINUTE: positiveInt(12),
+  DAILY_STORY_PROVIDER_CHECK_RATE_LIMIT_PER_MINUTE: positiveInt(3),
+  DAILY_STORY_CONCURRENT_REQUESTS: positiveInt(2),
+  /**
+   * Server-owned finite production origin allowlist for browser-supplied Daily
+   * provider URLs. Dynamic origins stay disabled until a Bun transport proof is
+   * shipped as a release gate.
+   */
+  DAILY_PROVIDER_ALLOWED_ORIGINS: z
+    .string()
+    .default("https://api.deepseek.com,https://api.siliconflow.cn"),
   S3_ENDPOINT: optionalString().default("http://127.0.0.1:9000"),
   S3_REGION: z.string().default("us-east-1"),
   S3_BUCKET: z.string().min(1).default("kotoba-audio"),

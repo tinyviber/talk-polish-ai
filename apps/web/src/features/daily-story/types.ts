@@ -1,0 +1,69 @@
+export type DailyCapability = "chat" | "asr" | "tts";
+
+export type ChatProvider = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+};
+
+export type AsrProvider = ChatProvider & {
+  responseFormat?: string;
+};
+
+export type TtsProvider = ChatProvider & {
+  voice: string;
+};
+
+export type ProviderSettings = {
+  schemaVersion: 1;
+  revision: number;
+  updatedAt: string;
+  chat?: ChatProvider;
+  asr?: AsrProvider;
+  tts?: TtsProvider;
+};
+
+export type TurnSource = "asr" | "typed";
+
+export type DailyMessage = {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+  source?: TurnSource;
+};
+
+export type ReviewSuggestion = {
+  sourceTurnId: string;
+  original: string;
+  improved: string;
+  category: "clarity" | "grammar" | "naturalness";
+  explanationZh: string;
+};
+
+export type DailyReview = {
+  suggestions: ReviewSuggestion[];
+};
+
+/** Stable only. Never contains config, Blob, operation or error. */
+export type StorySession = {
+  schemaVersion: 1;
+  revision: number;
+  updatedAt: string;
+  phase: "chatting" | "transcriptReady" | "review";
+  storyZh: string;
+  messages: DailyMessage[];
+  pendingAsrTranscript?: { id: string; text: string };
+  review?: DailyReview;
+};
+
+export type ConnectionState = "idle" | "checking" | "connected" | "failed";
+
+export function createId(prefix: string) {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto)
+    return `${prefix}_${crypto.randomUUID()}`;
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+export function trimBounded(value: string, max: number) {
+  return value.trim().slice(0, max);
+}

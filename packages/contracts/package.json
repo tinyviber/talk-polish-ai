@@ -10,6 +10,7 @@
     "./fixtures": "./src/fixtures.ts",
     "./attempts": "./src/attempts.ts",
     "./audio": "./src/audio.ts",
+    "./daily-story": "./src/daily-story.ts",
     "./errors": "./src/errors.ts",
     "./expressions": "./src/expressions.ts",
     "./progress": "./src/progress.ts",

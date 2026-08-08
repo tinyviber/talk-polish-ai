@@ -37,6 +37,27 @@ describe("API boundary", () => {
     expect(body.requestId).toBeTruthy();
   });
 
+  test("never reflects a Daily Story provider key through validation details", async () => {
+    const key = "sk-daily-story-validation-secret";
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/daily-story/provider-check",
+      payload: {
+        capability: "asr",
+        provider: {
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "valid-provider-key",
+          model: "whisper-1",
+          // Zod enum errors normally repeat this supplied string.
+          responseFormat: key,
+        },
+      },
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.body).not.toContain(key);
+    expect(response.json().error.details).toBeUndefined();
+  });
+
   test("protects learner-scoped routes", async () => {
     const response = await app.inject({ method: "GET", url: "/api/progress" });
     expect(response.statusCode).toBe(401);

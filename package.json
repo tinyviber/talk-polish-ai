@@ -17,7 +17,7 @@
     "build:web": "bun --filter @kotoba/web build",
     "start:web": "bun --filter @kotoba/web start",
     "build:api": "bun --filter @kotoba/api build",
-    "build:docker": "docker build -f apps/api/Dockerfile -t kotoba-api:ci .",
+    "build:docker": "docker build -f apps/api/Dockerfile -t kotoba-api:ci . && docker build -f apps/web/Dockerfile -t kotoba-web:ci .",
     "lint": "eslint .",
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun --filter '*' test",

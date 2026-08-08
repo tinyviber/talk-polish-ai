@@ -10,63 +10,53 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as PracticeRouteImport } from './routes/practice'
-import { Route as ProgressRouteImport } from './routes/progress'
-import { Route as SavedRouteImport } from './routes/saved'
+import { Route as LegacyRouteImport } from './routes/$legacy'
+import { Route as SettingsRouteImport } from './routes/settings'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PracticeRoute = PracticeRouteImport.update({
-  id: '/practice',
-  path: '/practice',
+const LegacyRoute = LegacyRouteImport.update({
+  id: '/$legacy',
+  path: '/$legacy',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ProgressRoute = ProgressRouteImport.update({
-  id: '/progress',
-  path: '/progress',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SavedRoute = SavedRouteImport.update({
-  id: '/saved',
-  path: '/saved',
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/practice': typeof PracticeRoute
-  '/progress': typeof ProgressRoute
-  '/saved': typeof SavedRoute
+  '/$legacy': typeof LegacyRoute
+  '/settings': typeof SettingsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/practice': typeof PracticeRoute
-  '/progress': typeof ProgressRoute
-  '/saved': typeof SavedRoute
+  '/$legacy': typeof LegacyRoute
+  '/settings': typeof SettingsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/practice': typeof PracticeRoute
-  '/progress': typeof ProgressRoute
-  '/saved': typeof SavedRoute
+  '/$legacy': typeof LegacyRoute
+  '/settings': typeof SettingsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/practice' | '/progress' | '/saved'
+  fullPaths: '/' | '/$legacy' | '/settings'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/practice' | '/progress' | '/saved'
-  id: '__root__' | '/' | '/practice' | '/progress' | '/saved'
+  to: '/' | '/$legacy' | '/settings'
+  id: '__root__' | '/' | '/$legacy' | '/settings'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  PracticeRoute: typeof PracticeRoute
-  ProgressRoute: typeof ProgressRoute
-  SavedRoute: typeof SavedRoute
+  LegacyRoute: typeof LegacyRoute
+  SettingsRoute: typeof SettingsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -78,25 +68,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/practice': {
-      id: '/practice'
-      path: '/practice'
-      fullPath: '/practice'
-      preLoaderRoute: typeof PracticeRouteImport
+    '/$legacy': {
+      id: '/$legacy'
+      path: '/$legacy'
+      fullPath: '/$legacy'
+      preLoaderRoute: typeof LegacyRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/progress': {
-      id: '/progress'
-      path: '/progress'
-      fullPath: '/progress'
-      preLoaderRoute: typeof ProgressRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/saved': {
-      id: '/saved'
-      path: '/saved'
-      fullPath: '/saved'
-      preLoaderRoute: typeof SavedRouteImport
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -104,9 +87,8 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  PracticeRoute: PracticeRoute,
-  ProgressRoute: ProgressRoute,
-  SavedRoute: SavedRoute,
+  LegacyRoute: LegacyRoute,
+  SettingsRoute: SettingsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,8 +1,16 @@
 ARG BUN_BASE_IMAGE=ccr.ccs.tencentyun.com/kotoba/oven-bun:1.2.17
-FROM ${BUN_BASE_IMAGE}
+ARG NODE_RUNTIME_IMAGE=ccr.ccs.tencentyun.com/kotoba/node:22-alpine
+
+FROM ${BUN_BASE_IMAGE} AS build
 
 WORKDIR /app
 ENV NODE_ENV=production
+ARG VITE_APP_MODE=api
+ARG VITE_API_URL=
+ARG VITE_BUILD_ID=dev
+ENV VITE_APP_MODE=$VITE_APP_MODE
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_BUILD_ID=$VITE_BUILD_ID
 
 COPY package.json bun.lock bunfig.toml ./
 COPY apps/api/package.json apps/api/package.json
@@ -13,12 +21,17 @@ RUN sed -i 's#https://europe-west1-npm.pkg.dev/lovable-core-prod/sandbox-npm-cac
     && printf '\nregistry = "https://registry.npmmirror.com"\n' >> bunfig.toml \
     && bun install --frozen-lockfile
 
-COPY apps/api apps/api
-RUN bun run build:api
-RUN mkdir -p apps/api/dist/db && cp -R apps/api/src/db/migrations apps/api/dist/db/migrations
+COPY apps/web apps/web
+RUN bun run build:web
 
-RUN mkdir -p /app/data
-VOLUME ["/app/data"]
-EXPOSE 3333
+FROM ${NODE_RUNTIME_IMAGE} AS runtime
 
-CMD ["bun", "apps/api/dist/index.js"]
+WORKDIR /app
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT=3000
+
+COPY --from=build /app/apps/web/.output apps/web/.output
+
+EXPOSE 3000
+CMD ["node", "apps/web/.output/server/index.mjs"]

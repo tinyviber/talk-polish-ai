@@ -14,6 +14,7 @@ import { progressRoutes } from "./modules/progress/routes";
 import { promptRoutes } from "./modules/prompts/routes";
 import { sessionRoutes } from "./modules/sessions/routes";
 import { providerRoutes } from "./modules/providers/routes";
+import { dailyStoryRoutes } from "./modules/daily-story/routes";
 import type { Env } from "./env";
 import { buildRuntime, type Runtime } from "./runtime";
 
@@ -82,4 +83,5 @@ export async function registerRoutes(
   await app.register(expressionRoutes);
   await app.register(progressRoutes);
   await app.register(providerRoutes, { config, providerSet: runtime.providers });
+  await app.register(dailyStoryRoutes, { config });
 }

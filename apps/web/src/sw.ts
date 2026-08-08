@@ -7,7 +7,7 @@ import { registerRoute } from "workbox-routing";
 import { CacheableResponsePlugin } from "workbox-cacheable-response";
 import { ExpirationPlugin } from "workbox-expiration";
 import { NetworkFirst, NetworkOnly } from "workbox-strategies";
-import { isNetworkOnlyPath, isPublicNavigationRequest, isPublicPromptsRequest } from "./sw-rules";
+import { isNetworkOnlyPath, isPublicNavigationRequest } from "./sw-rules";
 
 // Workbox 7's package declarations disagree under exactOptionalPropertyTypes
 // even though these built-in plugins implement the same runtime interface.
@@ -22,7 +22,7 @@ cleanupOutdatedCaches();
 clientsClaim();
 
 const navigation = new NetworkFirst({
-  cacheName: "kotoba-navigation-v2",
+  cacheName: "kotoba-navigation-v3",
   networkTimeoutSeconds: 4,
   plugins: workboxPlugins(
     new CacheableResponsePlugin({ statuses: [200] }),
@@ -43,22 +43,31 @@ registerRoute(
   },
 );
 
-registerRoute(
-  ({ url, request }) => isPublicPromptsRequest(url, request, self.location.origin),
-  new NetworkFirst({
-    cacheName: "kotoba-public-prompts-v2",
-    networkTimeoutSeconds: 3,
-    plugins: workboxPlugins(
-      new CacheableResponsePlugin({ statuses: [200] }),
-      new ExpirationPlugin({ maxEntries: 8, maxAgeSeconds: 6 * 60 * 60 }),
-    ),
-  }),
-);
-
 // Authenticated reads, all mutations, audio, diagnostics, provider and realtime
 // endpoints are never replayed or stored by this worker.
 registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly());
 registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly(), "POST");
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((names) =>
+        Promise.all(
+          names
+            .filter((name) =>
+              [
+                "kotoba-navigation-v1",
+                "kotoba-navigation-v2",
+                "kotoba-public-prompts-v1",
+                "kotoba-public-prompts-v2",
+              ].includes(name),
+            )
+            .map((name) => caches.delete(name)),
+        ),
+      ),
+  );
+});
 
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();

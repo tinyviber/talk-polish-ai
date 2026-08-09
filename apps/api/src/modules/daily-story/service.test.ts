@@ -3,6 +3,7 @@ import type { TextModel } from "../../capabilities/text-model";
 import { env } from "../../env";
 import { ApiError } from "../../http/errors";
 import { ProviderRequestError } from "../../providers/http";
+import { DailyProviderConfigurationError } from "../../providers/outbound-url-policy";
 import { DailyProviderRequestError } from "../../providers/safe-https-client";
 import { createDailyStoryService } from "./service";
 
@@ -38,6 +39,26 @@ function serviceFor(values: unknown[]) {
 }
 
 describe("Daily Story policy service", () => {
+  test("maps provider construction failures to validation errors", async () => {
+    const service = createDailyStoryService(env(), {
+      providerFactory: () => {
+        throw new DailyProviderConfigurationError();
+      },
+      guard: async ({ run }) => run(),
+    });
+
+    await expect(
+      service.providerCheck({
+        learnerId: "learner",
+        requestId: "request",
+        request: { capability: "chat", provider: chatConfig },
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      code: "validation_failed",
+    });
+  });
+
   test.each([
     [401, "unauthorized"],
     [403, "unauthorized"],

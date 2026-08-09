@@ -56,7 +56,9 @@ const envSchema = z.object({
    */
   DAILY_PROVIDER_ALLOWED_ORIGINS: z
     .string()
-    .default("https://api.deepseek.com,https://api.siliconflow.cn"),
+    .default(
+      "https://api.deepseek.com,https://api.siliconflow.cn,https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com",
+    ),
   /** Local opt-in for networks that map public DNS through 198.18.0.0/15. */
   DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS: envBoolean(false),
   S3_ENDPOINT: optionalString().default("http://127.0.0.1:9000"),

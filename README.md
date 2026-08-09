@@ -55,9 +55,23 @@ always go through its same-origin API routes.
 - `POST /api/daily-story/provider-check`
 
 Provider configuration is validated per capability. Production accepts only
-server-owned DeepSeek/SiliconFlow origins by default; development still uses
-HTTPS-only, public-DNS, address-pinned transport. Failures return safe generic
-categories and never expose keys or upstream response bodies.
+server-owned DeepSeek/SiliconFlow/DashScope origins by default; development
+still uses HTTPS-only, public-DNS, address-pinned transport. Failures return
+safe generic categories and never expose keys or upstream response bodies.
+
+For Alibaba Cloud Model Studio (DashScope) ASR, use its Beijing workspace's
+OpenAI-compatible endpoint and a Qwen3-ASR-Flash model:
+
+```text
+Base URL: https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+Model: qwen3-asr-flash
+```
+
+This adapter sends audio as a Base64 Data URL in `chat/completions`, matching
+DashScope's OpenAI-compatible ASR API. It is distinct from the multipart
+`audio/transcriptions` adapter used by ordinary OpenAI-compatible providers.
+DashScope's compatible mode currently supports Qwen3-ASR-Flash models and does
+not use Paraformer through this endpoint.
 
 ## Production build and proxy
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dailyStoryProviderPresetIdSchema, normalizeProviderBaseUrl } from "./provider-presets";
 
 /**
  * Isolated Daily Story wire contract. Provider credentials are intentionally
@@ -22,8 +23,33 @@ const boundedText = (maximum: number) => z.string().min(1).max(maximum);
 
 export const dailyProviderBaseUrlSchema = z
   .string()
+  .trim()
   .min(1)
-  .max(DAILY_STORY_LIMITS.providerUrlChars);
+  .max(DAILY_STORY_LIMITS.providerUrlChars)
+  .transform((value, ctx) => {
+    let normalized: string;
+    try {
+      normalized = normalizeProviderBaseUrl(value);
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Provider base URL is invalid." });
+      return z.NEVER;
+    }
+    if (!normalized.startsWith("https://")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Provider base URL must use HTTPS." });
+      return z.NEVER;
+    }
+    if (normalized.length > DAILY_STORY_LIMITS.providerUrlChars) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_big,
+        type: "string",
+        maximum: DAILY_STORY_LIMITS.providerUrlChars,
+        inclusive: true,
+        message: "Provider base URL is too long.",
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  });
 export const dailyProviderApiKeySchema = z.string().min(1).max(DAILY_STORY_LIMITS.providerKeyChars);
 export const dailyProviderModelSchema = z.string().min(1).max(DAILY_STORY_LIMITS.modelChars);
 
@@ -32,6 +58,7 @@ export const dailyStoryChatConfigSchema = z
     baseUrl: dailyProviderBaseUrlSchema,
     apiKey: dailyProviderApiKeySchema,
     model: dailyProviderModelSchema,
+    preset: dailyStoryProviderPresetIdSchema.optional(),
   })
   .strict();
 export type DailyStoryChatConfig = z.infer<typeof dailyStoryChatConfigSchema>;
@@ -41,9 +68,19 @@ export const dailyStoryAsrConfigSchema = z
     baseUrl: dailyProviderBaseUrlSchema,
     apiKey: dailyProviderApiKeySchema,
     model: dailyProviderModelSchema,
+    preset: dailyStoryProviderPresetIdSchema.optional(),
     responseFormat: z.enum(["json", "verbose_json"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.preset === "deepseek") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["preset"],
+        message: "DeepSeek does not provide Daily Story ASR.",
+      });
+    }
+  });
 export type DailyStoryAsrConfig = z.infer<typeof dailyStoryAsrConfigSchema>;
 
 export const dailyStoryTtsConfigSchema = z
@@ -51,9 +88,19 @@ export const dailyStoryTtsConfigSchema = z
     baseUrl: dailyProviderBaseUrlSchema,
     apiKey: dailyProviderApiKeySchema,
     model: dailyProviderModelSchema,
+    preset: dailyStoryProviderPresetIdSchema.optional(),
     voice: boundedText(DAILY_STORY_LIMITS.voiceChars),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.preset && value.preset !== "openai-compatible") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["preset"],
+        message: "This provider does not provide Daily Story TTS.",
+      });
+    }
+  });
 export type DailyStoryTtsConfig = z.infer<typeof dailyStoryTtsConfigSchema>;
 
 export const dailyStoryCapabilitySchema = z.enum(["chat", "asr", "tts"]);

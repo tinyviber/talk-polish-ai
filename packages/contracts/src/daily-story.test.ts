@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
+  dailyProviderBaseUrlSchema,
   dailyStoryProviderCheckRequestSchema,
   dailyStoryReplyRequestSchema,
   dailyStoryReviewSuggestionSchema,
 } from "./daily-story";
 
-const chat = { baseUrl: "https://api.example.com/v1", apiKey: "test-key", model: "chat" };
+const chat = {
+  baseUrl: "https://api.example.com/v1",
+  apiKey: "test-key",
+  model: "chat",
+  preset: "openai-compatible" as const,
+};
 
 describe("Daily Story contracts", () => {
   test("keeps provider checks capability-discriminated and strict", () => {
@@ -21,6 +27,47 @@ describe("Daily Story contracts", () => {
         provider: { ...chat, voice: "alloy" },
       }).success,
     ).toBe(false);
+  });
+
+  test("rejects provider capability combinations that have no adapter", () => {
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "asr",
+        provider: {
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test-key",
+          model: "deepseek-v4-flash",
+          preset: "deepseek",
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "tts",
+        provider: {
+          baseUrl: "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+          apiKey: "test-key",
+          model: "qwen-plus",
+          preset: "dashscope-compatible",
+          voice: "alloy",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("normalizes legacy provider roots at the contract boundary", () => {
+    expect(dailyProviderBaseUrlSchema.parse(" https://api.deepseek.com/ ")).toBe(
+      "https://api.deepseek.com/v1",
+    );
+    expect(
+      dailyProviderBaseUrlSchema.parse(
+        "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      ),
+    ).toBe("https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
+    expect(dailyProviderBaseUrlSchema.safeParse("http://api.example.com").success).toBe(false);
+    expect(dailyProviderBaseUrlSchema.safeParse("https://api.example.com?key=secret").success).toBe(
+      false,
+    );
   });
 
   test("keeps typed turns distinct and rejects duplicate history ids", () => {

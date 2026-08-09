@@ -34,6 +34,22 @@ describe("Daily Story outbound URL policy", () => {
     expect(() => joinDailyProviderPath(target, "/../metadata")).toThrow();
   });
 
+  test("canonicalizes legacy roots before joining provider request paths", () => {
+    const target = parseDailyProviderBaseUrl("https://api.example.com");
+    expect(target.basePath).toBe("/v1/");
+    expect(joinDailyProviderPath(target, "/chat/completions").pathname).toBe(
+      "/v1/chat/completions",
+    );
+
+    const dashscope = parseDailyProviderBaseUrl(
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    );
+    expect(dashscope.basePath).toBe("/compatible-mode/v1/");
+    expect(joinDailyProviderPath(dashscope, "/chat/completions").pathname).toBe(
+      "/compatible-mode/v1/chat/completions",
+    );
+  });
+
   test("production accepts only finite server-owned origins", () => {
     const input = "https://api.example.com/v1";
     expect(() =>

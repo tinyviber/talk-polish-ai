@@ -16,6 +16,7 @@
     "./progress": "./src/progress.ts",
     "./prompts": "./src/prompts.ts",
     "./providers": "./src/providers.ts",
+    "./provider-presets": "./src/provider-presets.ts",
     "./sessions": "./src/sessions.ts",
     "./speaking-feedback": "./src/speaking-feedback.ts",
     "./transcription": "./src/transcription.ts"

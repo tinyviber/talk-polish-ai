@@ -36,6 +36,16 @@ describe("Daily Story IndexedDB", () => {
     expect((await readProviderSettings()).chat).toBeUndefined();
   });
 
+  test("normalizes legacy endpoint and infers provider preset on save", async () => {
+    const saved = await saveProvider("asr", {
+      baseUrl: "https://api.deepseek.com/",
+      apiKey: "deepseek-key",
+      model: "deepseek-v4-flash",
+    });
+    expect(saved.asr?.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(saved.asr?.preset).toBe("deepseek");
+  });
+
   test("uses revision CAS for stable story snapshots", async () => {
     const first = await writeStorySession(
       {

@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { resolve4, resolve6 } from "node:dns/promises";
+import { normalizeProviderBaseUrl } from "@kotoba/contracts";
 
 export class DailyProviderConfigurationError extends Error {
   readonly code = "daily_provider_configuration";
@@ -41,7 +42,7 @@ const nodeResolver: DnsResolver = { resolve4, resolve6 };
 export function parseDailyProviderBaseUrl(value: string): DailyProviderTarget {
   let baseUrl: URL;
   try {
-    baseUrl = new URL(value);
+    baseUrl = new URL(normalizeProviderBaseUrl(value));
   } catch {
     throw new DailyProviderConfigurationError();
   }

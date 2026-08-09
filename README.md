@@ -59,6 +59,21 @@ server-owned DeepSeek/SiliconFlow/DashScope origins by default; development
 still uses HTTPS-only, public-DNS, address-pinned transport. Failures return
 safe generic categories and never expose keys or upstream response bodies.
 
+The Settings page uses three provider presets: OpenAI Compatible, DeepSeek, and
+阿里百炼. Every saved Base URL is canonicalized to end in `/v1`; users may
+still edit the endpoint and model for compatible gateways. DeepSeek supports
+Chat only. 阿里百炼 supports Chat and Qwen3-ASR; its TTS option is not enabled
+yet. Existing browser settings without a preset are inferred and normalized on
+read/save, without moving keys out of IndexedDB.
+
+Recommended preset endpoints:
+
+```text
+OpenAI Compatible: https://api.openai.com/v1
+DeepSeek:          https://api.deepseek.com/v1
+阿里百炼:          https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+```
+
 For Alibaba Cloud Model Studio (DashScope) ASR, use its Beijing workspace's
 OpenAI-compatible endpoint and a Qwen3-ASR-Flash model:
 

@@ -4,6 +4,7 @@ import type {
   DailyStoryChatConfig,
   DailyStoryTtsConfig,
 } from "@kotoba/contracts";
+import { normalizeProviderBaseUrl } from "@kotoba/contracts";
 import type { Env } from "../env";
 import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
 import type { TextModel } from "../capabilities/text-model";
@@ -35,23 +36,21 @@ export function createDailyStoryRequestProviders(
 ): Partial<DailyStoryRequestProviders> {
   return {
     ...(input.chat
-      ? { chat: createDailyStoryTextModel(config, normalizeProvider(input.chat)) }
+      ? { chat: createDailyStoryTextModel(config, normalizeDailyStoryProvider(input.chat)) }
       : {}),
     ...(input.asr
-      ? { asr: createDailyStorySpeechToText(config, normalizeProvider(input.asr)) }
+      ? { asr: createDailyStorySpeechToText(config, normalizeDailyStoryProvider(input.asr)) }
       : {}),
     ...(input.tts
-      ? { tts: createDailyStoryTextToSpeech(config, normalizeProvider(input.tts)) }
+      ? { tts: createDailyStoryTextToSpeech(config, normalizeDailyStoryProvider(input.tts)) }
       : {}),
   };
 }
 
 /** Accept both `https://host` and the OpenAI-compatible `https://host/v1` form. */
-function normalizeProvider<T extends { baseUrl: string }>(provider: T): T {
+export function normalizeDailyStoryProvider<T extends { baseUrl: string }>(provider: T): T {
   try {
-    const url = new URL(provider.baseUrl);
-    if (url.pathname === "" || url.pathname === "/") url.pathname = "/v1/";
-    return { ...provider, baseUrl: url.toString().replace(/\/$/, "") };
+    return { ...provider, baseUrl: normalizeProviderBaseUrl(provider.baseUrl) };
   } catch {
     // URL validation remains the provider boundary's responsibility.
     return provider;
@@ -152,10 +151,14 @@ export function createDailyStorySpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
 ): SpeechToText {
-  if (isDashScopeCompatibleAsrUrl(provider.baseUrl)) {
-    return createDashScopeCompatibleSpeechToText(config, provider);
+  const normalizedProvider = normalizeDailyStoryProvider(provider);
+  if (
+    normalizedProvider.preset === "dashscope-compatible" ||
+    isDashScopeCompatibleAsrUrl(normalizedProvider.baseUrl)
+  ) {
+    return createDashScopeCompatibleSpeechToText(config, normalizedProvider);
   }
-  return createOpenAICompatibleDailyStorySpeechToText(config, provider);
+  return createOpenAICompatibleDailyStorySpeechToText(config, normalizedProvider);
 }
 
 function createOpenAICompatibleDailyStorySpeechToText(

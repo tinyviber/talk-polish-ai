@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  identifyProviderPreset,
+  normalizeProviderBaseUrl,
+  providerPresetIdSchema,
+  type ProviderPresetId,
+} from "@kotoba/contracts";
 import type {
   AsrProvider,
   ChatProvider,
@@ -23,6 +29,7 @@ const providerSchema = z
     baseUrl: z.string().trim().min(1).max(500),
     apiKey: z.string().min(1).max(1_000),
     model: z.string().trim().min(1).max(200),
+    preset: providerPresetIdSchema.optional(),
   })
   .strict();
 const settingsSchema = z
@@ -200,21 +207,46 @@ function notifyLease(conversationId: string, ownerId: string) {
 }
 
 function fromStoredSettings(value: StoredSettings): ProviderSettings {
+  const normalize = <
+    T extends {
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      preset?: ProviderPresetId | undefined;
+    },
+  >(
+    provider: T,
+  ): Omit<T, "preset"> & { preset: ProviderPresetId } => {
+    let baseUrl = provider.baseUrl.trim();
+    try {
+      baseUrl = normalizeProviderBaseUrl(baseUrl);
+    } catch {
+      // Preserve malformed legacy data so the user can repair it in Settings.
+    }
+    return {
+      ...provider,
+      baseUrl,
+      preset: provider.preset ?? identifyProviderPreset(baseUrl),
+    };
+  };
   const asr = value.asr
-    ? {
+    ? normalize({
         baseUrl: value.asr.baseUrl,
         apiKey: value.asr.apiKey,
         model: value.asr.model,
+        ...(value.asr.preset ? { preset: value.asr.preset } : {}),
         ...(value.asr.responseFormat ? { responseFormat: value.asr.responseFormat } : {}),
-      }
+      })
     : undefined;
+  const chat = value.chat ? normalize(value.chat) : undefined;
+  const tts = value.tts ? normalize(value.tts) : undefined;
   return {
     schemaVersion: value.schemaVersion,
     revision: value.revision,
     updatedAt: value.updatedAt,
-    ...(value.chat ? { chat: value.chat } : {}),
+    ...(chat ? { chat } : {}),
     ...(asr ? { asr } : {}),
-    ...(value.tts ? { tts: value.tts } : {}),
+    ...(tts ? { tts } : {}),
   };
 }
 
@@ -242,6 +274,20 @@ function settingsRecord(settings: ProviderSettings): StoredSettings {
 
 function sessionRecord(session: StorySession, conversationId: string): StoredSession {
   return sessionSchema.parse({ id: conversationId, ...session });
+}
+
+function normalizeProviderForStorage<T extends ChatProvider>(provider: T): T {
+  try {
+    const baseUrl = normalizeProviderBaseUrl(provider.baseUrl);
+    if (!baseUrl.startsWith("https://")) throw new TypeError("HTTPS required");
+    return {
+      ...provider,
+      baseUrl,
+      preset: provider.preset ?? identifyProviderPreset(baseUrl),
+    } as T;
+  } catch {
+    throw new DailyStorageError("Endpoint 必须是有效的 HTTPS Base URL。请检查地址后重试。");
+  }
 }
 
 export async function ensureDailyStorage() {
@@ -301,13 +347,14 @@ export function saveProvider(
   provider: ProviderSettings[DailyCapability],
 ) {
   if (!provider) throw new DailyStorageError("配置不完整，无法保存。");
+  const normalized = normalizeProviderForStorage(provider);
   return writeProviderSettings(
     (current) =>
       ({
         ...(current.chat ? { chat: current.chat } : {}),
         ...(current.asr ? { asr: current.asr } : {}),
         ...(current.tts ? { tts: current.tts } : {}),
-        [capability]: provider,
+        [capability]: normalized,
       }) as Omit<ProviderSettings, "schemaVersion" | "revision" | "updatedAt">,
   );
 }

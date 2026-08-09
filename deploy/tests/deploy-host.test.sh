@@ -46,7 +46,7 @@ envs=(DEPLOY_ROOT="$tmp/host" REPO_DIR="$tmp/host/repo" RELEASES_DIR="$tmp/host/
   DEPLOY_STATE_DIR="$tmp/host/deploy" CURRENT_LINK="$tmp/host/current"
   CURRENT_MARKER="$tmp/host/deploy/current-sha" PREVIOUS_MARKER="$tmp/host/deploy/previous-sha"
   LOCK_FILE="$tmp/host/deploy.lock" GITEE_REMOTE="$tmp/gitee.git" BUN_BIN="$tmp/bin/bun"
-  SYSTEMCTL_BIN="$tmp/bin/systemctl" CURL_BIN="$tmp/bin/curl" FLOCK_BIN="$tmp/bin/flock" DEPLOY_TEST_MODE=1
+  SYSTEMCTL_BIN="$tmp/bin/systemctl" CURL_BIN="$tmp/bin/curl" FLOCK_BIN="$tmp/bin/flock" DEPLOY_TEST_MODE=1 HEALTH_RETRIES=1
   SYSTEMCTL_LOG="$tmp/systemctl.log")
 
 env "${envs[@]}" bash "$script" "$sha1"

@@ -81,8 +81,13 @@ if [[ -n "$old_sha" ]]; then
   [[ "$(readlink "$CURRENT_LINK")" == "$RELEASES_DIR/$old_sha" ]] || die 'current marker and symlink disagree'
 fi
 if [[ "$old_sha" == "$TARGET_SHA" ]]; then
-  log 'target already current; nothing to do'
-  exit 0
+  if [[ -f "$CURRENT_LINK/apps/web/.output/server/index.mjs" &&
+    -d "$CURRENT_LINK/apps/web/.output/public" &&
+    -f "$CURRENT_LINK/apps/api/dist/index.js" ]]; then
+    log 'target already current; nothing to do'
+    exit 0
+  fi
+  die 'target already current but generated release artifacts are incomplete'
 fi
 
 changed_paths=()
@@ -96,6 +101,11 @@ web_changed=0
 api_changed=0
 deps_changed=0
 migrations_changed=0
+# `git archive` contains source only. Every release must materialize both
+# runtime build outputs, even when changed paths only contain docs or deploy
+# configuration.
+web_build_required=1
+api_build_required=1
 if [[ -z "$old_sha" ]]; then
   web_changed=1
   api_changed=1
@@ -113,6 +123,12 @@ for path in "${changed_paths[@]}"; do
   esac
   [[ "$path" == apps/api/src/db/migrations/* ]] && migrations_changed=1
 done
+
+# The active symlink changes for every release. Both services resolve their
+# runtime entrypoint through `/opt/kotoba/current`, so both must be restarted
+# after the switch even when source changes only touch docs or deploy files.
+web_changed=1
+api_changed=1
 
 if [[ "$migrations_changed" == 1 && "${ALLOW_MIGRATION:-0}" != 1 ]]; then
   die 'migration files changed; review and run with ALLOW_MIGRATION=1 plus migration hook'
@@ -135,14 +151,18 @@ else
   cp -a -- "$CURRENT_LINK/node_modules" "$staging/node_modules"
 fi
 
-if [[ "$web_changed" == 1 ]]; then
+if [[ "$web_build_required" == 1 ]]; then
   log 'building web'
   (cd "$staging" && "$BUN_BIN" run build:web)
 fi
-if [[ "$api_changed" == 1 ]]; then
+if [[ "$api_build_required" == 1 ]]; then
   log 'building api'
   (cd "$staging" && "$BUN_BIN" run build:api)
 fi
+
+[[ -f "$staging/apps/web/.output/server/index.mjs" &&
+  -d "$staging/apps/web/.output/public" ]] || die 'web build artifacts missing'
+[[ -f "$staging/apps/api/dist/index.js" ]] || die 'api build artifacts missing'
 
 if [[ -n "$MIGRATION_HOOK" ]]; then
   [[ -x "$MIGRATION_HOOK" ]] || die 'DEPLOY_MIGRATION_HOOK is not executable'

@@ -19,6 +19,7 @@ readonly SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 readonly FLOCK_BIN="${FLOCK_BIN:-flock}"
 readonly CURL_BIN="${CURL_BIN:-curl}"
 readonly RETAIN_RELEASES="${RETAIN_RELEASES:-5}"
+readonly HEALTH_RETRIES="${HEALTH_RETRIES:-30}"
 readonly API_SERVICE="${API_SERVICE:-talk-polish-api.service}"
 readonly WEB_SERVICE="${WEB_SERVICE:-talk-polish-web.service}"
 readonly API_LIVE_URL="${API_LIVE_URL:-http://127.0.0.1:3333/health/live}"
@@ -37,6 +38,7 @@ log() { printf 'deploy-host: %s\n' "$*"; }
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || die 'TARGET_SHA must be lowercase 40-hex SHA'
 [[ "$DEPLOY_ROOT" = /* && "$REPO_DIR" = /* && "$RELEASES_DIR" = /* ]] || die 'deployment paths must be absolute'
 [[ "$RETAIN_RELEASES" =~ ^[1-9][0-9]*$ ]] || die 'RETAIN_RELEASES must be positive integer'
+[[ "$HEALTH_RETRIES" =~ ^[1-9][0-9]*$ ]] || die 'HEALTH_RETRIES must be positive integer'
 [[ -n "$GITEE_REMOTE" ]] || die 'GITEE_REMOTE is required'
 if [[ "$DEPLOY_TEST_MODE" != 1 ]]; then
   [[ "$GITEE_REMOTE" =~ ^(ssh://git@gitee\.com/|git@gitee\.com:)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(\.git)?$ ]] \
@@ -188,6 +190,9 @@ rollback() {
     "$SYSTEMCTL_BIN" restart "$API_SERVICE" "$WEB_SERVICE" >/dev/null 2>&1 || true
   elif [[ "${switched:-0}" == 1 ]]; then
     rm -f -- "$CURRENT_LINK"
+    # On a first deployment there is no previous systemd release to restore.
+    # Stop services that may still be starting against the removed symlink.
+    "$SYSTEMCTL_BIN" stop "$API_SERVICE" "$WEB_SERVICE" >/dev/null 2>&1 || true
   fi
   rm -rf -- "$RELEASES_DIR/$TARGET_SHA" "$staging"
   exit "$status"
@@ -197,14 +202,23 @@ trap rollback EXIT
 if [[ "$api_changed" == 1 ]]; then "$SYSTEMCTL_BIN" restart "$API_SERVICE"; fi
 if [[ "$web_changed" == 1 ]]; then "$SYSTEMCTL_BIN" restart "$WEB_SERVICE"; fi
 
+wait_for_health() {
+  local url="$1" label="$2" attempt
+  for ((attempt = 1; attempt <= HEALTH_RETRIES; attempt++)); do
+    if "$CURL_BIN" -fsS "$url" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  die "$label failed"
+}
+
 if [[ -n "$HEALTH_HOOK" ]]; then
   [[ -x "$HEALTH_HOOK" ]] || die 'DEPLOY_HEALTH_HOOK is not executable'
   "$HEALTH_HOOK" "$RELEASES_DIR/$TARGET_SHA" "$TARGET_SHA"
 else
-  if [[ "$api_changed" == 1 ]]; then "$CURL_BIN" -fsS "$API_LIVE_URL" >/dev/null || die 'API liveness failed'; fi
-  if [[ "$api_changed" == 1 ]]; then "$CURL_BIN" -fsS "$API_READY_URL" >/dev/null || die 'API readiness failed'; fi
-  if [[ "$api_changed" == 1 ]]; then "$CURL_BIN" -fsS "$MINIO_HEALTH_URL" >/dev/null || die 'MinIO readiness failed'; fi
-  if [[ "$web_changed" == 1 ]]; then "$CURL_BIN" -fsS "$WEB_HEALTH_URL" >/dev/null || die 'web health failed'; fi
+  if [[ "$api_changed" == 1 ]]; then wait_for_health "$API_LIVE_URL" 'API liveness'; fi
+  if [[ "$api_changed" == 1 ]]; then wait_for_health "$API_READY_URL" 'API readiness'; fi
+  if [[ "$api_changed" == 1 ]]; then wait_for_health "$MINIO_HEALTH_URL" 'MinIO readiness'; fi
+  if [[ "$web_changed" == 1 ]]; then wait_for_health "$WEB_HEALTH_URL" 'web health'; fi
 fi
 if [[ -n "$SMOKE_HOOK" ]]; then
   [[ -x "$SMOKE_HOOK" ]] || die 'DEPLOY_SMOKE_HOOK is not executable'

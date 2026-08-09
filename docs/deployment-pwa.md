@@ -80,7 +80,9 @@ current SHA, previous SHA, operator, build metadata, and smoke result.
 ## Host deploy commands
 
 Install checked-in units as `talk-polish-api.service` and
-`talk-polish-web.service` under existing unprivileged `kotoba` user. Keep
+`talk-polish-web.service` under separate unprivileged `kotoba-api` and
+`kotoba-web` users. Install Bun 1.2.17 for the API and a glibc Node.js 22.14+
+runtime at `/opt/kotoba/runtime/node` for the Nitro web server. Keep
 API-only credentials in `/opt/kotoba/shared/.env.api.production` (`0600`); Web
 does not need that file. Confirm real Caddy topology and MinIO endpoint from
 ignored Tencent runbook before enabling services. If Caddy remains a container,

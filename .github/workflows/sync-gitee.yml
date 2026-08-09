@@ -125,7 +125,9 @@ jobs:
           chmod 600 "$ssh_dir/known_hosts"
           {
             echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
-            echo "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+            # The deploy key is held by ssh-agent. IdentitiesOnly=yes would
+            # ignore agent identities when no IdentityFile is supplied.
+            echo "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o IdentitiesOnly=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
           } >> "$GITHUB_ENV"
 
       - name: Push exact commit without force or mirror

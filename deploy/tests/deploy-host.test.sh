@@ -25,8 +25,8 @@ cat >"$tmp/bin/bun" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ "$1" == install ]]; then mkdir -p node_modules; exit 0; fi
-if [[ "$1" == run && "$2" == build:web ]]; then mkdir -p apps/web/.output; exit 0; fi
-if [[ "$1" == run && "$2" == build:api ]]; then mkdir -p apps/api/dist; exit 0; fi
+if [[ "$1" == run && "$2" == build:web ]]; then mkdir -p apps/web/.output/public apps/web/.output/server; : >apps/web/.output/server/index.mjs; exit 0; fi
+if [[ "$1" == run && "$2" == build:api ]]; then mkdir -p apps/api/dist; : >apps/api/dist/index.js; exit 0; fi
 EOF
 cat >"$tmp/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash

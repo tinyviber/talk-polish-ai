@@ -10,7 +10,7 @@
   "scripts": {
     "setup": "bun install",
     "dev": "bun --filter @kotoba/web dev",
-    "dev:api": "bun --filter @kotoba/api dev",
+    "dev:api": "bun --env-file=./.env --filter @kotoba/api dev",
     "dev:all": "bun run dev:api & bun run dev",
     "build": "bun --filter @kotoba/contracts build && bun --filter @kotoba/web build && bun --filter @kotoba/api build",
     "build:dev": "bun --filter @kotoba/web build:dev",

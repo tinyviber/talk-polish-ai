@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Mic, Settings } from "lucide-react";
+import { List, Mic, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function DailyStoryHeader() {
@@ -13,19 +13,34 @@ export function DailyStoryHeader() {
           </span>
           <span className="font-display text-lg font-semibold tracking-tight">每日故事对话</span>
         </Link>
-        <Link
-          to="/settings"
-          aria-current={pathname === "/settings" ? "page" : undefined}
-          className={cn(
-            "ml-auto inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-sm font-medium",
-            pathname === "/settings"
-              ? "bg-secondary text-secondary-foreground"
-              : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
-          )}
-        >
-          <Settings className="size-4" aria-hidden />
-          设置
-        </Link>
+        <div className="ml-auto flex items-center gap-1">
+          <Link
+            to="/"
+            aria-current={pathname === "/" ? "page" : undefined}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-sm font-medium",
+              pathname === "/"
+                ? "bg-secondary text-secondary-foreground"
+                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+            )}
+          >
+            <List className="size-4" aria-hidden />
+            我的对话
+          </Link>
+          <Link
+            to="/settings"
+            aria-current={pathname === "/settings" ? "page" : undefined}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-sm font-medium",
+              pathname === "/settings"
+                ? "bg-secondary text-secondary-foreground"
+                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+            )}
+          >
+            <Settings className="size-4" aria-hidden />
+            设置
+          </Link>
+        </div>
       </div>
     </header>
   );

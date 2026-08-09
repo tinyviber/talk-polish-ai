@@ -60,8 +60,8 @@ export function createStructuredGenerator(model: TextModel): StructuredGenerator
       const repaired = parseCandidate(repair.content, input.schema);
       if (!repaired.success) {
         throw new StructuredGenerationError("Structured model output failed schema validation.", {
-          first: parsed.error,
-          repair: repaired.error,
+          first: { error: parsed.error, shape: parsed.shape },
+          repair: { error: repaired.error, shape: repaired.shape },
         });
       }
       return { ...repair, value: repaired.value, repaired: true };
@@ -71,11 +71,30 @@ export function createStructuredGenerator(model: TextModel): StructuredGenerator
 
 function parseCandidate<T>(content: string, schema: z.ZodType<T>) {
   const candidate = stripJsonFence(content);
+  let value: unknown;
   try {
-    return { success: true as const, value: schema.parse(JSON.parse(candidate)) };
+    value = JSON.parse(candidate);
+    return { success: true as const, value: schema.parse(value) };
   } catch (error) {
-    return { success: false as const, error };
+    return { success: false as const, error, shape: jsonShape(value) };
   }
+}
+
+/** Diagnostics only: expose JSON keys/types, never model-generated text. */
+function jsonShape(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { type: Array.isArray(value) ? "array" : typeof value };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    type: "object",
+    keys: Object.keys(record).slice(0, 20),
+    fields: Object.fromEntries(
+      Object.entries(record)
+        .slice(0, 20)
+        .map(([key, item]) => [key, Array.isArray(item) ? "array" : typeof item]),
+    ),
+  };
 }
 
 export function stripJsonFence(content: string) {

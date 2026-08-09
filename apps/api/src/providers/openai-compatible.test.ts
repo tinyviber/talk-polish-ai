@@ -8,11 +8,14 @@ import { createOpenAICompatibleHttpClient } from "./http";
 import { createLocalAudioStorage } from "./local-storage";
 import { createOpenAICompatibleTranscriptionProvider } from "./openai-transcription";
 import { createOpenAICompatibleTtsProvider } from "./openai-tts";
+import { createOpenAICompatibleTextModel } from "./openai-text-model";
 import { createRealtimeProvider } from "./realtime";
+import { DailyProviderRequestError } from "./safe-https-client";
 
 let server: ReturnType<typeof Bun.serve>;
 let baseUrl = "";
 let chatRequests = 0;
+let chatBodies: Array<Record<string, unknown>> = [];
 let alwaysInvalidFeedback = false;
 let tempDir = "";
 let realtimeServer: ReturnType<typeof Bun.serve>;
@@ -35,6 +38,7 @@ beforeAll(async () => {
       }
       if (url.pathname === "/chat/completions") {
         chatRequests += 1;
+        chatBodies.push((await request.json()) as Record<string, unknown>);
         const feedback = JSON.stringify(fixtureFeedback("en-smalltalk", "en", 1));
         const content = alwaysInvalidFeedback || chatRequests === 1 ? "{invalid" : feedback;
         return Response.json({ choices: [{ message: { content } }] });
@@ -111,6 +115,7 @@ describe("OpenAI-compatible HTTP fixtures", () => {
 
   test("assesses strict feedback after one controlled JSON repair", async () => {
     chatRequests = 0;
+    chatBodies = [];
     const provider = createOpenAICompatibleAssessmentProvider({
       baseUrl,
       apiKey: "fixture-key",
@@ -127,11 +132,19 @@ describe("OpenAI-compatible HTTP fixtures", () => {
     });
     expect(result.feedback.overall).toBeGreaterThan(0);
     expect(chatRequests).toBe(2);
+    expect(chatBodies[0]).toMatchObject({
+      model: "fixture-chat",
+      response_format: { type: "json_object" },
+    });
+    expect(chatBodies[0]?.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "system" })]),
+    );
   });
 
   test("fails when the controlled JSON repair is still invalid", async () => {
     alwaysInvalidFeedback = true;
     chatRequests = 0;
+    chatBodies = [];
     const provider = createOpenAICompatibleAssessmentProvider({
       baseUrl,
       apiKey: "fixture-key",
@@ -149,6 +162,30 @@ describe("OpenAI-compatible HTTP fixtures", () => {
       }),
     ).rejects.toMatchObject({ code: "response" });
     alwaysInvalidFeedback = false;
+  });
+
+  test("preserves an upstream status wrapped by the AI SDK fetch layer", async () => {
+    const model = createOpenAICompatibleTextModel(
+      {
+        baseUrl: "https://provider.example.com/v1",
+        apiKey: "fixture-key",
+        model: "fixture-chat",
+        timeoutMs: 2_000,
+        maxAttempts: 1,
+      },
+      {
+        fetch: async () => {
+          throw new DailyProviderRequestError("http", 401);
+        },
+      },
+    );
+
+    await expect(
+      model.generate({ messages: [{ role: "user", content: "Hello" }] }),
+    ).rejects.toMatchObject({
+      code: "http",
+      status: 401,
+    });
   });
 
   test("reads ASR bytes through storage and preserves returned metadata", async () => {

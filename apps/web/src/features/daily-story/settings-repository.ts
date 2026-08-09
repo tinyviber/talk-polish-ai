@@ -5,11 +5,13 @@ import type {
   DailyCapability,
   ProviderSettings,
   StorySession,
+  StorySessionSummary,
   TtsProvider,
 } from "./types";
+import { createConversationId } from "./types";
 
 const DB_NAME = "kotoba-loop-settings";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const SETTINGS_STORE = "providerSettings";
 const SESSION_STORE = "storySessions";
 const LEASE_STORE = "storyLeases";
@@ -46,7 +48,7 @@ const messageSchema = z
   .strict();
 const sessionSchema = z
   .object({
-    id: z.literal(CURRENT),
+    id: z.string().trim().min(1).max(160),
     schemaVersion: z.literal(1),
     revision: z.number().int().nonnegative(),
     updatedAt: z.string().datetime(),
@@ -81,7 +83,7 @@ const sessionSchema = z
   .strict();
 const leaseSchema = z
   .object({
-    id: z.literal(CURRENT),
+    id: z.string().trim().min(1).max(160),
     ownerId: z.string().min(1).max(160),
     expiresAt: z.number().int().positive(),
   })
@@ -89,6 +91,10 @@ const leaseSchema = z
 
 type StoredSettings = z.infer<typeof settingsSchema>;
 type StoredSession = z.infer<typeof sessionSchema>;
+type DailyStorageEvent =
+  | { kind: "settings"; revision: number }
+  | { kind: "session"; conversationId: string; revision: number }
+  | { kind: "lease"; conversationId: string; ownerId: string };
 
 export class DailyStorageError extends Error {
   constructor(message = "当前浏览器无法安全保存 API 配置。请允许此网站使用 IndexedDB 后重试。") {
@@ -106,7 +112,7 @@ export class SessionConflictError extends Error {
 
 let openPromise: Promise<IDBDatabase> | undefined;
 let channel: BroadcastChannel | undefined;
-const listeners = new Set<(event: { kind: "settings" | "session"; revision: number }) => void>();
+const listeners = new Set<(event: DailyStorageEvent) => void>();
 
 function database() {
   if (typeof indexedDB === "undefined") return Promise.reject(new DailyStorageError());
@@ -175,10 +181,22 @@ function setResult<T>(tx: IDBTransaction, value: T) {
   (tx as IDBTransaction & { __dailyResult?: (value: T) => void }).__dailyResult?.(value);
 }
 
-function notify(kind: "settings" | "session", revision: number) {
+function notifySettings(revision: number) {
   if (typeof BroadcastChannel === "undefined") return;
   channel ??= new BroadcastChannel("kotoba-daily-story-v1");
-  channel.postMessage({ kind, revision });
+  channel.postMessage({ kind: "settings", revision });
+}
+
+function notifySession(conversationId: string, revision: number) {
+  if (typeof BroadcastChannel === "undefined") return;
+  channel ??= new BroadcastChannel("kotoba-daily-story-v1");
+  channel.postMessage({ kind: "session", conversationId, revision });
+}
+
+function notifyLease(conversationId: string, ownerId: string) {
+  if (typeof BroadcastChannel === "undefined") return;
+  channel ??= new BroadcastChannel("kotoba-daily-story-v1");
+  channel.postMessage({ kind: "lease", conversationId, ownerId });
 }
 
 function fromStoredSettings(value: StoredSettings): ProviderSettings {
@@ -222,12 +240,13 @@ function settingsRecord(settings: ProviderSettings): StoredSettings {
   return settingsSchema.parse({ id: CURRENT, ...settings });
 }
 
-function sessionRecord(session: StorySession): StoredSession {
-  return sessionSchema.parse({ id: CURRENT, ...session });
+function sessionRecord(session: StorySession, conversationId: string): StoredSession {
+  return sessionSchema.parse({ id: conversationId, ...session });
 }
 
 export async function ensureDailyStorage() {
   await database();
+  await migrateLegacySession();
 }
 
 export async function readProviderSettings(): Promise<ProviderSettings> {
@@ -273,7 +292,7 @@ export async function writeProviderSettings(
       write.onsuccess = () => setResult(tx, next);
     };
   });
-  notify("settings", result.revision);
+  notifySettings(result.revision);
   return result;
 }
 
@@ -309,9 +328,70 @@ export function clearAllProviders() {
   return writeProviderSettings(() => ({}));
 }
 
-export async function readStorySession(): Promise<StorySession | null> {
+async function migrateLegacySession() {
+  return transaction<string | null>([SESSION_STORE, LEASE_STORE], "readwrite", (tx) => {
+    const sessions = tx.objectStore(SESSION_STORE);
+    const leases = tx.objectStore(LEASE_STORE);
+    const sessionRequest = sessions.get(CURRENT);
+    const leaseRequest = leases.get(CURRENT);
+    let sessionLoaded = false;
+    let leaseLoaded = false;
+
+    const finish = () => {
+      if (!sessionLoaded || !leaseLoaded) return;
+      const legacy = sessionRequest.result as StoredSession | undefined;
+      if (!legacy) {
+        setResult(tx, null);
+        return;
+      }
+      const conversationId = createConversationId();
+      sessions.put({ ...legacy, id: conversationId });
+      sessions.delete(CURRENT);
+      const legacyLease = leaseRequest.result as
+        { id: string; ownerId: string; expiresAt: number } | undefined;
+      if (legacyLease) {
+        leases.put({ ...legacyLease, id: conversationId });
+        leases.delete(CURRENT);
+      }
+      setResult(tx, conversationId);
+    };
+    sessionRequest.onsuccess = () => {
+      sessionLoaded = true;
+      finish();
+    };
+    leaseRequest.onsuccess = () => {
+      leaseLoaded = true;
+      finish();
+    };
+  });
+}
+
+export async function listStorySessions(): Promise<StorySessionSummary[]> {
+  await ensureDailyStorage();
+  return transaction<StorySessionSummary[]>(SESSION_STORE, "readonly", (tx) => {
+    const request = tx.objectStore(SESSION_STORE).getAll();
+    request.onsuccess = () => {
+      const sessions = (request.result as unknown[]).map((record) => {
+        const parsed = sessionSchema.parse(record);
+        return {
+          id: parsed.id,
+          revision: parsed.revision,
+          updatedAt: parsed.updatedAt,
+          phase: parsed.phase,
+          storyZh: parsed.storyZh,
+        } satisfies StorySessionSummary;
+      });
+      setResult(
+        tx,
+        sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      );
+    };
+  });
+}
+
+export async function readStorySession(conversationId = CURRENT): Promise<StorySession | null> {
   return transaction<StorySession | null>(SESSION_STORE, "readonly", (tx) => {
-    const request = tx.objectStore(SESSION_STORE).get(CURRENT);
+    const request = tx.objectStore(SESSION_STORE).get(conversationId);
     request.onsuccess = () => {
       const record = request.result as unknown;
       setResult(tx, record === undefined ? null : fromStoredSession(sessionSchema.parse(record)));
@@ -320,60 +400,133 @@ export async function readStorySession(): Promise<StorySession | null> {
 }
 
 /** CAS writes stop stale tabs from undoing newer turns. */
-export async function writeStorySession(
-  session: Omit<StorySession, "schemaVersion" | "revision" | "updatedAt">,
+type StorySessionSnapshot = Omit<StorySession, "schemaVersion" | "revision" | "updatedAt">;
+
+export function writeStorySession(
+  session: StorySessionSnapshot,
   expectedRevision: number | null,
+): Promise<StorySession>;
+export function writeStorySession(
+  conversationId: string,
+  session: StorySessionSnapshot,
+  expectedRevision: number | null,
+  ownerId?: string,
+): Promise<StorySession>;
+export async function writeStorySession(
+  conversationIdOrSession: string | StorySessionSnapshot,
+  sessionOrExpectedRevision: StorySessionSnapshot | number | null,
+  explicitExpectedRevision?: number | null,
+  explicitOwnerId?: string,
 ): Promise<StorySession> {
-  const result = await transaction<StorySession>(SESSION_STORE, "readwrite", (tx) => {
-    const store = tx.objectStore(SESSION_STORE);
-    const request = store.get(CURRENT);
-    request.onsuccess = () => {
-      const record = request.result as unknown;
-      const previous = record === undefined ? null : fromStoredSession(sessionSchema.parse(record));
-      if ((previous?.revision ?? null) !== expectedRevision) {
-        throw new SessionConflictError();
-      }
-      const next: StorySession = {
-        ...session,
-        schemaVersion: 1,
-        revision: (previous?.revision ?? 0) + 1,
-        updatedAt: new Date().toISOString(),
+  const conversationId =
+    typeof conversationIdOrSession === "string" ? conversationIdOrSession : CURRENT;
+  const session =
+    typeof conversationIdOrSession === "string"
+      ? (sessionOrExpectedRevision as StorySessionSnapshot)
+      : conversationIdOrSession;
+  const expectedRevision =
+    typeof conversationIdOrSession === "string"
+      ? explicitExpectedRevision!
+      : (sessionOrExpectedRevision as number | null);
+  const ownerId = typeof conversationIdOrSession === "string" ? explicitOwnerId : undefined;
+  const result = await transaction<StorySession>(
+    ownerId ? [SESSION_STORE, LEASE_STORE] : SESSION_STORE,
+    "readwrite",
+    (tx) => {
+      const store = tx.objectStore(SESSION_STORE);
+      const request = store.get(conversationId);
+      const leaseRequest = ownerId ? tx.objectStore(LEASE_STORE).get(conversationId) : undefined;
+      let storedSessionRecord: StoredSession | undefined;
+      let leaseRecord: unknown;
+      let sessionReady = false;
+      let leaseReady = !ownerId;
+      const commit = () => {
+        if (!sessionReady || !leaseReady) return;
+        if (ownerId) {
+          const lease = leaseRecord === undefined ? null : leaseSchema.parse(leaseRecord);
+          if (lease?.ownerId !== ownerId) throw new SessionConflictError();
+        }
+        const previous =
+          storedSessionRecord === undefined
+            ? null
+            : fromStoredSession(sessionSchema.parse(storedSessionRecord));
+        if ((previous?.revision ?? null) !== expectedRevision) {
+          throw new SessionConflictError();
+        }
+        const next: StorySession = {
+          ...session,
+          schemaVersion: 1,
+          revision: (previous?.revision ?? 0) + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        const write = store.put(sessionRecord(next, conversationId));
+        write.onsuccess = () => setResult(tx, next);
       };
-      const write = store.put(sessionRecord(next));
-      write.onsuccess = () => setResult(tx, next);
-    };
-  }).catch((error: unknown) => {
+      request.onsuccess = () => {
+        storedSessionRecord = request.result as StoredSession | undefined;
+        sessionReady = true;
+        commit();
+      };
+      if (leaseRequest) {
+        leaseRequest.onsuccess = () => {
+          leaseRecord = leaseRequest.result;
+          leaseReady = true;
+          commit();
+        };
+      }
+    },
+  ).catch((error: unknown) => {
     if (error instanceof DailyStorageError) throw error;
     throw new SessionConflictError();
   });
-  notify("session", result.revision);
+  notifySession(conversationId, result.revision);
   return result;
 }
 
-export async function deleteStorySession(expectedRevision: number | null) {
+export function deleteStorySession(expectedRevision: number | null): Promise<void>;
+export function deleteStorySession(
+  conversationId: string,
+  expectedRevision: number | null,
+): Promise<void>;
+export async function deleteStorySession(
+  conversationIdOrExpectedRevision: string | number | null,
+  explicitExpectedRevision?: number | null,
+) {
+  const conversationId =
+    typeof conversationIdOrExpectedRevision === "string"
+      ? conversationIdOrExpectedRevision
+      : CURRENT;
+  const expectedRevision =
+    typeof conversationIdOrExpectedRevision === "string"
+      ? explicitExpectedRevision!
+      : conversationIdOrExpectedRevision;
   return transaction<void>(SESSION_STORE, "readwrite", (tx) => {
     const store = tx.objectStore(SESSION_STORE);
-    const request = store.get(CURRENT);
+    const request = store.get(conversationId);
     request.onsuccess = () => {
       const record = request.result as unknown;
       const current = record === undefined ? null : fromStoredSession(sessionSchema.parse(record));
       if ((current?.revision ?? null) !== expectedRevision) {
         throw new SessionConflictError();
       }
-      const deletion = store.delete(CURRENT);
+      const deletion = store.delete(conversationId);
       deletion.onsuccess = () => setResult(tx, undefined);
     };
   }).catch((error: unknown) => {
     if (error instanceof DailyStorageError) throw error;
     throw new SessionConflictError();
   });
-  notify("session", (expectedRevision ?? 0) + 1);
+  notifySession(conversationId, (expectedRevision ?? 0) + 1);
 }
 
-export async function acquireStoryLease(ownerId: string) {
+export function acquireStoryLease(ownerId: string): Promise<boolean>;
+export function acquireStoryLease(conversationId: string, ownerId: string): Promise<boolean>;
+export async function acquireStoryLease(first: string, second?: string) {
+  const conversationId = second === undefined ? CURRENT : first;
+  const ownerId = second === undefined ? first : second;
   return transaction<boolean>(LEASE_STORE, "readwrite", (tx) => {
     const store = tx.objectStore(LEASE_STORE);
-    const request = store.get(CURRENT);
+    const request = store.get(conversationId);
     request.onsuccess = () => {
       const record = request.result as unknown;
       const lease = record === undefined ? null : leaseSchema.parse(record);
@@ -382,16 +535,31 @@ export async function acquireStoryLease(ownerId: string) {
         setResult(tx, false);
         return;
       }
-      const write = store.put({ id: CURRENT, ownerId, expiresAt: now + LEASE_MS });
+      const write = store.put({ id: conversationId, ownerId, expiresAt: now + LEASE_MS });
       write.onsuccess = () => setResult(tx, true);
     };
   });
 }
 
-export async function releaseStoryLease(ownerId: string) {
+/** Claim the newest live connection. Older tabs will become read-only. */
+export async function claimStoryLease(conversationId: string, ownerId: string) {
+  const claimed = await transaction<boolean>(LEASE_STORE, "readwrite", (tx) => {
+    const store = tx.objectStore(LEASE_STORE);
+    const write = store.put({ id: conversationId, ownerId, expiresAt: Date.now() + LEASE_MS });
+    write.onsuccess = () => setResult(tx, true);
+  });
+  if (claimed) notifyLease(conversationId, ownerId);
+  return claimed;
+}
+
+export function releaseStoryLease(ownerId: string): Promise<void>;
+export function releaseStoryLease(conversationId: string, ownerId: string): Promise<void>;
+export async function releaseStoryLease(first: string, second?: string) {
+  const conversationId = second === undefined ? CURRENT : first;
+  const ownerId = second === undefined ? first : second;
   return transaction<void>(LEASE_STORE, "readwrite", (tx) => {
     const store = tx.objectStore(LEASE_STORE);
-    const request = store.get(CURRENT);
+    const request = store.get(conversationId);
     request.onsuccess = () => {
       const record = request.result as unknown;
       const lease = record === undefined ? null : leaseSchema.parse(record);
@@ -399,24 +567,39 @@ export async function releaseStoryLease(ownerId: string) {
         setResult(tx, undefined);
         return;
       }
-      const deletion = store.delete(CURRENT);
+      const deletion = store.delete(conversationId);
       deletion.onsuccess = () => setResult(tx, undefined);
     };
   });
 }
 
-export function subscribeDailyStorage(
-  listener: (event: { kind: "settings" | "session"; revision: number }) => void,
-) {
+export function subscribeDailyStorage(listener: (event: DailyStorageEvent) => void) {
   listeners.add(listener);
   if (typeof BroadcastChannel !== "undefined") {
     channel ??= new BroadcastChannel("kotoba-daily-story-v1");
     channel.onmessage = (event: MessageEvent<unknown>) => {
       const payload = event.data;
       if (!payload || typeof payload !== "object") return;
-      const { kind, revision } = payload as { kind?: unknown; revision?: unknown };
-      if ((kind === "settings" || kind === "session") && typeof revision === "number") {
+      const { kind, conversationId, revision, ownerId } = payload as {
+        kind?: unknown;
+        conversationId?: unknown;
+        revision?: unknown;
+        ownerId?: unknown;
+      };
+      if (kind === "settings" && typeof revision === "number") {
         listeners.forEach((callback) => callback({ kind, revision }));
+      } else if (
+        kind === "session" &&
+        typeof conversationId === "string" &&
+        typeof revision === "number"
+      ) {
+        listeners.forEach((callback) => callback({ kind, conversationId, revision }));
+      } else if (
+        kind === "lease" &&
+        typeof conversationId === "string" &&
+        typeof ownerId === "string"
+      ) {
+        listeners.forEach((callback) => callback({ kind, conversationId, ownerId }));
       }
     };
   }

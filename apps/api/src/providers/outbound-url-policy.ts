@@ -26,6 +26,8 @@ export type DailyProviderUrlPolicy = {
   production: boolean;
   /** Finite server-owned origins. Production rejects every other dynamic URL. */
   allowedOrigins: readonly string[];
+  /** Development-only opt-in for RFC 2544 synthetic DNS answers used by some proxies. */
+  allowSyntheticDns?: boolean;
 };
 
 type DnsResolver = {
@@ -114,6 +116,7 @@ export function assertDailyProviderUrlAllowed(value: string, policy: DailyProvid
 export async function resolveDailyProviderPublicAddresses(
   hostname: string,
   resolver: DnsResolver = nodeResolver,
+  allowSyntheticDns = false,
 ) {
   const [v4, v6] = await Promise.allSettled([
     resolver.resolve4(hostname),
@@ -123,10 +126,23 @@ export async function resolveDailyProviderPublicAddresses(
     ...(v4.status === "fulfilled" ? v4.value : []),
     ...(v6.status === "fulfilled" ? v6.value : []),
   ];
-  if (addresses.length === 0 || addresses.some((address) => !isPublicInternetAddress(address))) {
+  if (
+    addresses.length === 0 ||
+    addresses.some(
+      (address) =>
+        !isPublicInternetAddress(address) && !(allowSyntheticDns && isSyntheticDnsAddress(address)),
+    )
+  ) {
     throw new DailyProviderDnsError();
   }
   return addresses.map((address) => ({ address, family: isIP(address) as 4 | 6 }));
+}
+
+function isSyntheticDnsAddress(address: string) {
+  const family = isIP(address);
+  if (family !== 4) return false;
+  const [first, second] = address.split(".").map(Number);
+  return first === 198 && (second === 18 || second === 19);
 }
 
 export function isPublicInternetAddress(address: string) {

@@ -59,10 +59,11 @@ export type DailyAction =
   | ({ type: "startSuccess"; opening: DailyMessage } & Operation)
   | { type: "recording" }
   | { type: "recordingCancelled" }
-  | ({ type: "transcribeRequest"; readAloud?: boolean } & Operation)
+  | ({ type: "transcribeRequest"; readAloud?: boolean; cached?: boolean } & Operation)
   | ({ type: "transcribeSuccess"; transcript: PendingTurn; readAloud?: boolean } & Operation)
   | ({ type: "sendRequest"; turn: PendingTurn } & Operation)
   | ({ type: "replySuccess"; turn: PendingTurn; assistant: DailyMessage } & Operation)
+  | { type: "editTranscript"; text: string }
   | ({ type: "reviewRequest" } & Operation)
   | ({ type: "reviewSuccess"; review: DailyReview } & Operation)
   | { type: "readAloudRecording"; target: string }
@@ -154,7 +155,9 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
             }
           : state;
       }
-      return state.phase === "recording" || state.phase === "error"
+      return state.phase === "recording" ||
+        state.phase === "error" ||
+        (action.cached === true && state.phase === "chatting")
         ? {
             ...state,
             phase: "transcribing",
@@ -197,6 +200,18 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
             phase: "chatting",
             messages: [...state.messages, { ...action.turn, role: "user" }, action.assistant],
             pendingTranscript: null,
+            operation: null,
+            error: null,
+          }
+        : state;
+    case "editTranscript":
+      return (state.phase === "transcriptReady" || state.phase === "error") &&
+        state.pendingTranscript?.source === "asr" &&
+        action.text.trim()
+        ? {
+            ...state,
+            phase: "transcriptReady",
+            pendingTranscript: { ...state.pendingTranscript, text: action.text.trim() },
             operation: null,
             error: null,
           }

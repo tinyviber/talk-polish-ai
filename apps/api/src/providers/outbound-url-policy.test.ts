@@ -80,5 +80,15 @@ describe("Daily Story outbound URL policy", () => {
         resolve6: async () => ["2606:4700:4700::1111"],
       }),
     ).resolves.toHaveLength(2);
+    await expect(
+      resolveDailyProviderPublicAddresses(
+        "api.example.com",
+        {
+          resolve4: async () => ["198.18.0.98"],
+          resolve6: async () => [],
+        },
+        true,
+      ),
+    ).resolves.toHaveLength(1);
   });
 });

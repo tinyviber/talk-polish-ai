@@ -48,7 +48,11 @@ export function createOpenAICompatibleSpeechToText(config: OpenAISpeechToTextCon
           );
           form.set("model", config.model!);
           if (input.locale) form.set("language", input.locale.split("-")[0]!);
-          form.set("response_format", config.responseFormat ?? "verbose_json");
+          form.set(
+            "prompt",
+            "The speaker is practicing English. Transcribe the spoken English exactly. Do not translate, paraphrase, or invent text.",
+          );
+          form.set("response_format", config.responseFormat ?? "json");
           return form;
         },
       });

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { DailyStoryPage } from "@/components/daily-story/DailyStoryPage";
+import { ConversationListPage } from "@/components/daily-story/ConversationListPage";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -10,5 +10,5 @@ export const Route = createFileRoute("/")({
       { property: "og:description", content: "从真实故事开始，练习自然英语表达。" },
     ],
   }),
-  component: DailyStoryPage,
+  component: ConversationListPage,
 });

@@ -37,7 +37,7 @@ const envSchema = z.object({
   TRANSCRIPTION_MODEL: optionalString(),
   TRANSCRIPTION_TIMEOUT_MS: positiveInt(60_000),
   /** Some OpenAI-compatible servers only implement `json`. */
-  TRANSCRIPTION_RESPONSE_FORMAT: z.enum(["json", "verbose_json"]).default("verbose_json"),
+  TRANSCRIPTION_RESPONSE_FORMAT: z.enum(["json", "verbose_json"]).default("json"),
   TTS_BASE_URL: optionalString(),
   TTS_API_KEY: optionalString(),
   TTS_MODEL: optionalString(),
@@ -57,6 +57,8 @@ const envSchema = z.object({
   DAILY_PROVIDER_ALLOWED_ORIGINS: z
     .string()
     .default("https://api.deepseek.com,https://api.siliconflow.cn"),
+  /** Local opt-in for networks that map public DNS through 198.18.0.0/15. */
+  DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS: envBoolean(false),
   S3_ENDPOINT: optionalString().default("http://127.0.0.1:9000"),
   S3_REGION: z.string().default("us-east-1"),
   S3_BUCKET: z.string().min(1).default("kotoba-audio"),

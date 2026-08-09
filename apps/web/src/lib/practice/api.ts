@@ -67,7 +67,10 @@ let deviceId: string | null = readStorage(DEVICE_KEY);
 let learnerId: string | null = learnerIdFromToken(token);
 let lastBootstrapLang: Lang | null = null;
 const bootstrapInFlight = new Map<Lang | null, Promise<Learner>>();
-const REQUEST_TIMEOUT_MS = 30_000;
+// Daily Story ASR can take the API's 30s provider timeout to complete. Keep
+// the browser alive long enough to receive the API's actionable 503 instead
+// of converting it into a misleading status-0 network error.
+const REQUEST_TIMEOUT_MS = 45_000;
 const READ_RETRY_LIMIT = 2;
 
 /** Current learner namespace for local offline recordings. Never trust this as API auth. */

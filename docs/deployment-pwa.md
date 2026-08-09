@@ -84,15 +84,16 @@ Install checked-in units as `talk-polish-api.service` and
 API-only credentials in `/opt/kotoba/shared/.env.api.production` (`0600`); Web
 does not need that file. Confirm real Caddy topology and MinIO endpoint from
 ignored Tencent runbook before enabling services. If Caddy remains a container,
-set its production Compose service to `network_mode: host` before proxying to
+set its production Compose service to exactly `network_mode: host` before proxying to
 `127.0.0.1`; container-default networking cannot reach host-loopback services.
 
 ```sh
 sudo install -m 0755 deploy/deploy-host.sh /opt/kotoba/deploy/deploy-host.sh
+sudo systemctl enable talk-polish-infra.service talk-polish-api.service talk-polish-web.service
+sudo systemctl start talk-polish-infra.service
 GITEE_REMOTE='ssh://git@gitee.com/<owner>/<repository>.git' \
   /opt/kotoba/deploy/deploy-host.sh <full-tested-sha>
-sudo systemctl enable --now talk-polish-infra.service
-sudo systemctl enable --now talk-polish-api.service talk-polish-web.service
+sudo systemctl start talk-polish-api.service talk-polish-web.service
 sudo systemctl status talk-polish-api.service talk-polish-web.service
 journalctl -u talk-polish-api.service -u talk-polish-web.service -n 100 --no-pager
 ```

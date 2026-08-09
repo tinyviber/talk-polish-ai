@@ -29,6 +29,7 @@ readonly PREPARE_HOOK="${DEPLOY_PREPARE_HOOK:-}"
 readonly HEALTH_HOOK="${DEPLOY_HEALTH_HOOK:-}"
 readonly SMOKE_HOOK="${DEPLOY_SMOKE_HOOK:-}"
 readonly MIGRATION_HOOK="${DEPLOY_MIGRATION_HOOK:-}"
+readonly DEPLOY_TEST_MODE="${DEPLOY_TEST_MODE:-0}"
 
 die() { printf 'deploy-host: %s\n' "$*" >&2; exit 1; }
 log() { printf 'deploy-host: %s\n' "$*"; }
@@ -37,6 +38,10 @@ log() { printf 'deploy-host: %s\n' "$*"; }
 [[ "$DEPLOY_ROOT" = /* && "$REPO_DIR" = /* && "$RELEASES_DIR" = /* ]] || die 'deployment paths must be absolute'
 [[ "$RETAIN_RELEASES" =~ ^[1-9][0-9]*$ ]] || die 'RETAIN_RELEASES must be positive integer'
 [[ -n "$GITEE_REMOTE" ]] || die 'GITEE_REMOTE is required'
+if [[ "$DEPLOY_TEST_MODE" != 1 ]]; then
+  [[ "$GITEE_REMOTE" =~ ^(ssh://git@gitee\.com/|git@gitee\.com:)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(\.git)?$ ]] \
+    || die 'GITEE_REMOTE must point to the configured Gitee repository'
+fi
 
 mkdir -p "$REPO_DIR" "$RELEASES_DIR" "$DEPLOY_STATE_DIR" "$(dirname "$LOCK_FILE")"
 exec 9>"$LOCK_FILE"
@@ -207,5 +212,17 @@ if [[ -n "$SMOKE_HOOK" ]]; then
 fi
 
 write_marker "$TARGET_SHA" "$CURRENT_MARKER"
+cleanup_old_releases() {
+  local keep=0 release
+  while IFS= read -r release; do
+    [[ -n "$release" ]] || continue
+    if [[ "$release" == "$RELEASES_DIR/$TARGET_SHA" || "$release" == "$RELEASES_DIR/$old_sha" ]]; then
+      continue
+    fi
+    keep=$((keep + 1))
+    (( keep <= RETAIN_RELEASES )) || rm -rf -- "$release"
+  done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -name '[0-9a-f]'\''\''*' -print | sort -r)
+}
+cleanup_old_releases
 trap - EXIT
 log "deployed $TARGET_SHA (web=$web_changed api=$api_changed install=$deps_changed)"

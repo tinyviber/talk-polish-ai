@@ -238,19 +238,20 @@ export function createDailyStoryService(
         input.learnerId,
         input.ip,
         `check:${input.request.capability}`,
-        async () => {
-          const providers = providerFactory(config, {
-            [input.request.capability]: input.request.provider,
-          });
-          const provider =
-            input.request.capability === "chat"
-              ? providers.chat
-              : input.request.capability === "asr"
-                ? providers.asr
-                : providers.tts;
-          await safeProviderCall(config, async () => required(provider).check?.());
-          return { capability: input.request.capability, status: "connected" as const };
-        },
+        async () =>
+          safeProviderCall(config, async () => {
+            const providers = providerFactory(config, {
+              [input.request.capability]: input.request.provider,
+            });
+            const provider =
+              input.request.capability === "chat"
+                ? providers.chat
+                : input.request.capability === "asr"
+                  ? providers.asr
+                  : providers.tts;
+            await required(provider).check?.();
+            return { capability: input.request.capability, status: "connected" as const };
+          }),
         true,
       );
     },

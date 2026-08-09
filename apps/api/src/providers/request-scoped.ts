@@ -9,6 +9,10 @@ import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
 import type { TextModel } from "../capabilities/text-model";
 import type { TextToSpeech, SynthesizedAudio } from "../capabilities/text-to-speech";
 import { DailyProviderRequestError, createDailySafeHttpsClient } from "./safe-https-client";
+import {
+  createDashScopeCompatibleSpeechToText,
+  isDashScopeCompatibleAsrUrl,
+} from "./dashscope-compatible-speech-to-text";
 import { createOpenAICompatibleTextModel } from "./openai-text-model";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -145,6 +149,16 @@ function selectProviderHeaders(headers: Headers) {
 }
 
 export function createDailyStorySpeechToText(
+  config: Env,
+  provider: DailyStoryAsrConfig,
+): SpeechToText {
+  if (isDashScopeCompatibleAsrUrl(provider.baseUrl)) {
+    return createDashScopeCompatibleSpeechToText(config, provider);
+  }
+  return createOpenAICompatibleDailyStorySpeechToText(config, provider);
+}
+
+function createOpenAICompatibleDailyStorySpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
 ): SpeechToText {

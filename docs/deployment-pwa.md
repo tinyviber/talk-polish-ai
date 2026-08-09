@@ -59,35 +59,67 @@ Current 420s proxy timeout is legacy synchronous-pipeline baseline. Recompute
 it with actual Daily Story upstream retry, ASR, chat, and network bounds before
 changing either proxy. Keep app and proxy limits paired.
 
-## Image release identity
+## Source release identity
 
-API and web Dockerfiles accept only TCR-mirrored Bun/Node runtime defaults and
-use npm mirror during install. The image workflow runs only for `main` or
-immutable `deploy/*` tag pushes:
+GitHub remains canonical source and CI. After `main` CI succeeds,
+`.github/workflows/sync-gitee.yml` pushes the exact full lowercase 40-character
+commit SHA to Gitee `main` using a dedicated SSH key. Push is fast-forward-only:
+the workflow never uses `--force` or `--mirror`. It reads Gitee `main` back and
+fails closed when returned SHA differs from GitHub SHA. Manual dispatch also
+requires an explicit full SHA.
 
-1. Branch `codex/daily-story-conversation` full CI passes at exact 40-char
-   head SHA. The publish workflow waits for and independently queries `ci.yml`;
-   it refuses the tag unless both `checks` and `integration` succeeded for that
-   SHA.
-2. Operator pushes annotated `deploy/<that-sha>` tag at same commit.
-3. Workflow peels and validates tag, downloads codeload source by verified
-   commit SHA, then publishes `sha-<40-char-sha>` convenience tags.
-4. Workflow summary records API/web immutable `repository@sha256:...` values.
-5. Host sets only `API_IMAGE` and `WEB_IMAGE` to those exact digest values.
+Configure repository variable `GITEE_REPOSITORY` and optional `GITEE_HOST`;
+keep `GITEE_DEPLOY_KEY` and `GITEE_KNOWN_HOSTS` in GitHub Secrets. Never commit
+keys, known-host data, server addresses, or host `.env` values.
 
-Do not deploy `latest`, a short SHA, mutable tag, local build, or a digest not
-recorded by matching workflow/tag. Details for Tencent Cloud host operations
-are intentionally in ignored `docs/deploy-tencent-cloud.local.md`.
+Gitee is source mirror and disaster-recovery copy. Tencent host services fetch
+the approved exact SHA, use detached release directories, and verify
+`git rev-parse HEAD` before any service change. Host release records must keep
+current SHA, previous SHA, operator, build metadata, and smoke result.
+
+## Host deploy commands
+
+Install checked-in units as `talk-polish-api.service` and
+`talk-polish-web.service` under existing unprivileged `kotoba` user. Keep
+API-only credentials in `/opt/kotoba/shared/.env.api.production` (`0600`); Web
+does not need that file. Confirm real Caddy topology and MinIO endpoint from
+ignored Tencent runbook before enabling services. If Caddy remains a container,
+set its production Compose service to exactly `network_mode: host` before proxying to
+`127.0.0.1`; container-default networking cannot reach host-loopback services.
+
+```sh
+sudo install -m 0755 deploy/deploy-host.sh /opt/kotoba/deploy/deploy-host.sh
+sudo systemctl enable talk-polish-infra.service talk-polish-api.service talk-polish-web.service
+sudo systemctl start talk-polish-infra.service
+GITEE_REMOTE='ssh://git@gitee.com/<owner>/<repository>.git' \
+  /opt/kotoba/deploy/deploy-host.sh <full-tested-sha>
+sudo systemctl start talk-polish-api.service talk-polish-web.service
+sudo systemctl status talk-polish-api.service talk-polish-web.service
+journalctl -u talk-polish-api.service -u talk-polish-web.service -n 100 --no-pager
+```
+
+Script locks full deploy with `flock`, fetches/verifies exact SHA, installs and
+builds only affected apps, checks API/Web/MinIO health, and records
+`current-sha`/`previous-sha`. It refuses unapproved migration files. Failure
+restores previous release and restarts affected services; PostgreSQL/MinIO
+containers and volumes are never removed. Use same script with a recorded
+previous SHA for rollback, then rerun health and HTTPS smoke checks.
+
+TCR runtime/dependency mirrors may support builds, but API/web app image tags or
+digests are not canonical production release identity. Never deploy branch head,
+short SHA, mutable tag, unverified source, or an unrecorded artifact. Details
+for Tencent Cloud host operations remain in ignored
+`docs/deploy-tencent-cloud.local.md`.
 
 ## Release checks
 
-Before app recreation, confirm host Compose resolves expected API/web images;
-record current image values and container digests. Back up active Caddyfile to
-a SHA-named server-local file, validate/reload only reviewed header change, and
-verify live CSP/cache headers. On a Caddy validation, reload, or header failure,
-restore/reload that backup before touching app containers.
+Before service cutover, confirm host release directory contains expected source
+SHA and release manifest. Record current/previous release markers. Back up
+active Caddyfile to a SHA-named server-local file, validate/reload only reviewed
+header change, and verify live CSP/cache headers. On a Caddy validation, reload,
+or header failure, restore/reload that backup before touching app services.
 
-Recreate only `api` and `web` with Compose `--force-recreate`. Do not use
+Restart only affected API/Web services. Do not use
 `docker compose down -v`, alter PostgreSQL/MinIO volumes, change secrets, or
 run an unplanned migration. Smoke HTTPS `/`, `/api/health/live`,
 `/api/health/ready`, PWA manifest/shell, Daily-only UI, Settings gate, strict
@@ -95,5 +127,6 @@ CSP, and browser IndexedDB save/reload. The sentinel configuration value used
 for browser verification must never be printed or sent upstream.
 
 If app boot, readiness, proxy, or CSP fails, restore recorded Caddyfile and
-API/web digest values, then recreate affected services. Image rollback does
-not require database rollback because Daily Story adds no migration.
+previous source release, then restart affected services. Source rollback does
+not imply database rollback; migration changes require separate backward-
+compatibility review.

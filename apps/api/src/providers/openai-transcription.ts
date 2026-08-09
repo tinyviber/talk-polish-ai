@@ -62,7 +62,7 @@ export function createOpenAICompatibleTranscriptionProvider(
           form.append("file", new Blob([body], { type: mimeType }), extensionForMime(mimeType));
           form.set("model", config.model!);
           form.set("language", langCode(input.lang));
-          form.set("response_format", config.responseFormat ?? "verbose_json");
+          form.set("response_format", config.responseFormat ?? "json");
           return form;
         },
       });

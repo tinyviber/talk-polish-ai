@@ -1,0 +1,17 @@
+[Unit]
+Description=Talk Polish PostgreSQL and MinIO infrastructure
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/kotoba
+ExecStart=/usr/bin/docker compose --env-file /opt/kotoba/.env -f /opt/kotoba/compose.yml up -d postgres minio minio-init
+ExecStartPost=/usr/bin/curl --fail --silent --show-error --max-time 15 http://127.0.0.1:9000/minio/health/ready
+NoNewPrivileges=true
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

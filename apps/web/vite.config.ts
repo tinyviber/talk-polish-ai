@@ -9,6 +9,14 @@ import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
   vite: {
+    server: {
+      // Keep local API mode same-origin in development. Daily Story rejects
+      // cross-origin browser requests by design.
+      proxy: {
+        "/api": { target: "http://localhost:3333", changeOrigin: false },
+        "/realtime": { target: "http://localhost:3333", changeOrigin: false, ws: true },
+      },
+    },
     plugins: [
       VitePWA({
         // Nitro publishes the client build (hashed assets, icons, fonts,

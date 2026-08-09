@@ -197,6 +197,17 @@ export async function dailyStoryRoutes(
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const body = dailyStoryProviderCheckRequestSchema.parse(request.body);
+      if (options.config.NODE_ENV !== "production") {
+        request.log.info(
+          {
+            capability: body.capability,
+            providerBaseUrl: body.provider.baseUrl,
+            providerModel: body.provider.model,
+            hasApiKey: body.provider.apiKey.length > 0,
+          },
+          "daily-story provider check",
+        );
+      }
       const result = await service.providerCheck({
         learnerId: learner.id,
         ip: request.ip,

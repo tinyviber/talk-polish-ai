@@ -1,0 +1,26 @@
+[Unit]
+Description=Talk Polish API
+After=network-online.target
+Wants=network-online.target
+Requires=talk-polish-infra.service
+After=talk-polish-infra.service
+
+[Service]
+Type=simple
+User=kotoba-api
+WorkingDirectory=/opt/kotoba/current/apps/api
+EnvironmentFile=-/opt/kotoba/shared/.env.api.production
+Environment=HOST=127.0.0.1
+Environment=PORT=3333
+ExecStart=/usr/local/bin/bun /opt/kotoba/current/apps/api/dist/index.js
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

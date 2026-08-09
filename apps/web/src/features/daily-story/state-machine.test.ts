@@ -36,6 +36,17 @@ describe("Daily Story reducer", () => {
     expect(dailyReducer(recording, { type: "recordingCancelled" }).phase).toBe("chatting");
   });
 
+  test("returns from denied read-aloud recording to review", () => {
+    const recording = dailyReducer(
+      { ...initialDailyState, phase: "review" as const, storyZh: "故事" },
+      { type: "readAloudRecording", target: "I went home." },
+    );
+    expect(dailyReducer(recording, { type: "recordingCancelled" })).toMatchObject({
+      phase: "review",
+      readAloudTarget: "I went home.",
+    });
+  });
+
   test("drops stale provider completion after settings revision changes", () => {
     const waiting = dailyReducer(
       {
@@ -73,6 +84,81 @@ describe("Daily Story reducer", () => {
     });
     expect(recording.phase).toBe("readingAloudRecording");
     expect(recording.readAloudTarget).toBe("I shared my idea in the meeting.");
+  });
+
+  test("returns to unchanged review after repeat-expression cancellation or success", () => {
+    const review = {
+      ...initialDailyState,
+      phase: "review" as const,
+      storyZh: "故事",
+      review: {
+        suggestions: [
+          {
+            sourceTurnId: "user-1",
+            original: "I go to office yesterday.",
+            improved: "I went to the office yesterday.",
+            category: "grammar" as const,
+            explanationZh: "Use past tense for yesterday.",
+          },
+        ],
+      },
+    };
+    const recording = dailyReducer(review, {
+      type: "readAloudRecording",
+      target: "I went to the office yesterday.",
+    });
+
+    expect(dailyReducer(recording, { type: "resetReadAloud" })).toMatchObject({
+      phase: "review",
+      review: review.review,
+    });
+
+    const retry = dailyReducer(recording, {
+      type: "transcribeRequest",
+      ...op,
+      readAloud: true,
+    });
+    const completed = dailyReducer(retry, {
+      type: "transcribeSuccess",
+      ...op,
+      readAloud: true,
+      transcript: { id: "read-1", source: "asr", text: "I went to the office yesterday." },
+    });
+    expect(completed).toMatchObject({
+      phase: "review",
+      review: review.review,
+      readAloudTranscript: "I went to the office yesterday.",
+    });
+  });
+
+  test("retries failed read-aloud transcription from error or review", () => {
+    const recording = dailyReducer(
+      { ...initialDailyState, phase: "review" as const, storyZh: "故事" },
+      { type: "readAloudRecording", target: "I went home." },
+    );
+    const requested = dailyReducer(recording, {
+      type: "transcribeRequest",
+      ...op,
+      readAloud: true,
+    });
+    const failed = dailyReducer(requested, {
+      type: "failure",
+      ...op,
+      message: "ASR failed",
+      resumePhase: "review",
+    });
+    const retried = dailyReducer(failed, {
+      type: "transcribeRequest",
+      ...op,
+      readAloud: true,
+      cached: true,
+      readAloudTarget: "I went home.",
+    });
+    expect(retried).toMatchObject({
+      phase: "readingAloudTranscribing",
+      readAloudTarget: "I went home.",
+      error: null,
+    });
   });
 
   test("persists stable allowlist only", () => {

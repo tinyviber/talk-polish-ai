@@ -14,10 +14,12 @@
     "db:seed": "bun src/db/seed.ts"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.27",
     "@aws-sdk/client-s3": "^3.1101.0",
     "@fastify/cors": "^10.0.1",
     "@fastify/multipart": "^9.0.1",
     "@kotoba/contracts": "workspace:*",
+    "ai": "^7.0.58",
     "drizzle-orm": "^0.38.3",
     "fastify": "^5.2.0",
     "fastify-type-provider-zod": "^4.0.2",

@@ -48,7 +48,7 @@ export function createOpenAICompatibleSpeechToText(config: OpenAISpeechToTextCon
           );
           form.set("model", config.model!);
           if (input.locale) form.set("language", input.locale.split("-")[0]!);
-          form.set("response_format", config.responseFormat ?? "verbose_json");
+          form.set("response_format", config.responseFormat ?? "json");
           return form;
         },
       });

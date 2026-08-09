@@ -6,13 +6,18 @@ import { PROMPTS, fixtureFeedback } from "@kotoba/contracts";
 import { createOpenAICompatibleAssessmentProvider } from "./openai-assessment";
 import { createOpenAICompatibleHttpClient } from "./http";
 import { createLocalAudioStorage } from "./local-storage";
+import { createOpenAICompatibleSpeechToText } from "./openai-speech-to-text";
 import { createOpenAICompatibleTranscriptionProvider } from "./openai-transcription";
 import { createOpenAICompatibleTtsProvider } from "./openai-tts";
+import { createOpenAICompatibleTextModel } from "./openai-text-model";
 import { createRealtimeProvider } from "./realtime";
+import { DailyProviderRequestError } from "./safe-https-client";
 
 let server: ReturnType<typeof Bun.serve>;
 let baseUrl = "";
 let chatRequests = 0;
+let chatBodies: Array<Record<string, unknown>> = [];
+let transcriptionMultipartBodies: Array<Record<string, string>> = [];
 let alwaysInvalidFeedback = false;
 let tempDir = "";
 let realtimeServer: ReturnType<typeof Bun.serve>;
@@ -35,11 +40,18 @@ beforeAll(async () => {
       }
       if (url.pathname === "/chat/completions") {
         chatRequests += 1;
+        chatBodies.push((await request.json()) as Record<string, unknown>);
         const feedback = JSON.stringify(fixtureFeedback("en-smalltalk", "en", 1));
         const content = alwaysInvalidFeedback || chatRequests === 1 ? "{invalid" : feedback;
         return Response.json({ choices: [{ message: { content } }] });
       }
       if (url.pathname === "/audio/transcriptions") {
+        const form = await request.formData();
+        const fields: Record<string, string> = {};
+        for (const [key, value] of form.entries()) {
+          if (typeof value === "string") fields[key] = value;
+        }
+        transcriptionMultipartBodies.push(fields);
         return Response.json({
           text: "real transcript",
           segments: [{ id: 0, start: 0, end: 1, text: "real transcript", confidence: 0.8 }],
@@ -111,6 +123,7 @@ describe("OpenAI-compatible HTTP fixtures", () => {
 
   test("assesses strict feedback after one controlled JSON repair", async () => {
     chatRequests = 0;
+    chatBodies = [];
     const provider = createOpenAICompatibleAssessmentProvider({
       baseUrl,
       apiKey: "fixture-key",
@@ -127,11 +140,19 @@ describe("OpenAI-compatible HTTP fixtures", () => {
     });
     expect(result.feedback.overall).toBeGreaterThan(0);
     expect(chatRequests).toBe(2);
+    expect(chatBodies[0]).toMatchObject({
+      model: "fixture-chat",
+      response_format: { type: "json_object" },
+    });
+    expect(chatBodies[0]?.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "system" })]),
+    );
   });
 
   test("fails when the controlled JSON repair is still invalid", async () => {
     alwaysInvalidFeedback = true;
     chatRequests = 0;
+    chatBodies = [];
     const provider = createOpenAICompatibleAssessmentProvider({
       baseUrl,
       apiKey: "fixture-key",
@@ -151,6 +172,30 @@ describe("OpenAI-compatible HTTP fixtures", () => {
     alwaysInvalidFeedback = false;
   });
 
+  test("preserves an upstream status wrapped by the AI SDK fetch layer", async () => {
+    const model = createOpenAICompatibleTextModel(
+      {
+        baseUrl: "https://provider.example.com/v1",
+        apiKey: "fixture-key",
+        model: "fixture-chat",
+        timeoutMs: 2_000,
+        maxAttempts: 1,
+      },
+      {
+        fetch: async () => {
+          throw new DailyProviderRequestError("http", 401);
+        },
+      },
+    );
+
+    await expect(
+      model.generate({ messages: [{ role: "user", content: "Hello" }] }),
+    ).rejects.toMatchObject({
+      code: "http",
+      status: 401,
+    });
+  });
+
   test("reads ASR bytes through storage and preserves returned metadata", async () => {
     const storage = createLocalAudioStorage(tempDir);
     const stored = await storage.put({
@@ -168,8 +213,16 @@ describe("OpenAI-compatible HTTP fixtures", () => {
       },
       storage,
     );
+    transcriptionMultipartBodies = [];
     const result = await provider.transcribe({
       lang: "en",
+      promptId: PROMPTS[0]!.id,
+      attemptIndex: 1,
+      durationSec: 1,
+      audio: { storageKey: stored.storageKey, mimeType: "audio/wav", bytes: 3 },
+    });
+    await provider.transcribe({
+      lang: "ja",
       promptId: PROMPTS[0]!.id,
       attemptIndex: 1,
       durationSec: 1,
@@ -178,6 +231,39 @@ describe("OpenAI-compatible HTTP fixtures", () => {
     expect(result.text).toBe("real transcript");
     expect(result.transcription?.confidence).toBe(0.8);
     expect(result.transcription?.wordTimestamps?.[0]?.word).toBe("real");
+    expect(transcriptionMultipartBodies).toEqual([
+      { model: "fixture-transcribe", language: "en", response_format: "json" },
+      { model: "fixture-transcribe", language: "ja", response_format: "json" },
+    ]);
+    expect(transcriptionMultipartBodies.every((body) => !("prompt" in body))).toBe(true);
+  });
+
+  test("sends locale without an English-only prompt", async () => {
+    transcriptionMultipartBodies = [];
+    const provider = createOpenAICompatibleSpeechToText({
+      baseUrl,
+      apiKey: "fixture-key",
+      model: "fixture-speech-to-text",
+      timeoutMs: 2_000,
+      maxAttempts: 2,
+    });
+    await provider.transcribe({
+      audio: Buffer.from("wav"),
+      mimeType: "audio/wav",
+      locale: "en-US",
+      requestId: "fixture-en",
+    });
+    await provider.transcribe({
+      audio: Buffer.from("wav"),
+      mimeType: "audio/wav",
+      locale: "ja-JP",
+      requestId: "fixture-ja",
+    });
+    expect(transcriptionMultipartBodies).toEqual([
+      { model: "fixture-speech-to-text", language: "en", response_format: "json" },
+      { model: "fixture-speech-to-text", language: "ja", response_format: "json" },
+    ]);
+    expect(transcriptionMultipartBodies.every((body) => !("prompt" in body))).toBe(true);
   });
 
   test("caches TTS bytes in storage and returns stable object reference", async () => {

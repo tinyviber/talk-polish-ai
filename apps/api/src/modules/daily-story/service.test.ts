@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { TextModel } from "../../capabilities/text-model";
 import { env } from "../../env";
 import { ApiError } from "../../http/errors";
+import { ProviderRequestError } from "../../providers/http";
+import { DailyProviderRequestError } from "../../providers/safe-https-client";
 import { createDailyStoryService } from "./service";
 
 const chatConfig = {
@@ -36,6 +38,92 @@ function serviceFor(values: unknown[]) {
 }
 
 describe("Daily Story policy service", () => {
+  test.each([
+    [401, "unauthorized"],
+    [403, "unauthorized"],
+  ] as const)("preserves rejected provider credentials as %i", async (status, code) => {
+    const service = createDailyStoryService(env(), {
+      providerFactory: () => ({
+        chat: {
+          name: "fixture-chat",
+          async generate() {
+            return { content: "", provider: "fixture" };
+          },
+          async check() {
+            throw new DailyProviderRequestError("http", status);
+          },
+        },
+      }),
+      guard: async ({ run }) => run(),
+    });
+
+    await expect(
+      service.providerCheck({
+        learnerId: "learner",
+        requestId: "request",
+        request: { capability: "chat", provider: chatConfig },
+      }),
+    ).rejects.toMatchObject({ statusCode: 401, code });
+  });
+
+  test("preserves provider rate limits as 429", async () => {
+    const service = createDailyStoryService(env(), {
+      providerFactory: () => ({
+        chat: {
+          name: "fixture-chat",
+          async generate() {
+            return { content: "", provider: "fixture" };
+          },
+          async check() {
+            throw new DailyProviderRequestError("http", 429);
+          },
+        },
+      }),
+      guard: async ({ run }) => run(),
+    });
+
+    await expect(
+      service.providerCheck({
+        learnerId: "learner",
+        requestId: "request",
+        request: { capability: "chat", provider: chatConfig },
+      }),
+    ).rejects.toMatchObject({ statusCode: 429, code: "rate_limited" });
+  });
+
+  test("preserves AI SDK provider auth failures as 401", async () => {
+    const service = createDailyStoryService(env(), {
+      providerFactory: () => ({
+        chat: {
+          name: "fixture-chat",
+          async generate() {
+            throw new ProviderRequestError("Upstream chat request failed.", {
+              code: "http",
+              status: 401,
+              retryCount: 0,
+            });
+          },
+          async check() {
+            throw new ProviderRequestError("Upstream chat request failed.", {
+              code: "http",
+              status: 401,
+              retryCount: 0,
+            });
+          },
+        },
+      }),
+      guard: async ({ run }) => run(),
+    });
+
+    await expect(
+      service.providerCheck({
+        learnerId: "learner",
+        requestId: "request",
+        request: { capability: "chat", provider: chatConfig },
+      }),
+    ).rejects.toMatchObject({ statusCode: 401, code: "unauthorized" });
+  });
+
   test("starts conversationally and preserves structured reply understanding", async () => {
     const service = serviceFor([
       { reply: "That sounds like a long day. What was the meeting mainly about?" },

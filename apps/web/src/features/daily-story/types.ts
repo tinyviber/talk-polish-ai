@@ -56,12 +56,21 @@ export type StorySession = {
   review?: DailyReview;
 };
 
+export type StorySessionSummary = Pick<
+  StorySession,
+  "revision" | "updatedAt" | "phase" | "storyZh"
+> & { id: string };
+
 export type ConnectionState = "idle" | "checking" | "connected" | "failed";
 
 export function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto)
     return `${prefix}_${crypto.randomUUID()}`;
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+export function createConversationId() {
+  return createId("conversation");
 }
 
 export function trimBounded(value: string, max: number) {

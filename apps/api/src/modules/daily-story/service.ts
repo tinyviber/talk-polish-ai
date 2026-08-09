@@ -9,11 +9,15 @@ import type {
 } from "@kotoba/contracts";
 import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
-import { createStructuredGenerator } from "../../capabilities/structured-generator";
+import {
+  createStructuredGenerator,
+  StructuredGenerationError,
+} from "../../capabilities/structured-generator";
 import {
   DailyProviderConfigurationError,
   DailyProviderDnsError,
 } from "../../providers/outbound-url-policy";
+import { ProviderConfigurationError, ProviderRequestError } from "../../providers/http";
 import { DailyProviderRequestError } from "../../providers/safe-https-client";
 import {
   createDailyStoryRequestProviders,
@@ -76,7 +80,7 @@ export function createDailyStoryService(
     }) {
       return guarded(input.learnerId, input.ip, "chat", async () => {
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
-        const generated = await safeProviderCall(() =>
+        const generated = await safeProviderCall(config, () =>
           createStructuredGenerator(chat).generate({
             schema: openingResultSchema,
             messages: [
@@ -103,7 +107,7 @@ export function createDailyStoryService(
     }) {
       return guarded(input.learnerId, input.ip, "asr", async () => {
         const asr = required(providerFactory(config, { asr: input.asr }).asr);
-        const transcript = await safeProviderCall(() =>
+        const transcript = await safeProviderCall(config, () =>
           asr.transcribe({
             audio: input.audio,
             mimeType: input.mimeType,
@@ -130,7 +134,7 @@ export function createDailyStoryService(
           throw ApiError.validation("Conversation turn id must be new.");
         }
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
-        const generated = await safeProviderCall(() =>
+        const generated = await safeProviderCall(config, () =>
           createStructuredGenerator(chat).generate({
             schema: conversationResultSchema,
             messages: [
@@ -172,9 +176,11 @@ export function createDailyStoryService(
         if (sourceTurns.size === 0)
           throw ApiError.validation("Conversation needs a user turn before review.");
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
-        const generated = await safeProviderCall(() =>
+        const generated = await safeProviderCall(config, () =>
           createStructuredGenerator(chat).generate({
             schema: reviewResultSchema,
+            repairInstruction:
+              'Return only JSON with this exact shape: {"suggestions":[{"sourceTurnId":"string","original":"string","improved":"string","category":"clarity|grammar|naturalness","explanationZh":"string"}]}. Each suggestion must contain exactly those five string fields; return an empty suggestions array when there is no useful improvement.',
             messages: [
               { role: "system", content: reviewSystemPrompt },
               {
@@ -211,7 +217,7 @@ export function createDailyStoryService(
     }) {
       return guarded(input.learnerId, input.ip, "tts", async () => {
         const tts = required(providerFactory(config, { tts: input.tts }).tts);
-        return safeProviderCall(() =>
+        return safeProviderCall(config, () =>
           tts.synthesize({
             text: input.text,
             voice: input.tts.voice,
@@ -242,7 +248,7 @@ export function createDailyStoryService(
               : input.request.capability === "asr"
                 ? providers.asr
                 : providers.tts;
-          await safeProviderCall(async () => required(provider).check?.());
+          await safeProviderCall(config, async () => required(provider).check?.());
           return { capability: input.request.capability, status: "connected" as const };
         },
         true,
@@ -256,23 +262,87 @@ function required<T>(value: T | undefined) {
   return value;
 }
 
-async function safeProviderCall<T>(run: () => Promise<T>) {
+async function safeProviderCall<T>(config: Env, run: () => Promise<T>) {
   try {
     return await run();
   } catch (error) {
     if (error instanceof ApiError) throw error;
+    if (config.NODE_ENV !== "production" && error instanceof Error) {
+      console.warn("[daily-story provider error]", {
+        name: error.constructor.name,
+        message: error.message,
+        ...(error instanceof DailyProviderRequestError || error instanceof ProviderRequestError
+          ? {
+              code: error.code,
+              status: error.status,
+              ...(error instanceof DailyProviderRequestError && error.reason
+                ? { reason: error.reason }
+                : {}),
+            }
+          : {}),
+        ...(error instanceof StructuredGenerationError
+          ? { schemaIssues: structuredSchemaIssues(error.cause) }
+          : {}),
+      });
+    }
     if (
       error instanceof DailyProviderConfigurationError ||
-      error instanceof DailyProviderDnsError
+      error instanceof DailyProviderDnsError ||
+      error instanceof ProviderConfigurationError
     ) {
       throw ApiError.validation("Daily Story provider configuration is invalid.");
     }
     // Do not expose upstream response body, URL, key, headers, or Error.cause.
-    if (error instanceof DailyProviderRequestError) {
+    if (error instanceof DailyProviderRequestError || error instanceof ProviderRequestError) {
+      // Preserve actionable provider errors for the UI. The transport keeps the
+      // upstream status without exposing its response body or credentials.
+      if (error.status === 401 || error.status === 403) {
+        throw ApiError.unauthorized("Daily Story provider credentials were rejected.");
+      }
+      if (error.status === 429) {
+        throw ApiError.rateLimited(
+          "Daily Story provider rate limit reached. Please try again later.",
+        );
+      }
+      if (error.status === 400 || error.status === 404 || error.status === 405) {
+        const reason =
+          config.NODE_ENV !== "production" &&
+          error instanceof DailyProviderRequestError &&
+          error.reason
+            ? `Daily Story provider rejected the request: ${error.reason}`
+            : "Daily Story provider configuration is invalid.";
+        throw ApiError.validation(reason);
+      }
       throw ApiError.processingUnavailable("Daily Story provider is temporarily unavailable.");
     }
     throw ApiError.processingUnavailable("Daily Story provider is temporarily unavailable.");
   }
+}
+
+function structuredSchemaIssues(cause: unknown) {
+  if (!cause || typeof cause !== "object") return [];
+  const record = cause as { first?: unknown; repair?: unknown };
+  return [
+    ["first", record.first],
+    ["repair", record.repair],
+  ].flatMap(([label, value]) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as { error?: { issues?: unknown }; shape?: unknown };
+    const issues = item.error?.issues;
+    if (!Array.isArray(issues)) return [];
+    const result = issues.slice(0, 8).flatMap((issue) => {
+      if (!issue || typeof issue !== "object") return [];
+      const item = issue as { path?: unknown; code?: unknown };
+      return [
+        {
+          attempt: label,
+          path: Array.isArray(item.path) ? item.path.slice(0, 6) : [],
+          code: typeof item.code === "string" ? item.code : "unknown",
+        },
+      ];
+    });
+    return item.shape ? [...result, { attempt: label, shape: item.shape }] : result;
+  });
 }
 
 export type DailyStoryService = ReturnType<typeof createDailyStoryService>;

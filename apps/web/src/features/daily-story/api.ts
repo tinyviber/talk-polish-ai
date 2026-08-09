@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { authenticatedApiFetch, ApiClientError } from "@/lib/practice/api";
+import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practice/audio-format";
 import { apiBaseUrl } from "@/lib/practice/mode";
 import type {
   AsrProvider,
@@ -90,8 +91,27 @@ async function request<T>(
     if (error instanceof DOMException && error.name === "AbortError") throw error;
     throw new DailyApiError(0);
   }
-  if (!response.ok) throw new DailyApiError(response.status);
   const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const backendMessage =
+      payload &&
+      typeof payload === "object" &&
+      "error" in payload &&
+      payload.error &&
+      typeof payload.error === "object" &&
+      "message" in payload.error &&
+      typeof payload.error.message === "string"
+        ? payload.error.message
+        : undefined;
+    if (
+      response.status === 422 &&
+      backendMessage &&
+      backendMessage !== "Request validation failed."
+    ) {
+      throw new DailyApiError(response.status, backendMessage);
+    }
+    throw new DailyApiError(response.status);
+  }
   const parsed = schema.safeParse(payload);
   if (!parsed.success)
     throw new DailyApiError(response.status, "服务返回格式不兼容。请检查配置后重试。");
@@ -120,8 +140,14 @@ export async function transcribeDailyStory(input: {
   asr: AsrProvider;
   signal?: AbortSignal;
 }) {
+  // Normalize cached WebM recordings too. Some compatible gateways reject
+  // WebM while accepting the equivalent PCM WAV payload.
+  const normalized = await normalizeRecordedAudio(input.audio);
+  if (normalized.blob.size > MAX_NORMALIZED_AUDIO_BYTES) {
+    throw new Error("录音超过 25 MiB 限制，请缩短录音后重试。");
+  }
   const form = new FormData();
-  form.set("audio", input.audio, `recording.${extension(input.audio.type)}`);
+  form.set("audio", normalized.blob, `recording.${extension(normalized.mimeType)}`);
   form.set("asr", json(input.asr));
   return request("/api/daily-story/transcribe", transcriptSchema, form, input.signal);
 }
@@ -147,7 +173,8 @@ export async function reviewDailyStory(input: {
   chat: ChatProvider;
   signal?: AbortSignal;
 }): Promise<DailyReview> {
-  return request("/api/daily-story/review", reviewSchema, json(input), input.signal);
+  const { signal, ...body } = input;
+  return request("/api/daily-story/review", reviewSchema, json(body), signal);
 }
 
 export async function checkDailyProvider(input: {

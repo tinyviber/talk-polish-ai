@@ -10,10 +10,12 @@ import {
 export class DailyProviderRequestError extends Error {
   readonly code: "timeout" | "network" | "http" | "redirect" | "response";
   readonly status?: number;
-  constructor(code: DailyProviderRequestError["code"], status?: number) {
+  readonly reason?: string;
+  constructor(code: DailyProviderRequestError["code"], status?: number, reason?: string) {
     super("Daily Story provider request failed.");
     this.code = code;
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -49,8 +51,15 @@ export function createDailySafeHttpsClient(options: DailySafeHttpsClientOptions)
       let lastError: DailyProviderRequestError | undefined;
       for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
         try {
+          if (options.allowSyntheticDns && !options.production) {
+            return await requestWithSystemFetch(target, input, options);
+          }
           // This call intentionally remains inside retry loop: DNS is not cached.
-          const addresses = await resolveDailyProviderPublicAddresses(target.hostname);
+          const addresses = await resolveDailyProviderPublicAddresses(
+            target.hostname,
+            undefined,
+            options.allowSyntheticDns && !options.production,
+          );
           const selected = addresses[0]!;
           const response = await requestPinned(target, selected, input, options);
           if (response.status >= 300 && response.status < 400) {
@@ -70,6 +79,95 @@ export function createDailySafeHttpsClient(options: DailySafeHttpsClientOptions)
       throw lastError ?? new DailyProviderRequestError("network");
     },
   };
+}
+
+async function requestWithSystemFetch(
+  target: DailyProviderTarget,
+  input: RequestInput,
+  options: DailySafeHttpsClientOptions,
+): Promise<SafeResponse> {
+  const url = joinDailyProviderPath(target, input.path);
+  const body = input.body ? new Uint8Array(input.body) : undefined;
+  const maxBytes = input.maxResponseBytes ?? options.maxResponseBytes ?? 2 * 1024 * 1024;
+  const headers = new Headers({
+    accept: input.accept ?? "application/json",
+    authorization: `Bearer ${options.apiKey}`,
+    ...(input.requestId
+      ? {
+          "x-request-id": input.requestId,
+          "x-client-request-id": input.requestId,
+          "idempotency-key": input.requestId,
+        }
+      : {}),
+    ...input.headers,
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      ...(body ? { body } : {}),
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (response.status >= 300 && response.status < 400) {
+      throw new DailyProviderRequestError("redirect", response.status);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new DailyProviderRequestError(
+        "http",
+        response.status,
+        await providerResponseReason(response),
+      );
+    }
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new DailyProviderRequestError("response", response.status);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) {
+      throw new DailyProviderRequestError("response", response.status);
+    }
+    return {
+      bytes,
+      contentType: response.headers.get("content-type") ?? undefined,
+      status: response.status,
+    };
+  } catch (error) {
+    if (error instanceof DailyProviderRequestError) throw error;
+    throw new DailyProviderRequestError(controller.signal.aborted ? "timeout" : "network");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function providerResponseReason(response: Response) {
+  try {
+    const text = await response.text();
+    if (!text) return undefined;
+    let value: unknown = text;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      // Keep only a short, non-JSON diagnostic below.
+    }
+    const message =
+      value && typeof value === "object" && "error" in value && value.error
+        ? typeof value.error === "object" && "message" in value.error
+          ? value.error.message
+          : value.error
+        : value && typeof value === "object" && "message" in value
+          ? value.message
+          : value;
+    if (typeof message !== "string") return undefined;
+    return message
+      .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
+      .replace(/sk-[a-z0-9_-]+/gi, "sk-<redacted>")
+      .slice(0, 400);
+  } catch {
+    return undefined;
+  }
 }
 
 function requestPinned(

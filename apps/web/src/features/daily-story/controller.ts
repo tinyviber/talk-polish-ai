@@ -12,6 +12,7 @@ import {
 import {
   SessionConflictError,
   acquireStoryLease,
+  claimStoryLease,
   deleteStorySession,
   ensureDailyStorage,
   readProviderSettings,
@@ -24,9 +25,28 @@ import { dailyReducer, initialDailyState, isDailyBusy, snapshotDailyState } from
 import { releaseTransientTtsPlayback, type TransientTtsPlayback } from "./tts-playback";
 import type { ConnectionState, DailyCapability, ProviderSettings, TurnSource } from "./types";
 import { createId, trimBounded } from "./types";
+import {
+  get as getDailyStoryAudio,
+  list as listDailyStoryAudio,
+  put as putDailyStoryAudio,
+  update as updateDailyStoryAudio,
+  type DailyStoryAudioPurpose,
+} from "./audio-outbox";
 
 const MAX_STORY = 4_000;
 export const DAILY_STORY_TURN_MAX = DAILY_STORY_LIMITS.turnChars;
+
+export type DailyStoryCachedAudio = {
+  clientAttemptId: string;
+  blob: Blob;
+  mimeType: string;
+  durationSec: number;
+  createdAt: number;
+  status: "queued" | "uploading" | "failed" | "completed";
+  purpose: DailyStoryAudioPurpose;
+  readAloudTarget?: string;
+  error?: string;
+};
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
@@ -50,7 +70,7 @@ function persistenceSignature(session: {
   });
 }
 
-export function useDailyStoryController() {
+export function useDailyStoryController(conversationId: string, allowCompose = false) {
   const [state, dispatch] = useReducer(dailyReducer, initialDailyState);
   const [storageError, setStorageError] = useState<string | null>(null);
   const [canEdit, setCanEdit] = useState(false);
@@ -64,11 +84,15 @@ export function useDailyStoryController() {
     asr: false,
     tts: false,
   });
+  const [conversationMissing, setConversationMissing] = useState(false);
+  const [cachedAudio, setCachedAudio] = useState<DailyStoryCachedAudio | null>(null);
   const stateRef = useRef(state);
   const ownerIdRef = useRef(createId("tab"));
   const abortRef = useRef<AbortController | null>(null);
   const retryRef = useRef<(() => void) | null>(null);
+  const reviewInFlightRef = useRef(false);
   const blobRef = useRef<Blob | null>(null);
+  const audioOutboxAttemptRef = useRef<string | null>(null);
   const ttsPlaybackRef = useRef<TransientTtsPlayback | null>(null);
   const persistenceSignatureRef = useRef<string | null>(null);
   const settingsRevisionRef = useRef(0);
@@ -78,6 +102,34 @@ export function useDailyStoryController() {
     ttsPlaybackRef.current = null;
     releaseTransientTtsPlayback(playback);
   }, []);
+
+  const refreshCachedAudio = useCallback(async () => {
+    try {
+      const items = await listDailyStoryAudio({ conversationId });
+      const item = items.at(-1);
+      setCachedAudio(
+        item
+          ? {
+              clientAttemptId: item.clientAttemptId,
+              blob: item.blob,
+              mimeType: item.mimeType,
+              durationSec: item.durationSec,
+              createdAt: item.createdAt,
+              status: item.status,
+              purpose: item.purpose,
+              ...(item.readAloudTarget ? { readAloudTarget: item.readAloudTarget } : {}),
+              ...(item.error ? { error: item.error } : {}),
+            }
+          : null,
+      );
+    } catch {
+      // Cache inspection must never block the conversation UI.
+    }
+  }, [conversationId]);
+
+  useEffect(() => {
+    void refreshCachedAudio();
+  }, [refreshCachedAudio]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -95,15 +147,24 @@ export function useDailyStoryController() {
 
   useEffect(() => {
     let alive = true;
+    let leaseActive = false;
     const owner = ownerIdRef.current;
     const load = async () => {
       try {
         await ensureDailyStorage();
-        const lease = await acquireStoryLease(owner);
+        const session = await readStorySession(conversationId);
         if (!alive) return;
+        if (!session && !allowCompose) {
+          setCanEdit(false);
+          setConversationMissing(true);
+          dispatch({ type: "ready", session: null, settingsRevision: settingsRevisionRef.current });
+          return;
+        }
+        setConversationMissing(false);
+        const lease = await claimStoryLease(conversationId, owner);
+        if (!alive) return;
+        leaseActive = lease;
         setCanEdit(lease);
-        if (!lease) setStorageError("此对话正在另一标签页编辑。此页仅显示最新内容。");
-        const session = await readStorySession();
         const settings = await readProviderSettings();
         if (!alive) return;
         settingsRevisionRef.current = settings.revision;
@@ -118,9 +179,13 @@ export function useDailyStoryController() {
     };
     void load();
     const renew = window.setInterval(() => {
-      void acquireStoryLease(owner)
+      if (!leaseActive) return;
+      void acquireStoryLease(conversationId, owner)
         .then((lease) => {
-          if (alive) setCanEdit(lease);
+          if (alive) {
+            setCanEdit(lease);
+            leaseActive = lease;
+          }
         })
         .catch((error: unknown) => {
           if (alive) setStorageError(message(error));
@@ -144,10 +209,30 @@ export function useDailyStoryController() {
           .catch((error: unknown) => alive && setStorageError(message(error)));
         return;
       }
-      if (event.kind !== "session") return;
+      if (event.kind === "lease") {
+        if (event.conversationId !== conversationId || event.ownerId === owner) return;
+        leaseActive = false;
+        setCanEdit(false);
+        abortRef.current?.abort();
+        void readStorySession(conversationId)
+          .then((session) => {
+            if (!alive) return;
+            persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
+            dispatch({
+              type: "ready",
+              session,
+              settingsRevision: settingsRevisionRef.current,
+            });
+          })
+          .catch((error: unknown) => alive && setStorageError(message(error)));
+        return;
+      }
+      if (event.kind !== "session" || event.conversationId !== conversationId) return;
       // Metadata-only signal. Reload from IndexedDB; never trust cross-tab payloads.
       setCanEdit(false);
-      void readStorySession()
+      leaseActive = false;
+      abortRef.current?.abort();
+      void readStorySession(conversationId)
         .then((session) => {
           if (!alive) return;
           persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
@@ -156,7 +241,6 @@ export function useDailyStoryController() {
             session,
             settingsRevision: settingsRevisionRef.current,
           });
-          setStorageError("另一标签页已更新对话。此页已切换为只读，避免覆盖新内容。");
         })
         .catch((error: unknown) => alive && setStorageError(message(error)));
     });
@@ -164,9 +248,9 @@ export function useDailyStoryController() {
       alive = false;
       window.clearInterval(renew);
       unsubscribe();
-      void releaseStoryLease(owner);
+      void releaseStoryLease(conversationId, owner);
     };
-  }, []);
+  }, [allowCompose, conversationId]);
 
   useEffect(() => {
     const snapshot = snapshotDailyState(state);
@@ -174,7 +258,7 @@ export function useDailyStoryController() {
     const signature = persistenceSignature({ ...snapshot, revision: state.revision });
     if (signature === persistenceSignatureRef.current) return;
     persistenceSignatureRef.current = signature;
-    void writeStorySession(snapshot, state.revision)
+    void writeStorySession(conversationId, snapshot, state.revision, ownerIdRef.current)
       .then((session) => {
         persistenceSignatureRef.current = persistenceSignature(session);
         dispatch({ type: "persisted", session });
@@ -182,13 +266,13 @@ export function useDailyStoryController() {
       .catch((error: unknown) => {
         if (error instanceof SessionConflictError) {
           setCanEdit(false);
-          void readStorySession().then((session) =>
+          void readStorySession(conversationId).then((session) =>
             dispatch({ type: "ready", session, settingsRevision: settingsRevisionRef.current }),
           );
         }
         setStorageError(message(error));
       });
-  }, [canEdit, state]);
+  }, [canEdit, conversationId, state]);
 
   const guard = useCallback(() => canEdit && !isDailyBusy(stateRef.current.phase), [canEdit]);
   const abortCurrent = useCallback(() => {
@@ -250,27 +334,73 @@ export function useDailyStoryController() {
   }, [abortCurrent, currentSettings, guard]);
 
   const transcribe = useCallback(
-    async (audio: Blob, readAloud = false) => {
+    async (
+      audio: Blob,
+      readAloud = false,
+      durationSec = 0,
+      fromCache = false,
+      readAloudTarget?: string,
+    ) => {
+      const target = readAloudTarget ?? stateRef.current.readAloudTarget ?? undefined;
       if (
         !canEdit ||
-        !["recording", "readingAloudRecording", "error"].includes(stateRef.current.phase)
+        !(
+          ["recording", "readingAloudRecording", "error"].includes(stateRef.current.phase) ||
+          (fromCache &&
+            (stateRef.current.phase === "chatting" ||
+              stateRef.current.phase === "review" ||
+              stateRef.current.phase === "error"))
+        )
       )
         return;
       blobRef.current = audio;
+      const clientAttemptId = audioOutboxAttemptRef.current ?? createId("asr");
+      audioOutboxAttemptRef.current = clientAttemptId;
+      const controller = abortCurrent();
       try {
+        try {
+          await putDailyStoryAudio({
+            clientAttemptId,
+            conversationId,
+            blob: audio,
+            mimeType: audio.type || "application/octet-stream",
+            durationSec: Math.max(0, durationSec),
+            createdAt: Date.now(),
+            purpose: readAloud ? "readAloud" : "conversation",
+            ...(readAloud && target ? { readAloudTarget: target } : {}),
+          });
+          await updateDailyStoryAudio(clientAttemptId, { status: "uploading", error: null });
+          await refreshCachedAudio();
+        } catch (error) {
+          // IndexedDB is a reliability enhancement. If browser storage is
+          // unavailable, keep the direct upload path usable.
+          setStorageError(`录音未能写入本地缓存，将直接上传：${message(error)}`);
+        }
+        if (controller.signal.aborted) {
+          await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
+            () => {},
+          );
+          return;
+        }
         const settings = await currentSettings();
         if (!settings.asr) {
+          await updateDailyStoryAudio(clientAttemptId, {
+            status: "queued",
+            error: "语音聊天需配置 ASR。",
+          }).catch(() => {});
+          await refreshCachedAudio();
           setStorageError("语音聊天需配置 ASR。可继续使用文字输入（备用，不是语音转写）。");
           dispatch({ type: readAloud ? "resetReadAloud" : "reRecord" });
           return;
         }
         const operationId = createId(readAloud ? "read" : "asr");
-        const controller = abortCurrent();
         dispatch({
           type: "transcribeRequest",
           operationId,
           settingsRevision: settings.revision,
           readAloud,
+          cached: fromCache,
+          ...(target ? { readAloudTarget: target } : {}),
         });
         const result = await transcribeDailyStory({
           audio,
@@ -279,6 +409,15 @@ export function useDailyStoryController() {
         });
         const text = result.transcript;
         if (!text.trim()) throw new Error("没有识别到语音。请重录后再试。");
+        // Keep the successful recording in the seven-day outbox as well. This
+        // lets us inspect/retry the exact bytes when an upstream ASR model
+        // returns a clearly wrong language instead of deleting the evidence.
+        await updateDailyStoryAudio(clientAttemptId, {
+          status: "completed",
+          error: null,
+        }).catch(() => {});
+        await refreshCachedAudio();
+        audioOutboxAttemptRef.current = null;
         dispatch({
           type: "transcribeSuccess",
           operationId,
@@ -287,19 +426,44 @@ export function useDailyStoryController() {
           transcript: { id: createId(readAloud ? "read" : "asr"), source: "asr", text },
         });
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof DOMException && error.name === "AbortError") {
+          await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
+            () => {},
+          );
+          return;
+        }
+        await updateDailyStoryAudio(clientAttemptId, {
+          status: "failed",
+          error: message(error),
+        }).catch(() => {});
+        await refreshCachedAudio();
         dispatch({
           type: "failure",
           message: message(error),
           resumePhase: readAloud ? "review" : "chatting",
         });
         retryRef.current = () => {
-          if (blobRef.current) void transcribe(blobRef.current, readAloud);
+          if (blobRef.current)
+            void transcribe(blobRef.current, readAloud, durationSec, false, target);
         };
       }
     },
-    [abortCurrent, canEdit, currentSettings],
+    [abortCurrent, canEdit, conversationId, currentSettings, refreshCachedAudio],
   );
+
+  const retryCachedAudio = useCallback(() => {
+    const attemptId = cachedAudio?.clientAttemptId;
+    if (!canEdit || !attemptId) return;
+    void getDailyStoryAudio(attemptId)
+      .then((item) => {
+        if (!item) throw new Error("找不到缓存录音。录音可能已超过 7 天或已被清理。");
+        blobRef.current = item.blob;
+        audioOutboxAttemptRef.current = item.clientAttemptId;
+        const readAloud = item.purpose === "readAloud";
+        return transcribe(item.blob, readAloud, item.durationSec, true, item.readAloudTarget);
+      })
+      .catch((error: unknown) => setStorageError(message(error)));
+  }, [cachedAudio, canEdit, transcribe]);
 
   const send = useCallback(
     async (source: TurnSource, rawText: string): Promise<boolean> => {
@@ -349,6 +513,8 @@ export function useDailyStoryController() {
     if (!guard()) return;
     const current = stateRef.current;
     if (!current.messages.some((item) => item.role === "user" && item.text.trim())) return;
+    if (reviewInFlightRef.current) return;
+    reviewInFlightRef.current = true;
     try {
       const settings = await currentSettings();
       if (!settings.chat) return;
@@ -366,6 +532,8 @@ export function useDailyStoryController() {
       if (error instanceof DOMException && error.name === "AbortError") return;
       dispatch({ type: "failure", message: message(error), resumePhase: "chatting" });
       retryRef.current = () => void finish();
+    } finally {
+      reviewInFlightRef.current = false;
     }
   }, [abortCurrent, currentSettings, guard]);
 
@@ -427,20 +595,42 @@ export function useDailyStoryController() {
   );
 
   const retry = useCallback(() => retryRef.current?.(), []);
+  const beginRecording = useCallback(() => {
+    blobRef.current = null;
+    audioOutboxAttemptRef.current = null;
+    dispatch({ type: "recording" });
+  }, []);
+  const cancelRecording = useCallback(() => dispatch({ type: "recordingCancelled" }), []);
+  const saveAsrDraft = useCallback(
+    (rawText: string) => {
+      if (!canEdit) return false;
+      const text = trimBounded(rawText, DAILY_STORY_TURN_MAX);
+      if (!text || stateRef.current.pendingTranscript?.source !== "asr") return false;
+      dispatch({ type: "editTranscript", text });
+      return true;
+    },
+    [canEdit],
+  );
+  const beginReadAloud = useCallback((target: string) => {
+    blobRef.current = null;
+    audioOutboxAttemptRef.current = null;
+    dispatch({ type: "readAloudRecording", target });
+  }, []);
   const newStory = useCallback(async () => {
     if (stateRef.current.messages.length && !window.confirm("开始新故事会放弃当前对话。继续吗？"))
       return;
     abortRef.current?.abort();
     blobRef.current = null;
+    audioOutboxAttemptRef.current = null;
     persistenceSignatureRef.current = null;
     try {
-      await deleteStorySession(stateRef.current.revision);
+      await deleteStorySession(conversationId, stateRef.current.revision);
     } catch (error) {
       setStorageError(message(error));
       return;
     }
     dispatch({ type: "newStory" });
-  }, []);
+  }, [conversationId]);
 
   return {
     state,
@@ -448,16 +638,20 @@ export function useDailyStoryController() {
     storageError,
     connection,
     capabilities,
+    conversationMissing,
+    cachedAudio,
     setDraft: (draft: string) => dispatch({ type: "draft", draft }),
     start,
-    beginRecording: () => dispatch({ type: "recording" }),
+    beginRecording,
     transcribe,
-    cancelRecording: () => dispatch({ type: "recordingCancelled" }),
+    cancelRecording,
+    saveAsrDraft,
+    retryCachedAudio,
     sendAsr: (text: string) => void send("asr", text),
     sendTyped: (text: string) => send("typed", text),
     reRecord: () => dispatch({ type: "reRecord" }),
     finish,
-    beginReadAloud: (target: string) => dispatch({ type: "readAloudRecording", target }),
+    beginReadAloud,
     resetReadAloud: () => dispatch({ type: "resetReadAloud" }),
     playTts: (text: string) => void playTts(text),
     retry,

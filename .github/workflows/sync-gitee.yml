@@ -1,0 +1,141 @@
+name: Sync verified source to Gitee
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Branch ref to mirror (for example main or codex/daily-story-conversation)
+        required: true
+        type: string
+      target_sha:
+        description: Full lowercase 40-character Git commit SHA to sync to Gitee
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-gitee-${{ github.event.workflow_run.head_branch || inputs.target_ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_SHA: ${{ inputs.target_sha || github.event.workflow_run.head_sha }}
+      TARGET_REF: ${{ inputs.target_ref || 'main' }}
+      GITEE_HOST: ${{ vars.GITEE_HOST || 'gitee.com' }}
+      GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
+    steps:
+      - name: Validate target identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "target_sha must be a full lowercase 40-character commit SHA" >&2
+            exit 1
+          }
+          [[ "$TARGET_REF" =~ ^(main|codex/[A-Za-z0-9._/-]+)$ && "$TARGET_REF" != *..* ]] || {
+            echo "target_ref is not an allowed branch name" >&2
+            exit 1
+          }
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run && "${{ github.event.workflow_run.conclusion }}" != success ]]; then
+            echo "CI did not succeed for target commit" >&2
+            exit 1
+          fi
+          [[ "$GITEE_HOST" =~ ^[a-z0-9.-]+$ ]] || {
+            echo "GITEE_HOST contains invalid characters" >&2
+            exit 1
+          }
+          [[ "$GITEE_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || {
+            echo "GITEE_REPOSITORY must be owner/repository" >&2
+            exit 1
+          }
+
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha || github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checked out commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$TARGET_SHA" ]] || {
+            echo "Checked out commit does not match target SHA" >&2
+            exit 1
+          }
+          git cat-file -e "$TARGET_SHA^{commit}"
+
+      - name: Require successful CI for manual sync
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          runs_json="$(curl --fail --silent --show-error --location \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$TARGET_SHA&per_page=100")"
+          run_id="$(jq -r --arg sha "$TARGET_SHA" '
+            [.workflow_runs[] | select(.head_sha == $sha and .status == "completed" and .conclusion == "success")]
+            | .[0].id // empty
+          ' <<<"$runs_json")"
+          test -n "$run_id" || {
+            echo "No successful CI run found for target SHA" >&2
+            exit 1
+          }
+          jobs_json="$(curl --fail --silent --show-error --location \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+          for required_job in checks integration; do
+            jq -e --arg name "$required_job" \
+              'any(.jobs[]; .name == $name and .status == "completed" and .conclusion == "success")' \
+              <<<"$jobs_json" >/dev/null || {
+                echo "Successful CI run lacks green $required_job job" >&2
+                exit 1
+              }
+          done
+
+      - name: Configure secret-safe Gitee SSH
+        shell: bash
+        env:
+          GITEE_DEPLOY_KEY: ${{ secrets.GITEE_DEPLOY_KEY }}
+          GITEE_KNOWN_HOSTS: ${{ secrets.GITEE_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GITEE_DEPLOY_KEY" || { echo "GITEE_DEPLOY_KEY is missing" >&2; exit 1; }
+          test -n "$GITEE_KNOWN_HOSTS" || { echo "GITEE_KNOWN_HOSTS is missing" >&2; exit 1; }
+
+          ssh_dir="$RUNNER_TEMP/gitee-ssh"
+          mkdir -m 700 "$ssh_dir"
+          eval "$(ssh-agent -s)" >/dev/null
+          printf '%s\n' "$GITEE_DEPLOY_KEY" | ssh-add -
+          printf '%s\n' "$GITEE_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/known_hosts"
+          {
+            echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
+            echo "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+          } >> "$GITHUB_ENV"
+
+      - name: Push exact commit without force or mirror
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gitee_url="git@$GITEE_HOST:$GITEE_REPOSITORY.git"
+          git push "$gitee_url" "HEAD:refs/heads/$TARGET_REF"
+          remote_sha="$(git ls-remote "$gitee_url" "refs/heads/$TARGET_REF" | awk '{print $1}')"
+          [[ "$remote_sha" == "$TARGET_SHA" ]] || {
+            echo "Gitee ref does not point to target SHA after push" >&2
+            exit 1
+          }

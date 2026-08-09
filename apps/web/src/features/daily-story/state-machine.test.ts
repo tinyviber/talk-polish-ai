@@ -36,6 +36,17 @@ describe("Daily Story reducer", () => {
     expect(dailyReducer(recording, { type: "recordingCancelled" }).phase).toBe("chatting");
   });
 
+  test("returns from denied read-aloud recording to review", () => {
+    const recording = dailyReducer(
+      { ...initialDailyState, phase: "review" as const, storyZh: "故事" },
+      { type: "readAloudRecording", target: "I went home." },
+    );
+    expect(dailyReducer(recording, { type: "recordingCancelled" })).toMatchObject({
+      phase: "review",
+      readAloudTarget: "I went home.",
+    });
+  });
+
   test("drops stale provider completion after settings revision changes", () => {
     const waiting = dailyReducer(
       {
@@ -117,6 +128,36 @@ describe("Daily Story reducer", () => {
       phase: "review",
       review: review.review,
       readAloudTranscript: "I went to the office yesterday.",
+    });
+  });
+
+  test("retries failed read-aloud transcription from error or review", () => {
+    const recording = dailyReducer(
+      { ...initialDailyState, phase: "review" as const, storyZh: "故事" },
+      { type: "readAloudRecording", target: "I went home." },
+    );
+    const requested = dailyReducer(recording, {
+      type: "transcribeRequest",
+      ...op,
+      readAloud: true,
+    });
+    const failed = dailyReducer(requested, {
+      type: "failure",
+      ...op,
+      message: "ASR failed",
+      resumePhase: "review",
+    });
+    const retried = dailyReducer(failed, {
+      type: "transcribeRequest",
+      ...op,
+      readAloud: true,
+      cached: true,
+      readAloudTarget: "I went home.",
+    });
+    expect(retried).toMatchObject({
+      phase: "readingAloudTranscribing",
+      readAloudTarget: "I went home.",
+      error: null,
     });
   });
 

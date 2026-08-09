@@ -30,6 +30,7 @@ import {
   list as listDailyStoryAudio,
   put as putDailyStoryAudio,
   update as updateDailyStoryAudio,
+  type DailyStoryAudioPurpose,
 } from "./audio-outbox";
 
 const MAX_STORY = 4_000;
@@ -42,6 +43,8 @@ export type DailyStoryCachedAudio = {
   durationSec: number;
   createdAt: number;
   status: "queued" | "uploading" | "failed" | "completed";
+  purpose: DailyStoryAudioPurpose;
+  readAloudTarget?: string;
   error?: string;
 };
 
@@ -113,6 +116,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
               durationSec: item.durationSec,
               createdAt: item.createdAt,
               status: item.status,
+              purpose: item.purpose,
+              ...(item.readAloudTarget ? { readAloudTarget: item.readAloudTarget } : {}),
               ...(item.error ? { error: item.error } : {}),
             }
           : null,
@@ -329,12 +334,22 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   }, [abortCurrent, currentSettings, guard]);
 
   const transcribe = useCallback(
-    async (audio: Blob, readAloud = false, durationSec = 0, fromCache = false) => {
+    async (
+      audio: Blob,
+      readAloud = false,
+      durationSec = 0,
+      fromCache = false,
+      readAloudTarget?: string,
+    ) => {
+      const target = readAloudTarget ?? stateRef.current.readAloudTarget ?? undefined;
       if (
         !canEdit ||
         !(
           ["recording", "readingAloudRecording", "error"].includes(stateRef.current.phase) ||
-          (fromCache && stateRef.current.phase === "chatting")
+          (fromCache &&
+            (stateRef.current.phase === "chatting" ||
+              stateRef.current.phase === "review" ||
+              stateRef.current.phase === "error"))
         )
       )
         return;
@@ -351,6 +366,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
             mimeType: audio.type || "application/octet-stream",
             durationSec: Math.max(0, durationSec),
             createdAt: Date.now(),
+            purpose: readAloud ? "readAloud" : "conversation",
+            ...(readAloud && target ? { readAloudTarget: target } : {}),
           });
           await updateDailyStoryAudio(clientAttemptId, { status: "uploading", error: null });
           await refreshCachedAudio();
@@ -383,6 +400,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           settingsRevision: settings.revision,
           readAloud,
           cached: fromCache,
+          ...(target ? { readAloudTarget: target } : {}),
         });
         const result = await transcribeDailyStory({
           audio,
@@ -425,7 +443,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           resumePhase: readAloud ? "review" : "chatting",
         });
         retryRef.current = () => {
-          if (blobRef.current) void transcribe(blobRef.current, readAloud, durationSec);
+          if (blobRef.current)
+            void transcribe(blobRef.current, readAloud, durationSec, false, target);
         };
       }
     },
@@ -440,7 +459,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (!item) throw new Error("找不到缓存录音。录音可能已超过 7 天或已被清理。");
         blobRef.current = item.blob;
         audioOutboxAttemptRef.current = item.clientAttemptId;
-        return transcribe(item.blob, false, item.durationSec, true);
+        const readAloud = item.purpose === "readAloud";
+        return transcribe(item.blob, readAloud, item.durationSec, true, item.readAloudTarget);
       })
       .catch((error: unknown) => setStorageError(message(error)));
   }, [cachedAudio, canEdit, transcribe]);

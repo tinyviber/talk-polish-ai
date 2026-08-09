@@ -5,6 +5,8 @@ type DecodedAudio = Pick<
 
 type AudioContextConstructor = new () => AudioContext;
 
+export const MAX_NORMALIZED_AUDIO_BYTES = 25 * 1024 * 1024;
+
 function audioContextConstructor(): AudioContextConstructor | undefined {
   if (typeof window === "undefined") return undefined;
   return (
@@ -56,6 +58,16 @@ export function encodePcmWav(audio: DecodedAudio) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+export function chooseNormalizedAudio(
+  original: Blob,
+  mimeType: string,
+  decoded: DecodedAudio,
+  maxBytes = MAX_NORMALIZED_AUDIO_BYTES,
+) {
+  const wav = encodePcmWav(decoded);
+  return wav.size > maxBytes ? { blob: original, mimeType } : { blob: wav, mimeType: "audio/wav" };
+}
+
 /**
  * WebM is a valid browser recording format, but some OpenAI-compatible ASR
  * gateways cannot parse its duration. Normalize it to WAV before upload while
@@ -63,6 +75,7 @@ export function encodePcmWav(audio: DecodedAudio) {
  */
 export async function normalizeRecordedAudio(
   blob: Blob,
+  maxBytes = MAX_NORMALIZED_AUDIO_BYTES,
 ): Promise<{ blob: Blob; mimeType: string }> {
   const mimeType = blob.type.split(";", 1)[0]?.trim().toLowerCase() || "audio/webm";
   if (mimeType !== "audio/webm" && mimeType !== "audio/ogg") {
@@ -75,8 +88,9 @@ export async function normalizeRecordedAudio(
   try {
     context = new AudioContextCtor();
     const decoded = await context.decodeAudioData(await blob.arrayBuffer());
-    const wav = encodePcmWav(decoded);
-    return { blob: wav, mimeType: "audio/wav" };
+    // PCM can be much larger than the compressed browser recording. Never
+    // replace a manageable original with an oversized normalized payload.
+    return chooseNormalizedAudio(blob, mimeType, decoded, maxBytes);
   } catch {
     return { blob, mimeType };
   } finally {

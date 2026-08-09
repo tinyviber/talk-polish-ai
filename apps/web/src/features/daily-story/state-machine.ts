@@ -59,7 +59,12 @@ export type DailyAction =
   | ({ type: "startSuccess"; opening: DailyMessage } & Operation)
   | { type: "recording" }
   | { type: "recordingCancelled" }
-  | ({ type: "transcribeRequest"; readAloud?: boolean; cached?: boolean } & Operation)
+  | ({
+      type: "transcribeRequest";
+      readAloud?: boolean;
+      cached?: boolean;
+      readAloudTarget?: string;
+    } & Operation)
   | ({ type: "transcribeSuccess"; transcript: PendingTurn; readAloud?: boolean } & Operation)
   | ({ type: "sendRequest"; turn: PendingTurn } & Operation)
   | ({ type: "replySuccess"; turn: PendingTurn; assistant: DailyMessage } & Operation)
@@ -143,15 +148,25 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
     case "recording":
       return state.phase === "chatting" ? { ...state, phase: "recording", error: null } : state;
     case "recordingCancelled":
-      return state.phase === "recording" ? { ...state, phase: "chatting", error: null } : state;
+      return state.phase === "recording"
+        ? { ...state, phase: "chatting", error: null }
+        : state.phase === "readingAloudRecording"
+          ? { ...state, phase: "review", operation: null, error: null }
+          : state;
     case "transcribeRequest":
       if (action.readAloud) {
-        return state.phase === "readingAloudRecording"
+        const canRetryReadAloud =
+          state.phase === "readingAloudRecording" ||
+          state.phase === "review" ||
+          (state.phase === "error" && state.error?.resumePhase === "review");
+        return canRetryReadAloud
           ? {
               ...state,
               phase: "readingAloudTranscribing",
               settingsRevision: action.settingsRevision,
               operation: { id: action.operationId, settingsRevision: action.settingsRevision },
+              readAloudTarget: action.readAloudTarget ?? state.readAloudTarget,
+              error: null,
             }
           : state;
       }
@@ -172,6 +187,7 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
           ...state,
           phase: "review",
           operation: null,
+          pendingTranscript: null,
           readAloudTranscript: action.transcript.text,
         };
       }

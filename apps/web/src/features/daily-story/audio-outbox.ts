@@ -1,10 +1,11 @@
 export const DAILY_STORY_AUDIO_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const DB_NAME = "kotoba-daily-story-audio";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = "audioOutbox";
 
 export type DailyStoryAudioOutboxStatus = "queued" | "uploading" | "failed" | "completed";
+export type DailyStoryAudioPurpose = "conversation" | "readAloud";
 
 export type DailyStoryAudioOutboxItem = {
   clientAttemptId: string;
@@ -15,16 +16,31 @@ export type DailyStoryAudioOutboxItem = {
   createdAt: number;
   updatedAt: number;
   status: DailyStoryAudioOutboxStatus;
+  purpose: DailyStoryAudioPurpose;
+  readAloudTarget?: string;
   error?: string;
 };
 
-export type DailyStoryAudioOutboxInput = Omit<DailyStoryAudioOutboxItem, "status" | "updatedAt"> & {
+export type DailyStoryAudioOutboxInput = Omit<
+  DailyStoryAudioOutboxItem,
+  "status" | "updatedAt" | "purpose"
+> & {
   status?: DailyStoryAudioOutboxStatus;
+  purpose?: DailyStoryAudioPurpose;
   error?: string;
 };
 
 export type DailyStoryAudioOutboxUpdate = Partial<
-  Pick<DailyStoryAudioOutboxItem, "conversationId" | "blob" | "mimeType" | "durationSec" | "status">
+  Pick<
+    DailyStoryAudioOutboxItem,
+    | "conversationId"
+    | "blob"
+    | "mimeType"
+    | "durationSec"
+    | "status"
+    | "purpose"
+    | "readAloudTarget"
+  >
 > & {
   error?: string | null;
 };
@@ -51,10 +67,22 @@ function openDatabase(): Promise<IDBDatabase> {
       return;
     }
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: "clientAttemptId" });
+        return;
+      }
+      if (request.transaction && (event as IDBVersionChangeEvent).oldVersion < 2) {
+        const store = request.transaction.objectStore(STORE_NAME);
+        const records = store.getAll();
+        records.onsuccess = () => {
+          for (const record of records.result as Array<
+            DailyStoryAudioOutboxItem & { purpose?: string }
+          >) {
+            if (!record.purpose) store.put({ ...record, purpose: "conversation" });
+          }
+        };
       }
     };
     request.onblocked = () => reject(new Error("Daily Story audio database upgrade is blocked"));
@@ -104,6 +132,14 @@ function assertInput(input: DailyStoryAudioOutboxInput) {
   if (!Number.isFinite(input.createdAt) || input.createdAt < 0) {
     throw new Error("createdAt must be a non-negative timestamp");
   }
+  const purpose = input.purpose ?? "conversation";
+  if (purpose !== "conversation" && purpose !== "readAloud") {
+    throw new Error("purpose must be conversation or readAloud");
+  }
+  if (purpose === "readAloud" && !input.readAloudTarget?.trim()) {
+    throw new Error("readAloudTarget is required for readAloud audio");
+  }
+  return purpose;
 }
 
 function isExpired(item: Pick<DailyStoryAudioOutboxItem, "createdAt">, now: number) {
@@ -124,7 +160,7 @@ async function removeExpired(now = Date.now()) {
 }
 
 export async function put(input: DailyStoryAudioOutboxInput): Promise<DailyStoryAudioOutboxItem> {
-  assertInput(input);
+  const purpose = assertInput(input);
   await removeExpired();
 
   const db = await openDatabase();
@@ -149,6 +185,8 @@ export async function put(input: DailyStoryAudioOutboxInput): Promise<DailyStory
       createdAt: input.createdAt,
       updatedAt: Date.now(),
       status: input.status ?? "queued",
+      purpose,
+      ...(input.readAloudTarget ? { readAloudTarget: input.readAloudTarget } : {}),
       ...(input.error ? { error: input.error } : {}),
     };
     store.put(persisted);

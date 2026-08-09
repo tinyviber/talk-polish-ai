@@ -61,18 +61,16 @@ categories and never expose keys or upstream response bodies.
 
 ## Production build and proxy
 
-Both Dockerfiles build from Tencent Container Registry (TCR) base images, not
-Docker Hub. Build from repository root:
+Dockerfiles remain optional local portability paths. Build from repository root
+only when container packaging is explicitly needed:
 
 ```sh
 docker build -f apps/api/Dockerfile -t kotoba-api:local .
 docker build -f apps/web/Dockerfile -t kotoba-web:local .
 ```
 
-`bun run build:docker` is the GitHub-hosted CI smoke build. It explicitly
-overrides those base-image arguments with public pinned Bun/Node images because
-CI has no TCR credentials; production defaults and publish builds remain
-TCR-only.
+Tencent production does not build or upload Web/API application images. Host
+release directories build the affected application from the exact Gitee SHA.
 
 Use [deploy/Caddyfile](deploy/Caddyfile) or
 [deploy/nginx.conf](deploy/nginx.conf) only as reviewed examples. They use
@@ -96,26 +94,40 @@ and body limits together when API limits change.
 
 See [docs/deployment-pwa.md](docs/deployment-pwa.md) for release safeguards.
 
-## CI, TCR, and rollout identity
+## Source mirror and host release identity
 
-`codex/daily-story-conversation` has a dedicated full-CI push trigger in
-addition to pull-request checks. It does not publish images. After that exact
-head SHA is green, an operator creates an annotated
-`deploy/<40-character-commit-sha>` tag at that commit. The TCR workflow rejects
-lightweight, malformed, mismatched, or ungreen tags: it verifies successful
-`checks` and `integration` jobs from `ci.yml` for that exact commit (waiting
-for concurrent main CI when needed), builds source downloaded by that commit
-SHA, and emits immutable API and web `repository@sha256:...` references.
+GitHub is canonical source, CI, and release identity. After `main` CI succeeds,
+`sync-gitee.yml` checks out the exact full 40-character commit SHA and pushes it
+to Gitee `main` over a dedicated SSH key. It uses fast-forward-only Git push,
+never `--force` or `--mirror`, then reads Gitee `main` back and fails unless its
+SHA exactly matches. Manual runs must provide the same full lowercase SHA.
 
-`sha-<40-character-commit-sha>` is only a convenience locator. Deployment and
-rollback must set `API_IMAGE` and `WEB_IMAGE` to recorded digest references,
-never `latest` or an unverified tag. Main may update `latest`; deploy tags do
-not.
+Configure repository variable `GITEE_REPOSITORY` (`owner/repository`) and,
+when needed, `GITEE_HOST`; store `GITEE_DEPLOY_KEY` and `GITEE_KNOWN_HOSTS` as
+GitHub secrets. Workflow logs never print either secret.
+
+Canonical service path:
+
+```text
+GitHub source + CI → Gitee source mirror → Tencent host services
+                                           ├─ API/Web release
+                                           ├─ Caddy HTTPS proxy
+                                           └─ PostgreSQL/MinIO state
+```
+
+Gitee is source mirror and disaster-recovery copy, not production authority.
+Tencent host services pull the approved exact SHA from Gitee, verify it before
+release, and keep current/previous host release records. Host deployment must
+not use branch head, short SHA, mutable image tag, or unverified source.
+
+TCR is not part of the canonical Web/API production deployment. Production
+release identity is verified source SHA plus host release manifest.
 
 The host-specific Tencent Cloud procedure is deliberately untracked at
-`docs/deploy-tencent-cloud.local.md`. It covers preflight, Caddy backup/reload,
-digest rollout, smoke tests, and rollback. Do not add server addresses, TCR
-passwords, API keys, `.env` values, or Docker credentials to this repository.
+`docs/deploy-tencent-cloud.local.md`. It covers host preflight, source checkout,
+Caddy backup/reload, service rollout, smoke tests, and rollback. Do not add
+server addresses, Gitee private keys, API keys, `.env` values, or Docker
+credentials to this repository.
 
 ## Validation
 
@@ -128,5 +140,5 @@ bun run build
 bun run test:integration
 ```
 
-CI also validates both example proxy configs, API/web Docker builds, PWA release
-artifacts, and production shell script tags before strict CSP is released.
+CI also validates both example proxy configs, PWA release artifacts, deployment
+shell syntax, and production shell script tags before strict CSP is released.

@@ -62,10 +62,6 @@ export function createOpenAICompatibleTranscriptionProvider(
           form.append("file", new Blob([body], { type: mimeType }), extensionForMime(mimeType));
           form.set("model", config.model!);
           form.set("language", langCode(input.lang));
-          form.set(
-            "prompt",
-            "The speaker is practicing English. Transcribe the spoken English exactly. Do not translate, paraphrase, or invent text.",
-          );
           form.set("response_format", config.responseFormat ?? "json");
           return form;
         },

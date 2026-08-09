@@ -197,7 +197,7 @@ function assertS3Endpoint(value: string, production: boolean, allowInsecureInter
   if (
     allowInsecureInternal &&
     parsed.protocol === "http:" &&
-    parsed.hostname === "minio" &&
+    ["minio", "127.0.0.1"].includes(parsed.hostname) &&
     parsed.port === "9000" &&
     parsed.pathname === "/" &&
     !parsed.search &&
@@ -206,7 +206,7 @@ function assertS3Endpoint(value: string, production: boolean, allowInsecureInter
     return;
   }
   throw new Error(
-    "S3_ENDPOINT must use HTTPS in production unless it is the Docker-internal http://minio:9000 endpoint with S3_ALLOW_INSECURE_INTERNAL=true.",
+    "S3_ENDPOINT must use HTTPS in production unless it is the exact Docker/internal http://minio:9000 or host-local http://127.0.0.1:9000 endpoint with S3_ALLOW_INSECURE_INTERNAL=true.",
   );
 }
 

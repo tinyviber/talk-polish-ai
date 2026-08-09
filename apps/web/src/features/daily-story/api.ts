@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { authenticatedApiFetch, ApiClientError } from "@/lib/practice/api";
-import { normalizeRecordedAudio } from "@/lib/practice/audio-format";
+import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practice/audio-format";
 import { apiBaseUrl } from "@/lib/practice/mode";
 import type {
   AsrProvider,
@@ -143,6 +143,9 @@ export async function transcribeDailyStory(input: {
   // Normalize cached WebM recordings too. Some compatible gateways reject
   // WebM while accepting the equivalent PCM WAV payload.
   const normalized = await normalizeRecordedAudio(input.audio);
+  if (normalized.blob.size > MAX_NORMALIZED_AUDIO_BYTES) {
+    throw new Error("录音超过 25 MiB 限制，请缩短录音后重试。");
+  }
   const form = new FormData();
   form.set("audio", normalized.blob, `recording.${extension(normalized.mimeType)}`);
   form.set("asr", json(input.asr));

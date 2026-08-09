@@ -201,7 +201,6 @@ jobs:
             -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.11-alpine \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-      - run: bun run build:docker
 
   integration:
     runs-on: ubuntu-latest

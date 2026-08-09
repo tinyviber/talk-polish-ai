@@ -73,6 +73,15 @@ describe("production configuration safety", () => {
     expect(env().S3_ENDPOINT).toBe("http://minio:9000");
   });
 
+  test("allows only flagged host-local MinIO HTTP", () => {
+    configureProduction({
+      S3_ENDPOINT: "http://127.0.0.1:9000",
+      S3_ALLOW_INSECURE_INTERNAL: "true",
+    });
+
+    expect(env().S3_ENDPOINT).toBe("http://127.0.0.1:9000");
+  });
+
   test("rejects unflagged or external production S3 HTTP", () => {
     configureProduction({ S3_ENDPOINT: "http://minio:9000" });
     expect(() => env()).toThrow("S3_ENDPOINT must use HTTPS");

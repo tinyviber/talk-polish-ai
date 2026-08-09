@@ -89,7 +89,11 @@ export function DailyStoryPage({
   }, [phase, recorder.audioBlob, recorder.seconds, recorder.status, transcribe]);
 
   useEffect(() => {
-    if (phase === "recording" && recorder.status === "denied") cancelRecording();
+    if (
+      (phase === "recording" || phase === "readingAloudRecording") &&
+      recorder.status === "denied"
+    )
+      cancelRecording();
   }, [cancelRecording, phase, recorder.status]);
 
   const beginConversationRecording = () => {

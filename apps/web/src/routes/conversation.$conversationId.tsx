@@ -17,10 +17,6 @@ function ConversationRoute() {
   const { conversationId } = Route.useParams();
   const { new: isNew } = Route.useSearch();
   return (
-    <DailyStoryPage
-      key={conversationId}
-      conversationId={conversationId}
-      isNew={isNew === true}
-    />
+    <DailyStoryPage key={conversationId} conversationId={conversationId} isNew={isNew === true} />
   );
 }

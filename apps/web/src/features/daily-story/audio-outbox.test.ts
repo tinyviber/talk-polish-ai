@@ -44,10 +44,61 @@ describe("Daily Story audio outbox", () => {
       durationSec: 4.25,
       createdAt,
       status: "queued",
+      purpose: "conversation",
     });
     expect(saved.blob.size).toBe(blob.size);
     expect((await get("attempt-1"))?.conversationId).toBe("conversation-1");
     expect(await list()).toHaveLength(1);
+  });
+
+  test("persists read-aloud purpose and target", async () => {
+    const saved = await put({
+      clientAttemptId: "read-attempt",
+      conversationId: "conversation-1",
+      blob: new Blob(["audio"], { type: "audio/webm" }),
+      mimeType: "audio/webm",
+      durationSec: 2,
+      createdAt: Date.now(),
+      purpose: "readAloud",
+      readAloudTarget: "I went home.",
+    });
+
+    expect(saved).toMatchObject({ purpose: "readAloud", readAloudTarget: "I went home." });
+    expect(await get("read-attempt")).toMatchObject({
+      purpose: "readAloud",
+      readAloudTarget: "I went home.",
+    });
+  });
+
+  test("migrates legacy records to conversation purpose", async () => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open("kotoba-daily-story-audio", 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore("audioOutbox", { keyPath: "clientAttemptId" });
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction("audioOutbox", "readwrite");
+        tx.objectStore("audioOutbox").put({
+          clientAttemptId: "legacy",
+          conversationId: "conversation-1",
+          blob: new Blob(["audio"], { type: "audio/webm" }),
+          mimeType: "audio/webm",
+          durationSec: 1,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          status: "failed",
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+
+    await expect(get("legacy")).resolves.toMatchObject({ purpose: "conversation" });
   });
 
   test("is idempotent by clientAttemptId and never resets an existing item", async () => {

@@ -11,7 +11,8 @@ User=kotoba-web
 WorkingDirectory=/opt/kotoba/current/apps/web
 Environment=HOST=127.0.0.1
 Environment=PORT=3000
-ExecStart=/usr/local/bin/bun /opt/kotoba/current/apps/web/.output/server/index.mjs
+Environment=NODE_ENV=production
+ExecStart=/opt/kotoba/runtime/node/bin/node /opt/kotoba/current/apps/web/.output/server/index.mjs
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=30

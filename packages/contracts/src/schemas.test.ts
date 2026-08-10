@@ -5,6 +5,7 @@ import {
   expressionSchema,
   feedbackSchema,
   errorCodeSchema,
+  SUPPORTED_AUDIO_MIME_TYPES,
 } from "./schemas";
 
 describe("shared contracts", () => {
@@ -72,6 +73,12 @@ describe("shared contracts", () => {
       durationSec: "4",
     });
     expect(parsed.clientAttemptId).toBe("offline-client-attempt-1");
+  });
+
+  test("supports the common MP3 MIME alias for audio uploads", () => {
+    expect(SUPPORTED_AUDIO_MIME_TYPES).toContain("audio/mp3");
+    expect(SUPPORTED_AUDIO_MIME_TYPES).toContain("audio/x-wav");
+    expect(SUPPORTED_AUDIO_MIME_TYPES).toContain("audio/opus");
   });
 
   test("rejects fractional feedback scores that cannot fit PostgreSQL integer columns", () => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isDashScopeBaseUrl } from "@kotoba/contracts";
 import { authenticatedApiFetch, ApiClientError } from "@/lib/practice/api";
 import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practice/audio-format";
 import { apiBaseUrl } from "@/lib/practice/mode";
@@ -38,6 +39,15 @@ const checkSchema = z.object({
   capability: z.enum(["chat", "asr", "tts"]),
   status: z.literal("connected"),
 });
+
+const FUN_ASR_REALTIME_MODELS = new Set(["fun-asr-realtime", "fun-asr-realtime-2026-02-28"]);
+const FUN_ASR_HTTP_AUDIO_MIME_TYPES = new Set([
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp3",
+  "audio/mpeg",
+  "audio/opus",
+]);
 
 export class DailyApiError extends Error {
   readonly status: number;
@@ -168,6 +178,16 @@ export async function transcribeDailyStory(input: {
   const normalized = await normalizeRecordedAudio(input.audio);
   if (normalized.blob.size > MAX_NORMALIZED_AUDIO_BYTES) {
     throw new Error("录音超过 25 MiB 限制，请缩短录音后重试。");
+  }
+  if (
+    isDashScopeBaseUrl(input.asr.baseUrl) &&
+    FUN_ASR_REALTIME_MODELS.has(input.asr.model) &&
+    !FUN_ASR_HTTP_AUDIO_MIME_TYPES.has(normalized.mimeType)
+  ) {
+    throw new DailyApiError(
+      422,
+      "Fun-ASR-Realtime HTTP 接口仅支持 WAV、MP3 或 Opus 音频；当前录音无法转换为兼容格式，请改用支持 WAV/MP3/Opus 的录音设置后重试。",
+    );
   }
   const form = new FormData();
   form.set("audio", normalized.blob, `recording.${extension(normalized.mimeType)}`);

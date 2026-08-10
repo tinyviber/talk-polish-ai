@@ -175,8 +175,10 @@ export type TranscriptionMetadata = z.infer<typeof transcriptionMetadataSchema>;
 export const SUPPORTED_AUDIO_MIME_TYPES = [
   "audio/webm",
   "audio/ogg",
+  "audio/opus",
   "audio/wav",
   "audio/x-wav",
+  "audio/mp3",
   "audio/mpeg",
   "audio/mp4",
   "audio/m4a",

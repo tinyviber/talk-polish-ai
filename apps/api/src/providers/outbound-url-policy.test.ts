@@ -66,17 +66,19 @@ describe("Daily Story outbound URL policy", () => {
     ).toBe("https://api.example.com");
   });
 
-  test("allows only compatible-mode/v1 DashScope Beijing workspace hosts", () => {
+  test("allows only native DashScope API paths on Beijing workspace hosts", () => {
     for (const hostname of [
       "a.cn-beijing.maas.aliyuncs.com",
       "ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com",
     ]) {
-      expect(
-        assertDailyProviderUrlAllowed(`https://${hostname}/compatible-mode/v1`, {
-          production: true,
-          allowedOrigins: [],
-        }).origin,
-      ).toBe(`https://${hostname}`);
+      for (const path of ["/compatible-mode/v1", "/api/v1"]) {
+        expect(
+          assertDailyProviderUrlAllowed(`https://${hostname}${path}`, {
+            production: true,
+            allowedOrigins: [],
+          }).origin,
+        ).toBe(`https://${hostname}`);
+      }
     }
 
     for (const value of [
@@ -84,6 +86,7 @@ describe("Daily Story outbound URL policy", () => {
       "https://a.b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
       "https://a.cn-beijing.maas.aliyuncs.com.evil.com/compatible-mode/v1",
       "https://a.cn-beijing.maas.aliyuncs.com/v1",
+      "https://a.cn-beijing.maas.aliyuncs.com/api/v2",
     ]) {
       expect(() =>
         assertDailyProviderUrlAllowed(value, {

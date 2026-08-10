@@ -79,7 +79,7 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogItem[] = [
   {
     id: "dashscope-compatible",
     name: "阿里百炼",
-    description: "支持 Chat 与 Qwen3-ASR；TTS 暂未接入。",
+    description: "支持 Chat、Qwen3-ASR 与 Fun-ASR 录音转写；TTS 暂未接入。",
     capabilities: {
       chat: {
         supported: true,

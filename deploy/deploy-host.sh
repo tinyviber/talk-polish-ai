@@ -153,7 +153,7 @@ fi
 
 if [[ "$web_build_required" == 1 ]]; then
   log 'building web'
-  (cd "$staging" && "$BUN_BIN" run build:web)
+  (cd "$staging" && VITE_APP_MODE=api VITE_API_URL= "$BUN_BIN" run build:web)
 fi
 if [[ "$api_build_required" == 1 ]]; then
   log 'building api'
@@ -219,6 +219,11 @@ rollback() {
 }
 trap rollback EXIT
 
+# Unit files are installed separately by the host runbook. Reload the manager
+# on every release so an installed production unit change is effective before
+# either service is restarted, while keeping the optional EnvironmentFile
+# behavior intact for rollback compatibility.
+"$SYSTEMCTL_BIN" daemon-reload
 if [[ "$api_changed" == 1 ]]; then "$SYSTEMCTL_BIN" restart "$API_SERVICE"; fi
 if [[ "$web_changed" == 1 ]]; then "$SYSTEMCTL_BIN" restart "$WEB_SERVICE"; fi
 

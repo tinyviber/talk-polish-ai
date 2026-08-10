@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type { TextModel } from "../../capabilities/text-model";
+import type { TextModel, TextModelRequest } from "../../capabilities/text-model";
 import { env } from "../../env";
 import { ApiError } from "../../http/errors";
 import { ProviderRequestError } from "../../providers/http";
 import { DailyProviderConfigurationError } from "../../providers/outbound-url-policy";
 import { DailyProviderRequestError } from "../../providers/safe-https-client";
+import {
+  DAILY_STORY_OPENING_MAX_TOKENS,
+  conversationSystemPrompt,
+  openingUserPrompt,
+} from "./policy";
 import { createDailyStoryService } from "./service";
 
 const chatConfig = {
@@ -13,20 +18,21 @@ const chatConfig = {
   model: "fixture",
 };
 
-function fixtureModel(values: unknown[]): TextModel {
+function fixtureModel(values: unknown[], requests: TextModelRequest[] = []): TextModel {
   return {
     name: "fixture",
-    async generate() {
+    async generate(input) {
+      requests.push(input);
       const value = values.shift();
       return { content: JSON.stringify(value), provider: "fixture" };
     },
   };
 }
 
-function serviceFor(values: unknown[]) {
+function serviceFor(values: unknown[], requests: TextModelRequest[] = []) {
   return createDailyStoryService(env(), {
     providerFactory: () => ({
-      chat: fixtureModel(values),
+      chat: fixtureModel(values, requests),
       asr: {
         name: "fixture-asr",
         async transcribe() {
@@ -196,6 +202,55 @@ describe("Daily Story policy service", () => {
     });
     expect(reply.understanding).toBe("understood");
     expect(reply.reply).not.toContain("should say");
+  });
+
+  test("uses JSON mode and bounded budgets for start, reply, and review", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [
+        { reply: "That sounds like a long day. What happened next?" },
+        { understanding: "understood", reply: "That sounds tiring." },
+        { suggestions: [] },
+      ],
+      requests,
+    );
+    const opening = await service.start({
+      learnerId: "learner",
+      requestId: "start-request",
+      storyZh: "今天很忙。",
+      chat: chatConfig,
+    });
+    const reply = await service.reply({
+      learnerId: "learner",
+      requestId: "reply-request",
+      storyZh: "今天很忙。",
+      history: [opening.opening],
+      turn: { id: "u1", source: "typed", text: "I was busy." },
+      chat: chatConfig,
+    });
+    await service.review({
+      learnerId: "learner",
+      requestId: "review-request",
+      storyZh: "今天很忙。",
+      history: [
+        opening.opening,
+        { id: "u1", role: "user", source: "typed", text: "I was busy." },
+        { id: "a1", role: "assistant", text: reply.reply },
+      ],
+      chat: chatConfig,
+    });
+
+    expect(
+      requests.map(({ responseFormat, maxTokens }) => ({ responseFormat, maxTokens })),
+    ).toEqual([
+      { responseFormat: "json", maxTokens: DAILY_STORY_OPENING_MAX_TOKENS },
+      { responseFormat: "json", maxTokens: 512 },
+      { responseFormat: "json", maxTokens: 768 },
+    ]);
+    expect(requests[0]?.messages).toEqual([
+      { role: "system", content: conversationSystemPrompt },
+      { role: "user", content: openingUserPrompt("今天很忙。") },
+    ]);
   });
 
   test("keeps ASR text verbatim, including trailing whitespace", async () => {

@@ -27,6 +27,10 @@ const SESSION_STORE = "storySessions";
 const LEASE_STORE = "storyLeases";
 const CURRENT = "current";
 const LEASE_MS = 15_000;
+const STORY_EXPORT_FORMAT = "kotoba-daily-story" as const;
+const STORY_EXPORT_VERSION = 1 as const;
+const MAX_STORY_TRANSFER_BYTES = 10 * 1024 * 1024;
+const MAX_STORY_TRANSFER_SESSIONS = 200;
 
 const providerSchema = z
   .object({
@@ -105,8 +109,132 @@ const leaseSchema = z
   })
   .strict();
 
+const safeTransferId = (maximum: number) =>
+  z
+    .string()
+    .min(1)
+    .max(maximum)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+
+const storyExportMessageSchema = z
+  .object({
+    id: safeTransferId(128),
+    role: z.enum(["assistant", "user"]),
+    text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+    source: z.enum(["asr", "typed"]).optional(),
+  })
+  .strict();
+
+const storyExportReviewSchema = z
+  .object({
+    suggestions: z
+      .array(
+        z
+          .object({
+            sourceTurnId: safeTransferId(128),
+            original: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+            improved: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+            category: z.enum(["clarity", "grammar", "naturalness"]),
+            explanationZh: z.string().min(1).max(600),
+          })
+          .strict(),
+      )
+      .max(3),
+  })
+  .strict();
+
+const storyExportSessionSchema = z
+  .object({
+    id: safeTransferId(160).refine((value) => value !== CURRENT, {
+      message: "current is reserved and cannot be imported",
+    }),
+    updatedAt: z.string().datetime(),
+    phase: z.enum(["chatting", "transcriptReady", "review"]),
+    storyZh: z.string().min(1).max(4_000),
+    messages: z.array(storyExportMessageSchema).max(DAILY_STORY_LIMITS.historyMessages),
+    pendingAsrTranscript: z
+      .object({
+        id: safeTransferId(128),
+        text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+      })
+      .strict()
+      .optional(),
+    review: storyExportReviewSchema.optional(),
+  })
+  .strict()
+  .superRefine((session, ctx) => {
+    const messageIds = new Set<string>();
+    const userMessages = new Map<string, string>();
+    for (const [index, message] of session.messages.entries()) {
+      if (messageIds.has(message.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["messages", index, "id"],
+          message: "Message ids must be unique.",
+        });
+      }
+      messageIds.add(message.id);
+      if (message.role === "user") userMessages.set(message.id, message.text);
+    }
+    if (session.pendingAsrTranscript && messageIds.has(session.pendingAsrTranscript.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pendingAsrTranscript", "id"],
+        message: "Pending transcript id must not match a message id.",
+      });
+    }
+    const sourceIds = new Set<string>();
+    for (const [index, suggestion] of session.review?.suggestions.entries() ?? []) {
+      if (sourceIds.has(suggestion.sourceTurnId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["review", "suggestions", index, "sourceTurnId"],
+          message: "Review source ids must be unique.",
+        });
+      }
+      sourceIds.add(suggestion.sourceTurnId);
+      const original = userMessages.get(suggestion.sourceTurnId);
+      if (original === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["review", "suggestions", index, "sourceTurnId"],
+          message: "Review source must reference a user message.",
+        });
+      } else if (original !== suggestion.original) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["review", "suggestions", index, "original"],
+          message: "Review original must match the source user message.",
+        });
+      }
+    }
+  });
+
+const storyExportEnvelopeSchema = z
+  .object({
+    format: z.literal(STORY_EXPORT_FORMAT),
+    version: z.literal(STORY_EXPORT_VERSION),
+    sessions: z.array(storyExportSessionSchema).max(MAX_STORY_TRANSFER_SESSIONS),
+  })
+  .strict()
+  .superRefine((envelope, ctx) => {
+    const ids = new Set<string>();
+    for (const [index, session] of envelope.sessions.entries()) {
+      if (ids.has(session.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["sessions", index, "id"],
+          message: "Session ids must be unique.",
+        });
+      }
+      ids.add(session.id);
+    }
+  });
+
 type StoredSettings = z.infer<typeof settingsSchema>;
 type StoredSession = z.infer<typeof sessionSchema>;
+type StoryExportEnvelope = z.infer<typeof storyExportEnvelopeSchema>;
+type StoryExportSession = z.infer<typeof storyExportSessionSchema>;
 type DailyStorageEvent =
   | { kind: "settings"; revision: number }
   | { kind: "session"; conversationId: string; revision: number }
@@ -123,6 +251,13 @@ export class SessionConflictError extends Error {
   constructor() {
     super("此对话已在另一标签页更新。已载入最新内容。");
     this.name = "SessionConflictError";
+  }
+}
+
+export class StoryImportError extends Error {
+  constructor(message = "导入文件无效，未修改现有对话。") {
+    super(message);
+    this.name = "StoryImportError";
   }
 }
 
@@ -211,6 +346,60 @@ function transaction<T>(
 
 function setResult<T>(tx: IDBTransaction, value: T) {
   (tx as IDBTransaction & { __dailyResult?: (value: T) => void }).__dailyResult?.(value);
+}
+
+function sessionImportTransaction<T>(
+  run: (
+    tx: IDBTransaction,
+    setTransactionResult: (value: T) => void,
+    abort: (error: unknown) => void,
+  ) => void,
+) {
+  return database().then(
+    (db) =>
+      new Promise<T>((resolve, reject) => {
+        let result: T;
+        let failure: unknown;
+        let tx: IDBTransaction | undefined;
+        const abort = (error: unknown) => {
+          failure = error;
+          if (!tx) {
+            reject(error);
+            return;
+          }
+          try {
+            tx.abort();
+          } catch {
+            reject(error);
+          }
+        };
+        try {
+          const opened = db.transaction([SESSION_STORE, LEASE_STORE], "readwrite");
+          tx = opened;
+          opened.oncomplete = () => resolve(result!);
+          opened.onerror = opened.onabort = () =>
+            reject(failure ?? opened.error ?? new DailyStorageError());
+          run(
+            opened,
+            (value) => {
+              result = value;
+            },
+            abort,
+          );
+        } catch (error) {
+          failure = error;
+          if (!tx) {
+            reject(error);
+            return;
+          }
+          try {
+            tx.abort();
+          } catch {
+            reject(error);
+          }
+        }
+      }),
+  );
 }
 
 function notifySettings(revision: number) {
@@ -324,6 +513,43 @@ function sessionRecord(session: StorySession, conversationId: string): StoredSes
   return sessionSchema.parse({ id: conversationId, ...session });
 }
 
+function exportSessionRecord(value: unknown): StoryExportSession {
+  const parsed = sessionSchema.parse(value);
+  const projected = {
+    id: parsed.id,
+    updatedAt: parsed.updatedAt,
+    phase: parsed.phase,
+    storyZh: parsed.storyZh,
+    messages: parsed.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      ...(message.source ? { source: message.source } : {}),
+    })),
+    ...(parsed.pendingAsrTranscript ? { pendingAsrTranscript: parsed.pendingAsrTranscript } : {}),
+    ...(parsed.review ? { review: parsed.review } : {}),
+  };
+  return storyExportSessionSchema.parse(projected);
+}
+
+function importedSessionRecord(session: StoryExportSession): StoredSession {
+  return sessionSchema.parse({
+    id: session.id,
+    schemaVersion: 1,
+    revision: 1,
+    updatedAt: session.updatedAt,
+    phase: session.phase,
+    storyZh: session.storyZh,
+    messages: session.messages,
+    ...(session.pendingAsrTranscript ? { pendingAsrTranscript: session.pendingAsrTranscript } : {}),
+    ...(session.review ? { review: session.review } : {}),
+  });
+}
+
+function transferBytes(value: string) {
+  return new TextEncoder().encode(value).byteLength;
+}
+
 function normalizeProviderForStorage<T extends ChatProvider>(provider: T): T {
   try {
     const baseUrl = normalizeProviderBaseUrl(provider.baseUrl);
@@ -359,6 +585,143 @@ function validateProviderForStorage(
 export async function ensureDailyStorage() {
   await database();
   await migrateLegacySession();
+}
+
+export async function exportStorySessions(): Promise<string> {
+  await ensureDailyStorage();
+  const records = await transaction<unknown[]>(SESSION_STORE, "readonly", (tx) => {
+    const request = tx.objectStore(SESSION_STORE).getAll();
+    request.onsuccess = () => {
+      setResult(tx, request.result as unknown[]);
+    };
+  });
+
+  if (records.length > MAX_STORY_TRANSFER_SESSIONS) {
+    throw new StoryImportError("对话数量超过导出上限。");
+  }
+
+  let envelope: StoryExportEnvelope;
+  try {
+    envelope = storyExportEnvelopeSchema.parse({
+      format: STORY_EXPORT_FORMAT,
+      version: STORY_EXPORT_VERSION,
+      sessions: records.map(exportSessionRecord),
+    });
+  } catch {
+    throw new StoryImportError(
+      "本机存在无法导出的旧对话，未生成文件。请先打开并保存相关对话后重试。",
+    );
+  }
+  const json = JSON.stringify(envelope);
+  if (transferBytes(json) > MAX_STORY_TRANSFER_BYTES) {
+    throw new StoryImportError("对话数据超过 10 MiB 导出上限。");
+  }
+  return json;
+}
+
+export async function importStorySessions(jsonText: string): Promise<{
+  imported: number;
+  migratedLegacy: boolean;
+}> {
+  if (typeof jsonText !== "string" || transferBytes(jsonText) > MAX_STORY_TRANSFER_BYTES) {
+    throw new StoryImportError("导入文件超过 10 MiB 上限，未修改现有对话。");
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(jsonText);
+  } catch {
+    throw new StoryImportError("导入文件不是有效 JSON，未修改现有对话。");
+  }
+  const parsed = storyExportEnvelopeSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new StoryImportError("导入文件格式或内容无效，未修改现有对话。");
+  }
+  if (parsed.data.sessions.length === 0) return { imported: 0, migratedLegacy: false };
+
+  const imported = parsed.data.sessions.map(importedSessionRecord);
+  const result = await sessionImportTransaction<{
+    importedIds: string[];
+    migratedId?: string;
+    migratedRevision?: number;
+  }>((tx, setTransactionResult, abort) => {
+    const sessionStore = tx.objectStore(SESSION_STORE);
+    const leaseStore = tx.objectStore(LEASE_STORE);
+    const sessionsRequest = sessionStore.getAll();
+    const leaseRequest = leaseStore.get(CURRENT);
+    let sessionsLoaded = false;
+    let leaseLoaded = false;
+
+    const validateAndWrite = () => {
+      if (!sessionsLoaded || !leaseLoaded) return;
+      try {
+        const records = sessionsRequest.result as unknown[];
+        const existingIds = new Set<string>();
+        let legacyRaw: unknown;
+        for (const record of records) {
+          if (!record || typeof record !== "object") continue;
+          const id = (record as { id?: unknown }).id;
+          if (typeof id !== "string") continue;
+          existingIds.add(id);
+          if (id === CURRENT) legacyRaw = record;
+        }
+
+        let migratedRecord: StoredSession | undefined;
+        let migratedId: string | undefined;
+        if (legacyRaw !== undefined) {
+          const legacy = sessionSchema.parse(legacyRaw);
+          do {
+            migratedId = createConversationId();
+          } while (existingIds.has(migratedId));
+          existingIds.add(migratedId);
+          migratedRecord = { ...legacy, id: migratedId };
+          if (leaseRequest.result !== undefined) leaseSchema.parse(leaseRequest.result);
+        }
+
+        for (const record of imported) {
+          if (existingIds.has(record.id)) {
+            throw new StoryImportError(`对话 ID 已存在：${record.id}`);
+          }
+          existingIds.add(record.id);
+        }
+
+        if (migratedRecord && migratedId) {
+          sessionStore.add(migratedRecord);
+          sessionStore.delete(CURRENT);
+          const legacyLease =
+            leaseRequest.result === undefined ? undefined : leaseSchema.parse(leaseRequest.result);
+          if (legacyLease) {
+            leaseStore.add({ ...legacyLease, id: migratedId });
+            leaseStore.delete(CURRENT);
+          }
+        }
+        for (const record of imported) sessionStore.add(record);
+        setTransactionResult({
+          importedIds: imported.map((record) => record.id),
+          ...(migratedRecord && migratedId
+            ? { migratedId, migratedRevision: migratedRecord.revision }
+            : {}),
+        });
+      } catch (error) {
+        abort(error);
+      }
+    };
+
+    sessionsRequest.onsuccess = () => {
+      sessionsLoaded = true;
+      validateAndWrite();
+    };
+    leaseRequest.onsuccess = () => {
+      leaseLoaded = true;
+      validateAndWrite();
+    };
+  });
+
+  if (result.migratedId && result.migratedRevision !== undefined) {
+    notifySession(result.migratedId, result.migratedRevision);
+  }
+  for (const id of result.importedIds) notifySession(id, 1);
+  return { imported: result.importedIds.length, migratedLegacy: !!result.migratedId };
 }
 
 export async function readProviderSettings(): Promise<ProviderSettings> {

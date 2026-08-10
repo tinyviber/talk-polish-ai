@@ -26,6 +26,7 @@ import {
 import {
   conversationResultSchema,
   conversationSystemPrompt,
+  DAILY_STORY_OPENING_MAX_TOKENS,
   openingResultSchema,
   openingUserPrompt,
   replyUserPrompt,
@@ -45,6 +46,9 @@ type ProviderFactory = (
 ) => Partial<DailyStoryRequestProviders>;
 
 type Guard = typeof withDailyStoryRequestGuard;
+
+const DAILY_STORY_REPLY_MAX_TOKENS = 512;
+const DAILY_STORY_REVIEW_MAX_TOKENS = 768;
 
 export function createDailyStoryService(
   config: Env,
@@ -88,7 +92,7 @@ export function createDailyStoryService(
               { role: "user", content: openingUserPrompt(input.storyZh) },
             ],
             requestId: input.requestId,
-            maxTokens: 220,
+            maxTokens: DAILY_STORY_OPENING_MAX_TOKENS,
           }),
         );
         return {
@@ -149,7 +153,7 @@ export function createDailyStoryService(
               },
             ],
             requestId: input.requestId,
-            maxTokens: 260,
+            maxTokens: DAILY_STORY_REPLY_MAX_TOKENS,
           }),
         );
         return generated.value;
@@ -189,7 +193,7 @@ export function createDailyStoryService(
               },
             ],
             requestId: input.requestId,
-            maxTokens: 520,
+            maxTokens: DAILY_STORY_REVIEW_MAX_TOKENS,
           }),
         );
         const seenSourceIds = new Set<string>();

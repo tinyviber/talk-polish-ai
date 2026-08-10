@@ -25,7 +25,12 @@ cat >"$tmp/bin/bun" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ "$1" == install ]]; then mkdir -p node_modules; exit 0; fi
-if [[ "$1" == run && "$2" == build:web ]]; then mkdir -p apps/web/.output/public apps/web/.output/server; : >apps/web/.output/server/index.mjs; exit 0; fi
+if [[ "$1" == run && "$2" == build:web ]]; then
+  [[ "${VITE_APP_MODE:-}" == api && "${VITE_API_URL+x}" == x && -z "$VITE_API_URL" ]] || exit 91
+  mkdir -p apps/web/.output/public apps/web/.output/server
+  : >apps/web/.output/server/index.mjs
+  exit 0
+fi
 if [[ "$1" == run && "$2" == build:api ]]; then mkdir -p apps/api/dist; : >apps/api/dist/index.js; exit 0; fi
 EOF
 cat >"$tmp/bin/systemctl" <<'EOF'
@@ -52,6 +57,7 @@ envs=(DEPLOY_ROOT="$tmp/host" REPO_DIR="$tmp/host/repo" RELEASES_DIR="$tmp/host/
 env "${envs[@]}" bash "$script" "$sha1"
 test "$(cat "$tmp/host/deploy/current-sha")" = "$sha1"
 test -e "$tmp/host/releases/$sha1"
+rg -Fxq 'daemon-reload' "$tmp/systemctl.log"
 env "${envs[@]}" bash "$script" "$sha2"
 test "$(cat "$tmp/host/deploy/current-sha")" = "$sha2"
 test "$(cat "$tmp/host/deploy/previous-sha")" = "$sha1"

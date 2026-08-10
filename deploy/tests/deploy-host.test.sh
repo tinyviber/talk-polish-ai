@@ -24,7 +24,16 @@ mkdir -p "$tmp/bin"
 cat >"$tmp/bin/bun" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-if [[ "$1" == install ]]; then mkdir -p node_modules; exit 0; fi
+if [[ "$1" == -e ]]; then
+  package_json="$(cat)"
+  [[ "$package_json" == *'"scripts"'* ]] && printf '{}\n' || printf '%s' "$package_json"
+  exit 0
+fi
+if [[ "$1" == install ]]; then
+  printf 'install\n' >>"$INSTALL_LOG"
+  mkdir -p node_modules
+  exit 0
+fi
 if [[ "$1" == run && "$2" == build:web ]]; then
   [[ "${VITE_APP_MODE:-}" == api && "${VITE_API_URL+x}" == x && -z "$VITE_API_URL" ]] || exit 91
   mkdir -p apps/web/.output/public apps/web/.output/server
@@ -52,7 +61,7 @@ envs=(DEPLOY_ROOT="$tmp/host" REPO_DIR="$tmp/host/repo" RELEASES_DIR="$tmp/host/
   CURRENT_MARKER="$tmp/host/deploy/current-sha" PREVIOUS_MARKER="$tmp/host/deploy/previous-sha"
   LOCK_FILE="$tmp/host/deploy.lock" GITEE_REMOTE="$tmp/gitee.git" BUN_BIN="$tmp/bin/bun"
   SYSTEMCTL_BIN="$tmp/bin/systemctl" CURL_BIN="$tmp/bin/curl" FLOCK_BIN="$tmp/bin/flock" DEPLOY_TEST_MODE=1 HEALTH_RETRIES=1
-  SYSTEMCTL_LOG="$tmp/systemctl.log")
+  SYSTEMCTL_LOG="$tmp/systemctl.log" INSTALL_LOG="$tmp/install.log")
 
 env "${envs[@]}" bash "$script" "$sha1"
 test "$(cat "$tmp/host/deploy/current-sha")" = "$sha1"
@@ -63,25 +72,33 @@ test "$(cat "$tmp/host/deploy/current-sha")" = "$sha2"
 test "$(cat "$tmp/host/deploy/previous-sha")" = "$sha1"
 test -e "$tmp/host/releases/$sha1"
 
-printf 'three\n' >"$tmp/source/apps/web/changed.txt"
-git -C "$tmp/source" add . && git -C "$tmp/source" commit -m three >/dev/null
+printf '{"scripts":{"build":"changed"}}\n' >"$tmp/source/package.json"
+git -C "$tmp/source" add package.json && git -C "$tmp/source" commit -m scripts-only >/dev/null
 sha3="$(git -C "$tmp/source" rev-parse HEAD)"
+git -C "$tmp/source" push origin HEAD:main >/dev/null
+env "${envs[@]}" bash "$script" "$sha3"
+test "$(cat "$tmp/host/deploy/current-sha")" = "$sha3"
+test "$(wc -l <"$tmp/install.log" | tr -d ' ')" = 2
+
+printf 'three\n' >"$tmp/source/apps/web/changed.txt"
+git -C "$tmp/source" add . && git -C "$tmp/source" commit -m four >/dev/null
+sha4="$(git -C "$tmp/source" rev-parse HEAD)"
 git -C "$tmp/source" push origin HEAD:main >/dev/null
 cat >"$tmp/bin/fail-curl" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
 chmod +x "$tmp/bin/fail-curl"
-if env "${envs[@]}" CURL_BIN="$tmp/bin/fail-curl" bash "$script" "$sha3" 2>/dev/null; then
+if env "${envs[@]}" CURL_BIN="$tmp/bin/fail-curl" bash "$script" "$sha4" 2>/dev/null; then
   echo 'failed health gate accepted' >&2
   exit 1
 fi
-test "$(cat "$tmp/host/deploy/current-sha")" = "$sha2"
+test "$(cat "$tmp/host/deploy/current-sha")" = "$sha3"
 test -L "$tmp/host/current"
-test -e "$tmp/host/releases/$sha2"
-test ! -e "$tmp/host/releases/$sha3"
+test -e "$tmp/host/releases/$sha3"
+test ! -e "$tmp/host/releases/$sha4"
 
-if env "${envs[@]}" bash "$script" "${sha2%?}x" 2>/dev/null; then
+if env "${envs[@]}" bash "$script" "${sha3%?}x" 2>/dev/null; then
   echo 'invalid SHA accepted' >&2
   exit 1
 fi

@@ -1,7 +1,22 @@
-import { describe, expect, test } from "vitest";
-import { chooseNormalizedAudio, encodePcmWav } from "./audio-format";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import {
+  chooseNormalizedAudio,
+  encodePcmWav,
+  isNormalizableAudioMimeType,
+  normalizeRecordedAudio,
+} from "./audio-format";
 
 describe("audio format", () => {
+  test("recognizes recorded formats that can be normalized", () => {
+    expect(isNormalizableAudioMimeType("audio/mp4")).toBe(true);
+    expect(isNormalizableAudioMimeType("audio/m4a")).toBe(true);
+    expect(isNormalizableAudioMimeType("audio/webm")).toBe(true);
+    expect(isNormalizableAudioMimeType("audio/ogg")).toBe(true);
+    expect(isNormalizableAudioMimeType("audio/wav")).toBe(false);
+    expect(isNormalizableAudioMimeType("audio/mpeg")).toBe(false);
+    expect(isNormalizableAudioMimeType("video/mp4")).toBe(false);
+  });
+
   test("encodes browser PCM samples as a WAV file", async () => {
     const wav = encodePcmWav({
       length: 2,
@@ -30,5 +45,59 @@ describe("audio format", () => {
     const normalized = chooseNormalizedAudio(original, original.type, decoded, 44);
     expect(normalized.blob).toBe(original);
     expect(normalized.mimeType).toBe("audio/webm");
+  });
+
+  test("decodes a recording to WAV and closes the AudioContext", async () => {
+    const close = vi.fn(async () => undefined);
+    const decoded = {
+      length: 2,
+      numberOfChannels: 1,
+      sampleRate: 48_000,
+      getChannelData: () => new Float32Array([-1, 1]),
+    } as unknown as AudioBuffer;
+    class FakeAudioContext {
+      decodeAudioData = vi.fn(async () => decoded);
+      close = close;
+    }
+    vi.stubGlobal("window", { AudioContext: FakeAudioContext });
+
+    const original = new Blob(["compressed"], { type: "audio/mp4; codecs=mp4a.40.2" });
+    const normalized = await normalizeRecordedAudio(original);
+
+    expect(normalized.blob.type).toBe("audio/wav");
+    expect(normalized.mimeType).toBe("audio/wav");
+    expect(normalized.blob).not.toBe(original);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  test("keeps the original recording and closes the AudioContext when decoding fails", async () => {
+    const close = vi.fn(async () => undefined);
+    class FakeAudioContext {
+      decodeAudioData = vi.fn(async () => {
+        throw new Error("unsupported audio");
+      });
+      close = close;
+    }
+    vi.stubGlobal("window", { AudioContext: FakeAudioContext });
+
+    const original = new Blob(["compressed"], { type: "audio/m4a" });
+    const normalized = await normalizeRecordedAudio(original);
+
+    expect(normalized.blob).toBe(original);
+    expect(normalized.mimeType).toBe("audio/m4a");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  test("keeps the original recording when AudioContext is unavailable", async () => {
+    vi.stubGlobal("window", {});
+    const original = new Blob(["compressed"], { type: "audio/mp4" });
+    const normalized = await normalizeRecordedAudio(original);
+
+    expect(normalized.blob).toBe(original);
+    expect(normalized.mimeType).toBe("audio/mp4");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 });

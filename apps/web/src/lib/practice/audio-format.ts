@@ -7,6 +7,19 @@ type AudioContextConstructor = new () => AudioContext;
 
 export const MAX_NORMALIZED_AUDIO_BYTES = 25 * 1024 * 1024;
 
+const NORMALIZABLE_AUDIO_MIME_TYPES = new Set([
+  "audio/webm",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/m4a",
+]);
+
+/** Return whether browser-recorded audio should be decoded and normalized to WAV. */
+export function isNormalizableAudioMimeType(mimeType: string) {
+  const normalizedMimeType = mimeType.split(";", 1)[0]?.trim().toLowerCase();
+  return NORMALIZABLE_AUDIO_MIME_TYPES.has(normalizedMimeType ?? "");
+}
+
 function audioContextConstructor(): AudioContextConstructor | undefined {
   if (typeof window === "undefined") return undefined;
   return (
@@ -69,16 +82,17 @@ export function chooseNormalizedAudio(
 }
 
 /**
- * WebM is a valid browser recording format, but some OpenAI-compatible ASR
- * gateways cannot parse its duration. Normalize it to WAV before upload while
- * retaining the original Blob if this browser cannot decode it.
+ * WebM, Ogg, MP4, and M4A are valid browser recording formats, but some
+ * OpenAI-compatible ASR gateways cannot parse their duration. Normalize them
+ * to WAV before upload while retaining the original Blob if this browser
+ * cannot decode them.
  */
 export async function normalizeRecordedAudio(
   blob: Blob,
   maxBytes = MAX_NORMALIZED_AUDIO_BYTES,
 ): Promise<{ blob: Blob; mimeType: string }> {
   const mimeType = blob.type.split(";", 1)[0]?.trim().toLowerCase() || "audio/webm";
-  if (mimeType !== "audio/webm" && mimeType !== "audio/ogg") {
+  if (!isNormalizableAudioMimeType(mimeType)) {
     return { blob, mimeType };
   }
   const AudioContextCtor = audioContextConstructor();

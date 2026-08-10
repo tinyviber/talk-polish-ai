@@ -88,20 +88,39 @@ export function normalizeProviderBaseUrl(value: string): string {
 export function isDashScopeCompatibleBaseUrl(value: string) {
   try {
     const url = new URL(normalizeProviderBaseUrl(value));
-    const hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
-    const isDashScopeHost =
-      hostname === "dashscope.aliyuncs.com" ||
-      hostname === "dashscope-intl.aliyuncs.com" ||
-      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/.test(hostname);
     return (
       url.protocol === "https:" &&
       url.port === "" &&
-      isDashScopeHost &&
+      isDashScopeHostname(url.hostname) &&
       url.pathname === "/compatible-mode/v1"
     );
   } catch {
     return false;
   }
+}
+
+/** DashScope base URLs used by both compatible-mode and native HTTP APIs. */
+export function isDashScopeBaseUrl(value: string) {
+  try {
+    const url = new URL(normalizeProviderBaseUrl(value));
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      isDashScopeHostname(url.hostname) &&
+      (url.pathname === "/compatible-mode/v1" || url.pathname === "/api/v1")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isDashScopeHostname(value: string) {
+  const hostname = value.toLowerCase().replace(/\.+$/, "");
+  return (
+    hostname === "dashscope.aliyuncs.com" ||
+    hostname === "dashscope-intl.aliyuncs.com" ||
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/.test(hostname)
+  );
 }
 
 function canonicalEndpointIdentity(value: string) {

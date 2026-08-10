@@ -4,6 +4,7 @@ import {
   DEEPSEEK_DEFAULT_BASE_URL,
   OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
   PROVIDER_PRESETS,
+  isDashScopeBaseUrl,
   identifyProviderPreset,
   normalizeProviderBaseUrl,
   providerPresetIdSchema,
@@ -36,6 +37,16 @@ describe("provider preset catalog", () => {
     expect(normalizeProviderBaseUrl(endpoint)).toBe(endpoint);
     expect(normalizeProviderBaseUrl(endpoint + "/")).toBe(endpoint);
     expect(normalizeProviderBaseUrl(endpoint.replace(/\/v1$/, ""))).toBe(endpoint);
+  });
+
+  test("recognizes the native DashScope API base path", () => {
+    expect(
+      isDashScopeBaseUrl("https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/api/v1"),
+    ).toBe(true);
+    expect(isDashScopeBaseUrl("https://dashscope.aliyuncs.com/compatible-mode/v1")).toBe(true);
+    expect(isDashScopeBaseUrl("https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/v1")).toBe(
+      false,
+    );
   });
 
   test("recognizes canonical provider endpoints and leaves other paths custom", () => {

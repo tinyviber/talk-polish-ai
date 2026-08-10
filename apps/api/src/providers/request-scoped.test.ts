@@ -28,6 +28,17 @@ describe("request-scoped provider catalog", () => {
     expect(providers.asr?.name).toBe("dashscope-compatible-asr");
   });
 
+  test("selects the native DashScope Fun-ASR adapter by model", () => {
+    const providers = createDailyStoryRequestProviders(env(), {
+      asr: {
+        baseUrl: "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        apiKey: "secret-key",
+        model: "fun-asr-realtime",
+      },
+    });
+    expect(providers.asr?.name).toBe("dashscope-fun-asr");
+  });
+
   test("does not let the DashScope preset override an unrelated endpoint", () => {
     const providers = createDailyStoryRequestProviders(env(), {
       asr: {

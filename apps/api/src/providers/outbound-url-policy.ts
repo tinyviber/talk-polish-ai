@@ -112,7 +112,8 @@ export function assertDailyProviderUrlAllowed(value: string, policy: DailyProvid
     }),
   );
   const isAllowedDashScopeWorkspace =
-    target.basePath === "/compatible-mode/v1/" && DASHSCOPE_WORKSPACE_HOST.test(target.hostname);
+    (target.basePath === "/compatible-mode/v1/" || target.basePath === "/api/v1/") &&
+    DASHSCOPE_WORKSPACE_HOST.test(target.hostname);
   if (!allowedOrigins.has(target.origin) && !isAllowedDashScopeWorkspace) {
     throw new DailyProviderConfigurationError();
   }

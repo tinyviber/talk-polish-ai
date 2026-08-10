@@ -74,7 +74,7 @@ DeepSeek:          https://api.deepseek.com/v1
 阿里百炼:          https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
-For Alibaba Cloud Model Studio (DashScope) ASR, use its OpenAI-compatible
+For Alibaba Cloud Model Studio (DashScope) Qwen ASR, use its OpenAI-compatible
 endpoint and a Qwen3-ASR-Flash model:
 
 ```text
@@ -86,11 +86,22 @@ For a Beijing workspace-dedicated endpoint, replace the shared hostname with
 `https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`.
 Production accepts only this exact DashScope workspace hostname shape.
 
-This adapter sends audio as a Base64 Data URL in `chat/completions`, matching
+Qwen3-ASR audio is sent as a Base64 Data URL in `chat/completions`, matching
 DashScope's OpenAI-compatible ASR API. It is distinct from the multipart
 `audio/transcriptions` adapter used by ordinary OpenAI-compatible providers.
-DashScope's compatible mode currently supports Qwen3-ASR-Flash models and does
-not use Paraformer through this endpoint.
+
+`fun-asr-realtime` is also supported when entered with a DashScope endpoint.
+Although the model name says realtime, Daily Story uses its recorded-audio HTTP
+API because browser audio is submitted after recording. The adapter translates
+the configured DashScope host to:
+
+```text
+https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+```
+
+and sends the native `input.messages[].content[].audio` Base64 Data URI body.
+The separate WebSocket streaming protocol is not used by this recorded-audio
+workflow.
 
 ## Production build and proxy
 

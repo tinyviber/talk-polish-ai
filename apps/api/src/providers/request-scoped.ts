@@ -14,6 +14,10 @@ import {
   createDashScopeCompatibleSpeechToText,
   isDashScopeCompatibleAsrUrl,
 } from "./dashscope-compatible-speech-to-text";
+import {
+  createDashScopeFunAsrSpeechToText,
+  isDashScopeFunAsrProvider,
+} from "./dashscope-fun-asr-speech-to-text";
 import { createOpenAICompatibleTextModel } from "./openai-text-model";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -153,6 +157,9 @@ export function createDailyStorySpeechToText(
   provider: DailyStoryAsrConfig,
 ): SpeechToText {
   const normalizedProvider = normalizeDailyStoryProvider(provider);
+  if (isDashScopeFunAsrProvider(normalizedProvider)) {
+    return createDashScopeFunAsrSpeechToText(config, normalizedProvider);
+  }
   if (isDashScopeCompatibleAsrUrl(normalizedProvider.baseUrl)) {
     return createDashScopeCompatibleSpeechToText(config, normalizedProvider);
   }

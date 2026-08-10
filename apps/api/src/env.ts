@@ -57,7 +57,7 @@ const envSchema = z.object({
   DAILY_PROVIDER_ALLOWED_ORIGINS: z
     .string()
     .default(
-      "https://api.openai.com,https://api.deepseek.com,https://api.siliconflow.cn,https://dashscope.aliyuncs.com",
+      "https://api.openai.com,https://api.deepseek.com,https://api.siliconflow.cn,https://dashscope.aliyuncs.com,https://dashscope-intl.aliyuncs.com",
     ),
   /** Local opt-in for networks that map public DNS through 198.18.0.0/15. */
   DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS: envBoolean(false),

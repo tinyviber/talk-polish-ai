@@ -1,6 +1,8 @@
 import { request as httpsRequest } from "node:https";
 import {
   assertDailyProviderUrlAllowed,
+  DailyProviderConfigurationError,
+  DailyProviderDnsError,
   joinDailyProviderPath,
   resolveDailyProviderPublicAddresses,
   type DailyProviderTarget,
@@ -57,12 +59,19 @@ export function createDailySafeHttpsClient(
 
   return {
     async request(input: RequestInput): Promise<SafeResponse> {
+      const deadline = Date.now() + options.timeoutMs;
       let lastError: DailyProviderRequestError | undefined;
       for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
-        const attemptDeadline = Date.now() + options.timeoutMs;
         try {
+          if (remainingDeadlineMs(deadline) <= 0) {
+            throw new DailyProviderRequestError("timeout");
+          }
           if (options.allowSyntheticDns && !options.production) {
-            return await requestWithSystemFetch(target, input, options);
+            const response = await requestWithSystemFetch(target, input, options, deadline);
+            if (remainingDeadlineMs(deadline) <= 0) {
+              throw new DailyProviderRequestError("timeout");
+            }
+            return response;
           }
           // This call intentionally remains inside retry loop: DNS is not cached.
           const addresses = await withTimeout(
@@ -71,17 +80,13 @@ export function createDailySafeHttpsClient(
               undefined,
               options.allowSyntheticDns && !options.production,
             ),
-            remainingAttemptMs(attemptDeadline),
+            remainingDeadlineMs(deadline),
           );
           const selected = addresses[0]!;
-          const response = await requestPinned(
-            target,
-            selected,
-            input,
-            options,
-            request,
-            attemptDeadline,
-          );
+          const response = await requestPinned(target, selected, input, options, request, deadline);
+          if (remainingDeadlineMs(deadline) <= 0) {
+            throw new DailyProviderRequestError("timeout");
+          }
           if (response.status >= 300 && response.status < 400) {
             throw new DailyProviderRequestError("redirect", response.status);
           }
@@ -90,10 +95,16 @@ export function createDailySafeHttpsClient(
           }
           return response;
         } catch (error) {
+          if (
+            error instanceof DailyProviderDnsError ||
+            error instanceof DailyProviderConfigurationError
+          ) {
+            throw error;
+          }
           const normalized = normalizeError(error);
           lastError = normalized;
           if (attempt >= options.maxAttempts || !retryable(normalized)) throw normalized;
-          await backoff(attempt);
+          await backoff(attempt, deadline);
         }
       }
       throw lastError ?? new DailyProviderRequestError("network");
@@ -105,6 +116,7 @@ async function requestWithSystemFetch(
   target: DailyProviderTarget,
   input: RequestInput,
   options: DailySafeHttpsClientOptions,
+  deadline: number,
 ): Promise<SafeResponse> {
   const url = joinDailyProviderPath(target, input.path);
   const body = input.body ? new Uint8Array(input.body) : undefined;
@@ -122,7 +134,11 @@ async function requestWithSystemFetch(
     ...input.headers,
   });
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  const remaining = remainingDeadlineMs(deadline);
+  if (remaining <= 0) {
+    throw new DailyProviderRequestError("timeout");
+  }
+  const timer = setTimeout(() => controller.abort(), remaining);
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -197,7 +213,7 @@ function requestPinned(
   input: RequestInput,
   options: DailySafeHttpsClientOptions,
   requestFn: typeof httpsRequest,
-  attemptDeadline: number,
+  deadline: number,
 ): Promise<SafeResponse> {
   const url = joinDailyProviderPath(target, input.path);
   const body = input.body ? Buffer.from(input.body) : undefined;
@@ -224,7 +240,7 @@ function requestPinned(
       cleanup();
       resolve(response);
     };
-    const remaining = remainingAttemptMs(attemptDeadline);
+    const remaining = remainingDeadlineMs(deadline);
     if (remaining <= 0) {
       fail(new DailyProviderRequestError("timeout"));
       return;
@@ -329,7 +345,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
   });
 }
 
-function remainingAttemptMs(deadline: number) {
+function remainingDeadlineMs(deadline: number) {
   return Math.max(0, deadline - Date.now());
 }
 
@@ -342,6 +358,14 @@ function retryable(error: DailyProviderRequestError) {
   );
 }
 
-async function backoff(attempt: number) {
-  await new Promise((resolve) => setTimeout(resolve, Math.min(200 * 2 ** (attempt - 1), 800)));
+async function backoff(attempt: number, deadline: number) {
+  const delay = Math.min(200 * 2 ** (attempt - 1), 800);
+  const remaining = remainingDeadlineMs(deadline);
+  if (remaining <= 0) {
+    throw new DailyProviderRequestError("timeout");
+  }
+  await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
+  if (remainingDeadlineMs(deadline) <= 0 || delay >= remaining) {
+    throw new DailyProviderRequestError("timeout");
+  }
 }

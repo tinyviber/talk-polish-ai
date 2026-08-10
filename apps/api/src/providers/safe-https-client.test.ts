@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
 import type * as Https from "node:https";
+import { DailyProviderConfigurationError, DailyProviderDnsError } from "./outbound-url-policy";
 import { createDailySafeHttpsClient, DailyProviderRequestError } from "./safe-https-client";
 
 class HangingRequest extends EventEmitter {
@@ -63,6 +64,22 @@ class RespondingRequest extends EventEmitter {
       this.response.emit("data", Buffer.from("1234"));
       this.response.emit("data", Buffer.from("56"));
     });
+    return this;
+  }
+}
+
+class FailingRequest extends EventEmitter {
+  setTimeout(_milliseconds: number, _callback: () => void) {
+    return this;
+  }
+
+  destroy(error?: Error) {
+    if (error) queueMicrotask(() => this.emit("error", error));
+    return this;
+  }
+
+  end() {
+    queueMicrotask(() => this.emit("error", new Error("connection reset")));
     return this;
   }
 }
@@ -156,6 +173,119 @@ describe("Daily safe pinned HTTPS client", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.timeoutMilliseconds).toBeLessThan(timeoutMs - 50);
     expect(elapsedMs).toBeLessThan(timeoutMs + 50);
+  });
+
+  test("uses one end-to-end deadline across pinned retries and backoff", async () => {
+    const pinnedRequests: FailingRequest[] = [];
+    const timeoutMs = 260;
+    const startedAt = Date.now();
+    const client = createDailySafeHttpsClient(
+      {
+        baseUrl: "https://provider.example.com/v1",
+        apiKey: "fixture-key",
+        timeoutMs,
+        maxAttempts: 3,
+        production: true,
+        allowedOrigins: ["https://provider.example.com"],
+      },
+      {
+        request: ((_options: unknown, _callback: unknown) => {
+          const request = new FailingRequest();
+          pinnedRequests.push(request);
+          return request;
+        }) as unknown as typeof Https.request,
+        resolveAddresses: async () => [{ address: "8.8.8.8", family: 4 }],
+      },
+    );
+
+    const outcome = await client
+      .request({ path: "/chat/completions" })
+      .catch((error: unknown) => error);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(outcome).toMatchObject({ code: "timeout" });
+    expect(pinnedRequests).toHaveLength(2);
+    expect(elapsedMs).toBeLessThan(timeoutMs + 120);
+  });
+
+  test("passes only the remaining request budget to a retried synthetic fetch", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchSignals: AbortSignal[] = [];
+    const timeoutMs = 260;
+    const startedAt = Date.now();
+    let calls = 0;
+    globalThis.fetch = (async (_input, init) => {
+      calls += 1;
+      const signal = init?.signal;
+      if (signal) fetchSignals.push(signal);
+      if (calls === 1) throw new Error("connection reset");
+      return await new Promise<Response>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+          once: true,
+        });
+      });
+    }) as typeof fetch;
+
+    try {
+      const client = createDailySafeHttpsClient({
+        baseUrl: "https://provider.example.com/v1",
+        apiKey: "fixture-key",
+        timeoutMs,
+        maxAttempts: 2,
+        production: false,
+        allowSyntheticDns: true,
+        allowedOrigins: [],
+      });
+
+      const outcome = await client
+        .request({ path: "/chat/completions" })
+        .catch((error: unknown) => error);
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(outcome).toMatchObject({ code: "timeout" });
+      expect(calls).toBe(2);
+      expect(fetchSignals[1]?.aborted).toBe(true);
+      expect(elapsedMs).toBeLessThan(timeoutMs + 120);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("preserves provider DNS and configuration errors without retrying", async () => {
+    for (const boundaryError of [
+      new DailyProviderDnsError(),
+      new DailyProviderConfigurationError(),
+    ]) {
+      let resolveCalls = 0;
+      const client = createDailySafeHttpsClient(
+        {
+          baseUrl: "https://provider.example.com/v1",
+          apiKey: "fixture-key",
+          timeoutMs: 100,
+          maxAttempts: 3,
+          production: true,
+          allowedOrigins: ["https://provider.example.com"],
+        },
+        {
+          resolveAddresses: async () => {
+            resolveCalls += 1;
+            throw boundaryError;
+          },
+        },
+      );
+
+      const outcome = await client
+        .request({ path: "/chat/completions" })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBe(boundaryError);
+      expect(outcome).toBeInstanceOf(boundaryError.constructor);
+      expect(resolveCalls).toBe(1);
+    }
   });
 
   test("redacts the configured API key from synthetic HTTP diagnostics", async () => {

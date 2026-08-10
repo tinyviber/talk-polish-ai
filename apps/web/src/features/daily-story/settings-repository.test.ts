@@ -82,14 +82,32 @@ describe("Daily Story IndexedDB", () => {
   });
 
   test("normalizes legacy endpoint and infers provider preset on save", async () => {
-    const saved = await saveProvider("asr", {
+    const saved = await saveProvider("chat", {
       baseUrl: "https://api.deepseek.com/",
       apiKey: "deepseek-key",
       model: "deepseek-v4-flash",
       preset: "openai-compatible",
     });
-    expect(saved.asr?.baseUrl).toBe("https://api.deepseek.com/v1");
-    expect(saved.asr?.preset).toBe("deepseek");
+    expect(saved.chat?.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(saved.chat?.preset).toBe("deepseek");
+  });
+
+  test("rejects known providers that do not support the selected capability", async () => {
+    expect(() =>
+      saveProvider("asr", {
+        baseUrl: "https://api.deepseek.com/v1",
+        apiKey: "deepseek-key",
+        model: "deepseek-v4-flash",
+      }),
+    ).toThrow();
+    expect(() =>
+      saveProvider("tts", {
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        apiKey: "dashscope-key",
+        model: "qwen-plus",
+        voice: "alloy",
+      }),
+    ).toThrow();
   });
 
   test("does not persist a preset for an unknown custom endpoint", async () => {

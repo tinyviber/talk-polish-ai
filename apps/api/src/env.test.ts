@@ -62,6 +62,7 @@ describe("production configuration safety", () => {
       "https://api.deepseek.com",
       "https://api.siliconflow.cn",
       "https://dashscope.aliyuncs.com",
+      "https://dashscope-intl.aliyuncs.com",
     ]);
   });
 

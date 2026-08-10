@@ -1,5 +1,9 @@
 import { z } from "zod";
 import {
+  DAILY_STORY_LIMITS,
+  dailyStoryAsrConfigSchema,
+  dailyStoryChatConfigSchema,
+  dailyStoryTtsConfigSchema,
   identifyProviderPreset,
   normalizeProviderBaseUrl,
   providerPresetIdSchema,
@@ -26,9 +30,9 @@ const LEASE_MS = 15_000;
 
 const providerSchema = z
   .object({
-    baseUrl: z.string().trim().min(1).max(500),
-    apiKey: z.string().min(1).max(1_000),
-    model: z.string().trim().min(1).max(200),
+    baseUrl: z.string().trim().min(1).max(DAILY_STORY_LIMITS.providerUrlChars),
+    apiKey: z.string().min(1).max(DAILY_STORY_LIMITS.providerKeyChars),
+    model: z.string().trim().min(1).max(DAILY_STORY_LIMITS.modelChars),
     preset: providerPresetIdSchema.optional(),
   })
   .strict();
@@ -40,16 +44,18 @@ const settingsSchema = z
     updatedAt: z.string().datetime(),
     chat: providerSchema.optional(),
     asr: providerSchema
-      .extend({ responseFormat: z.string().trim().min(1).max(100).optional() })
+      .extend({ responseFormat: z.enum(["json", "verbose_json"]).optional() })
       .optional(),
-    tts: providerSchema.extend({ voice: z.string().trim().min(1).max(200) }).optional(),
+    tts: providerSchema
+      .extend({ voice: z.string().trim().min(1).max(DAILY_STORY_LIMITS.voiceChars) })
+      .optional(),
   })
   .strict();
 const messageSchema = z
   .object({
-    id: z.string().min(1).max(160),
+    id: z.string().min(1).max(128),
     role: z.enum(["assistant", "user"]),
-    text: z.string().min(1).max(8_000),
+    text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
     source: z.enum(["asr", "typed"]).optional(),
   })
   .strict();
@@ -61,9 +67,12 @@ const sessionSchema = z
     updatedAt: z.string().datetime(),
     phase: z.enum(["chatting", "transcriptReady", "review"]),
     storyZh: z.string().min(1).max(4_000),
-    messages: z.array(messageSchema).max(30),
+    messages: z.array(messageSchema).max(DAILY_STORY_LIMITS.historyMessages),
     pendingAsrTranscript: z
-      .object({ id: z.string().min(1).max(160), text: z.string().min(1).max(8_000) })
+      .object({
+        id: z.string().min(1).max(128),
+        text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+      })
       .strict()
       .optional(),
     review: z
@@ -72,13 +81,13 @@ const sessionSchema = z
           .array(
             z
               .object({
-                sourceTurnId: z.string().min(1).max(160),
-                original: z.string().min(1).max(8_000),
-                improved: z.string().min(1).max(8_000),
+                sourceTurnId: z.string().min(1).max(128),
+                original: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+                improved: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
                 // Existing local review snapshots predate category. Defaulting
                 // keeps them recoverable; next write stores the explicit value.
                 category: z.enum(["clarity", "grammar", "naturalness"]).default("naturalness"),
-                explanationZh: z.string().min(1).max(1_000),
+                explanationZh: z.string().min(1).max(600),
               })
               .strict(),
           )
@@ -124,7 +133,7 @@ const listeners = new Set<(event: DailyStorageEvent) => void>();
 function database() {
   if (typeof indexedDB === "undefined") return Promise.reject(new DailyStorageError());
   if (!openPromise) {
-    openPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const pendingPromise = new Promise<IDBDatabase>((resolve, reject) => {
       let request: IDBOpenDBRequest;
       try {
         request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -141,19 +150,35 @@ function database() {
         if (!db.objectStoreNames.contains(LEASE_STORE))
           db.createObjectStore(LEASE_STORE, { keyPath: "id" });
       };
-      request.onblocked = () =>
+      request.onblocked = () => {
+        reset();
         reject(
           new DailyStorageError(
             "浏览器正在阻止设置数据库升级。请关闭其它打开此应用的标签页后重试。",
           ),
         );
-      request.onerror = () => reject(new DailyStorageError());
+      };
+      request.onerror = () => {
+        reset();
+        reject(new DailyStorageError());
+      };
       request.onsuccess = () => {
         const db = request.result;
-        db.onversionchange = () => db.close();
+        db.onversionchange = () => {
+          db.close();
+          reset();
+        };
         resolve(db);
       };
     });
+    const reset = () => {
+      if (openPromise === trackedPromise) openPromise = undefined;
+    };
+    const trackedPromise = pendingPromise.catch((error: unknown) => {
+      reset();
+      throw error;
+    });
+    openPromise = trackedPromise;
   }
   return openPromise;
 }
@@ -315,6 +340,22 @@ function normalizeProviderForStorage<T extends ChatProvider>(provider: T): T {
   }
 }
 
+function validateProviderForStorage(
+  capability: DailyCapability,
+  provider: ChatProvider | AsrProvider | TtsProvider,
+) {
+  try {
+    if (capability === "chat") return dailyStoryChatConfigSchema.parse(provider);
+    if (capability === "asr") return dailyStoryAsrConfigSchema.parse(provider);
+    return dailyStoryTtsConfigSchema.parse(provider);
+  } catch {
+    const label = capability === "chat" ? "Chat" : capability.toUpperCase();
+    throw new DailyStorageError(
+      `${label} 配置与当前 provider 能力或 Daily Story 参数限制不匹配，请检查 endpoint、model、API Key${capability === "asr" ? " 和 responseFormat" : capability === "tts" ? " 和 voice" : ""} 后重试。`,
+    );
+  }
+}
+
 export async function ensureDailyStorage() {
   await database();
   await migrateLegacySession();
@@ -383,15 +424,24 @@ export function saveProvider(
 ) {
   if (!provider) throw new DailyStorageError("配置不完整，无法保存。");
   const normalized = normalizeProviderForStorage(provider);
+  const validated = validateProviderForStorage(capability, normalized);
   return writeProviderSettings(
     (current) =>
       ({
         ...(current.chat ? { chat: current.chat } : {}),
         ...(current.asr ? { asr: current.asr } : {}),
         ...(current.tts ? { tts: current.tts } : {}),
-        [capability]: normalized,
+        [capability]: validated,
       }) as Omit<ProviderSettings, "schemaVersion" | "revision" | "updatedAt">,
   );
+}
+
+/** Test-only seam: close the cached connection so open failure recovery is measurable. */
+export async function __resetDailyStorageForTests() {
+  const pending = openPromise;
+  openPromise = undefined;
+  const db = await pending?.catch(() => undefined);
+  db?.close();
 }
 
 export function clearProvider(capability: DailyCapability) {

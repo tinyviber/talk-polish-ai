@@ -76,12 +76,13 @@ export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatC
   return {
     ...model,
     name: "daily-story-request-scoped-chat",
-    async check() {
+    async check(requestId?: string) {
       await model.generate({
         messages: [{ role: "user", content: "Reply with OK." }],
         // Some reasoning-compatible gateways reject max_tokens=1 before
         // producing even a short probe response.
         maxTokens: 32,
+        requestId,
       });
     },
   };
@@ -152,10 +153,7 @@ export function createDailyStorySpeechToText(
   provider: DailyStoryAsrConfig,
 ): SpeechToText {
   const normalizedProvider = normalizeDailyStoryProvider(provider);
-  if (
-    normalizedProvider.preset === "dashscope-compatible" ||
-    isDashScopeCompatibleAsrUrl(normalizedProvider.baseUrl)
-  ) {
+  if (isDashScopeCompatibleAsrUrl(normalizedProvider.baseUrl)) {
     return createDashScopeCompatibleSpeechToText(config, normalizedProvider);
   }
   return createOpenAICompatibleDailyStorySpeechToText(config, normalizedProvider);
@@ -172,14 +170,14 @@ function createOpenAICompatibleDailyStorySpeechToText(
   const client = transport(config, provider, { maxAttempts: 1 });
   return {
     name: "daily-story-request-scoped-asr",
-    async check() {
+    async check(requestId?: string) {
       await sendTranscription(
         client,
         provider,
         silentWav(),
         "audio/wav",
         "probe.wav",
-        undefined,
+        requestId,
         config.NODE_ENV !== "production",
       );
     },
@@ -204,8 +202,8 @@ export function createDailyStoryTextToSpeech(
   const client = transport(config, provider);
   return {
     name: "daily-story-request-scoped-tts",
-    async check() {
-      await synthesize(client, provider, "ping", undefined);
+    async check(requestId?: string) {
+      await synthesize(client, provider, "ping", requestId);
     },
     async synthesize(input): Promise<SynthesizedAudio> {
       const result = await synthesize(client, provider, input.text, input.requestId, input.voice);

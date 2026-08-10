@@ -71,16 +71,20 @@ Recommended preset endpoints:
 ```text
 OpenAI Compatible: https://api.openai.com/v1
 DeepSeek:          https://api.deepseek.com/v1
-阿里百炼:          https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+阿里百炼:          https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
-For Alibaba Cloud Model Studio (DashScope) ASR, use its Beijing workspace's
-OpenAI-compatible endpoint and a Qwen3-ASR-Flash model:
+For Alibaba Cloud Model Studio (DashScope) ASR, use its OpenAI-compatible
+endpoint and a Qwen3-ASR-Flash model:
 
 ```text
-Base URL: https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+Base URL: https://dashscope.aliyuncs.com/compatible-mode/v1
 Model: qwen3-asr-flash
 ```
+
+For a Beijing workspace-dedicated endpoint, replace the shared hostname with
+`https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`.
+Production accepts only this exact DashScope workspace hostname shape.
 
 This adapter sends audio as a Base64 Data URL in `chat/completions`, matching
 DashScope's OpenAI-compatible ASR API. It is distinct from the multipart

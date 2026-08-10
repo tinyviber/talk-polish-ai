@@ -53,11 +53,16 @@ function configureProduction(overrides: Record<string, string> = {}) {
 }
 
 describe("production configuration safety", () => {
-  test("includes OpenAI in the default Daily Story provider origins", () => {
+  test("includes OpenAI and DashScope in the default Daily Story provider origins", () => {
     delete process.env.DAILY_PROVIDER_ALLOWED_ORIGINS;
     resetEnvForTests();
 
-    expect(env().DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")).toContain("https://api.openai.com");
+    expect(env().DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")).toEqual([
+      "https://api.openai.com",
+      "https://api.deepseek.com",
+      "https://api.siliconflow.cn",
+      "https://dashscope.aliyuncs.com",
+    ]);
   });
 
   test("rejects default and placeholder token secrets", () => {

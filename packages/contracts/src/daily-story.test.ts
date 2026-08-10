@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   dailyProviderBaseUrlSchema,
+  dailyStoryAsrConfigSchema,
+  dailyStoryChatConfigSchema,
   dailyStoryProviderCheckRequestSchema,
   dailyStoryReplyRequestSchema,
   dailyStoryReviewSuggestionSchema,
+  dailyStoryTtsConfigSchema,
 } from "./daily-story";
 
 const chat = {
@@ -41,6 +44,18 @@ describe("Daily Story contracts", () => {
         },
       }).success,
     ).toBe(false);
+
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "asr",
+        provider: {
+          baseUrl: "https://provider.example.com/custom/v1",
+          apiKey: "test-key",
+          model: "asr-model",
+          preset: "deepseek",
+        },
+      }).success,
+    ).toBe(true);
     expect(
       dailyStoryProviderCheckRequestSchema.safeParse({
         capability: "tts",
@@ -53,6 +68,74 @@ describe("Daily Story contracts", () => {
         },
       }).success,
     ).toBe(false);
+
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "tts",
+        provider: {
+          baseUrl: "https://provider.example.com/custom/v1",
+          apiKey: "test-key",
+          model: "tts-model",
+          preset: "dashscope-compatible",
+          voice: "alloy",
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  test("rejects stale presets for known endpoints but permits custom metadata", () => {
+    expect(
+      dailyStoryChatConfigSchema.safeParse({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "chat",
+        preset: "dashscope-compatible",
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryAsrConfigSchema.safeParse({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "whisper-1",
+        preset: "deepseek",
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryTtsConfigSchema.safeParse({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "tts",
+        preset: "dashscope-compatible",
+        voice: "alloy",
+      }).success,
+    ).toBe(false);
+
+    const customBaseUrl = "https://provider.example.com/custom/v1";
+    expect(
+      dailyStoryChatConfigSchema.safeParse({
+        baseUrl: customBaseUrl,
+        apiKey: "test-key",
+        model: "chat",
+        preset: "dashscope-compatible",
+      }).success,
+    ).toBe(true);
+    expect(
+      dailyStoryAsrConfigSchema.safeParse({
+        baseUrl: customBaseUrl,
+        apiKey: "test-key",
+        model: "asr",
+        preset: "deepseek",
+      }).success,
+    ).toBe(true);
+    expect(
+      dailyStoryTtsConfigSchema.safeParse({
+        baseUrl: customBaseUrl,
+        apiKey: "test-key",
+        model: "tts",
+        preset: "dashscope-compatible",
+        voice: "alloy",
+      }).success,
+    ).toBe(true);
   });
 
   test("normalizes legacy provider roots at the contract boundary", () => {

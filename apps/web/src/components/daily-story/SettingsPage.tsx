@@ -28,8 +28,10 @@ import {
   saveProvider,
 } from "@/features/daily-story/settings-repository";
 import {
+  applyProviderSelection,
   hasEffectiveProviderEndpointChanged,
   isCurrentSettingsOperation,
+  type SettingsDraft,
   type SettingsOperation,
 } from "./settings-logic";
 import type {
@@ -39,13 +41,7 @@ import type {
   TtsProvider,
 } from "@/features/daily-story/types";
 
-type Draft = {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  responseFormat: string;
-  voice: string;
-};
+type Draft = SettingsDraft;
 type Status = "idle" | "saving" | "checking" | "connected" | "failed";
 type ProviderSelection = Record<DailyCapability, ProviderId>;
 const DAILY_CAPABILITIES: DailyCapability[] = ["chat", "asr", "tts"];
@@ -168,17 +164,22 @@ export function SettingsPage() {
     setProviderIds((current) => ({ ...current, [capability]: id }));
     setStatus((current) => ({ ...current, [capability]: "idle" }));
     const preset = info.preset;
-    if (id === "custom" || !preset) return;
+    if (id === "custom") {
+      setDrafts((current) => ({
+        ...current,
+        [capability]: applyProviderSelection(
+          current[capability],
+          capability,
+          currentProviderId,
+          id,
+        ),
+      }));
+      return;
+    }
+    if (!preset) return;
     setDrafts((current) => ({
       ...current,
-      [capability]: {
-        ...current[capability],
-        ...(currentProviderId !== id ? { apiKey: "" } : {}),
-        baseUrl: preset.endpoint,
-        model: preset.model,
-        ...(capability === "asr" ? { responseFormat: preset.responseFormat ?? "" } : {}),
-        ...(capability === "tts" ? { voice: preset.voice ?? "" } : {}),
-      },
+      [capability]: applyProviderSelection(current[capability], capability, currentProviderId, id),
     }));
   };
   useEffect(() => {

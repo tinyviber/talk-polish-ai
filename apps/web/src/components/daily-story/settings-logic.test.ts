@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
+  applyProviderSelection,
   hasEffectiveProviderEndpointChanged,
   isCurrentSettingsOperation,
+  type SettingsDraft,
   type SettingsOperation,
 } from "./settings-logic";
 
@@ -31,6 +33,36 @@ describe("Daily Story settings logic", () => {
     expect(
       hasEffectiveProviderEndpointChanged("https://api.example.com/v1", "not-an-endpoint"),
     ).toBe(true);
+  });
+
+  test("clears the API key when switching from a preset provider to custom", () => {
+    const draft: SettingsDraft = {
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "preset-key",
+      model: "custom-model",
+      responseFormat: "json",
+      voice: "custom-voice",
+    };
+
+    expect(applyProviderSelection(draft, "chat", "openai-compatible", "custom")).toEqual({
+      ...draft,
+      apiKey: "",
+    });
+  });
+
+  test("keeps custom draft fields unchanged when selecting custom again", () => {
+    const draft: SettingsDraft = {
+      baseUrl: "https://custom.example.com/v1",
+      apiKey: "stale-key",
+      model: "custom-model",
+      responseFormat: "json",
+      voice: "custom-voice",
+    };
+
+    expect(applyProviderSelection(draft, "tts", "custom", "custom")).toEqual({
+      ...draft,
+      apiKey: "",
+    });
   });
 
   test("rejects stale operations after local edits or newer operations", () => {

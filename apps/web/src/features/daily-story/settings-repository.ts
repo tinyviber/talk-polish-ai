@@ -216,17 +216,19 @@ function fromStoredSettings(value: StoredSettings): ProviderSettings {
     },
   >(
     provider: T,
-  ): Omit<T, "preset"> & { preset: ProviderPresetId } => {
+  ): Omit<T, "preset"> & { preset?: ProviderPresetId } => {
     let baseUrl = provider.baseUrl.trim();
     try {
       baseUrl = normalizeProviderBaseUrl(baseUrl);
     } catch {
       // Preserve malformed legacy data so the user can repair it in Settings.
     }
+    const preset = identifyProviderPreset(baseUrl);
+    const { preset: _storedPreset, ...providerWithoutPreset } = provider;
     return {
-      ...provider,
+      ...providerWithoutPreset,
       baseUrl,
-      preset: provider.preset ?? identifyProviderPreset(baseUrl),
+      ...(preset ? { preset } : {}),
     };
   };
   const asr = value.asr
@@ -272,6 +274,27 @@ function settingsRecord(settings: ProviderSettings): StoredSettings {
   return settingsSchema.parse({ id: CURRENT, ...settings });
 }
 
+function sameValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => sameValue(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+        sameValue(leftRecord[key], rightRecord[key]),
+    )
+  );
+}
+
 function sessionRecord(session: StorySession, conversationId: string): StoredSession {
   return sessionSchema.parse({ id: conversationId, ...session });
 }
@@ -280,10 +303,12 @@ function normalizeProviderForStorage<T extends ChatProvider>(provider: T): T {
   try {
     const baseUrl = normalizeProviderBaseUrl(provider.baseUrl);
     if (!baseUrl.startsWith("https://")) throw new TypeError("HTTPS required");
+    const preset = identifyProviderPreset(baseUrl);
+    const { preset: _providedPreset, ...providerWithoutPreset } = provider;
     return {
-      ...provider,
+      ...providerWithoutPreset,
       baseUrl,
-      preset: provider.preset ?? identifyProviderPreset(baseUrl),
+      ...(preset ? { preset } : {}),
     } as T;
   } catch {
     throw new DailyStorageError("Endpoint 必须是有效的 HTTPS Base URL。请检查地址后重试。");
@@ -296,8 +321,9 @@ export async function ensureDailyStorage() {
 }
 
 export async function readProviderSettings(): Promise<ProviderSettings> {
-  const result = await transaction<ProviderSettings>(SETTINGS_STORE, "readonly", (tx) => {
-    const request = tx.objectStore(SETTINGS_STORE).get(CURRENT);
+  const result = await transaction<ProviderSettings>(SETTINGS_STORE, "readwrite", (tx) => {
+    const store = tx.objectStore(SETTINGS_STORE);
+    const request = store.get(CURRENT);
     request.onsuccess = () => {
       const record = request.result as unknown;
       const defaultSettings: ProviderSettings = {
@@ -305,10 +331,19 @@ export async function readProviderSettings(): Promise<ProviderSettings> {
         revision: 0,
         updatedAt: new Date(0).toISOString(),
       };
-      setResult(
-        tx,
-        record === undefined ? defaultSettings : fromStoredSettings(settingsSchema.parse(record)),
-      );
+      if (record === undefined) {
+        setResult(tx, defaultSettings);
+        return;
+      }
+      const parsed = settingsSchema.parse(record);
+      const normalized = fromStoredSettings(parsed);
+      const canonical = settingsRecord(normalized);
+      if (sameValue(parsed, canonical)) {
+        setResult(tx, normalized);
+        return;
+      }
+      const write = store.put(canonical);
+      write.onsuccess = () => setResult(tx, normalized);
     };
   });
   return result;

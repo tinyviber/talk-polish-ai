@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { dailyStoryProviderPresetIdSchema, normalizeProviderBaseUrl } from "./provider-presets";
+import {
+  dailyStoryProviderPresetIdSchema,
+  identifyProviderPreset,
+  normalizeProviderBaseUrl,
+  type ProviderPresetId,
+} from "./provider-presets";
 
 /**
  * Isolated Daily Story wire contract. Provider credentials are intentionally
@@ -53,6 +58,25 @@ export const dailyProviderBaseUrlSchema = z
 export const dailyProviderApiKeySchema = z.string().min(1).max(DAILY_STORY_LIMITS.providerKeyChars);
 export const dailyProviderModelSchema = z.string().min(1).max(DAILY_STORY_LIMITS.modelChars);
 
+function inferAndValidatePreset(
+  value: { baseUrl: string; preset?: ProviderPresetId | undefined },
+  ctx: z.RefinementCtx,
+) {
+  const inferredPreset = identifyProviderPreset(value.baseUrl);
+  if (
+    value.preset !== undefined &&
+    inferredPreset !== undefined &&
+    value.preset !== inferredPreset
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["preset"],
+      message: "Provider preset does not match the endpoint.",
+    });
+  }
+  return inferredPreset;
+}
+
 export const dailyStoryChatConfigSchema = z
   .object({
     baseUrl: dailyProviderBaseUrlSchema,
@@ -60,7 +84,10 @@ export const dailyStoryChatConfigSchema = z
     model: dailyProviderModelSchema,
     preset: dailyStoryProviderPresetIdSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    inferAndValidatePreset(value, ctx);
+  });
 export type DailyStoryChatConfig = z.infer<typeof dailyStoryChatConfigSchema>;
 
 export const dailyStoryAsrConfigSchema = z
@@ -73,7 +100,8 @@ export const dailyStoryAsrConfigSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.preset === "deepseek") {
+    const inferredPreset = inferAndValidatePreset(value, ctx);
+    if (inferredPreset === "deepseek") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["preset"],
@@ -93,7 +121,8 @@ export const dailyStoryTtsConfigSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.preset && value.preset !== "openai-compatible") {
+    const inferredPreset = inferAndValidatePreset(value, ctx);
+    if (inferredPreset && inferredPreset !== "openai-compatible") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["preset"],

@@ -15,7 +15,7 @@ export type DailyStoryProviderPresetId = ProviderPresetId;
 export const OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 export const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 export const DASHSCOPE_COMPATIBLE_DEFAULT_BASE_URL =
-  "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
+  "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 export type ProviderPreset = {
   id: ProviderPresetId;
@@ -92,27 +92,37 @@ export function isDashScopeCompatibleBaseUrl(value: string) {
     const isDashScopeHost =
       hostname === "dashscope.aliyuncs.com" ||
       hostname === "dashscope-intl.aliyuncs.com" ||
-      hostname.endsWith(".maas.aliyuncs.com");
-    return isDashScopeHost && url.pathname === "/compatible-mode/v1";
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/.test(hostname);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      isDashScopeHost &&
+      url.pathname === "/compatible-mode/v1"
+    );
   } catch {
     return false;
   }
 }
 
-/** Infer a known preset without accepting provider credentials or other config. */
-export function identifyProviderPreset(value: string): ProviderPresetId {
+function canonicalEndpointIdentity(value: string) {
   try {
-    const normalized = normalizeProviderBaseUrl(value);
-    const url = new URL(normalized);
+    const url = new URL(normalizeProviderBaseUrl(value));
     const hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
-
-    if (isDashScopeCompatibleBaseUrl(normalized)) return "dashscope-compatible";
-    if (hostname === "api.deepseek.com") return "deepseek";
+    return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ""}${url.pathname}`;
   } catch {
-    // Unknown or invalid values remain generic; the request schema/policy
-    // performs validation and reports the safe configuration error.
+    return undefined;
   }
-  return "openai-compatible";
+}
+
+/** Infer a known preset without accepting provider credentials or other config. */
+export function identifyProviderPreset(value: string): ProviderPresetId | undefined {
+  const identity = canonicalEndpointIdentity(value);
+  if (identity === canonicalEndpointIdentity(OPENAI_COMPATIBLE_DEFAULT_BASE_URL)) {
+    return "openai-compatible";
+  }
+  if (identity === canonicalEndpointIdentity(DEEPSEEK_DEFAULT_BASE_URL)) return "deepseek";
+  if (isDashScopeCompatibleBaseUrl(value)) return "dashscope-compatible";
+  return undefined;
 }
 
 /** Alias for callers that use the catalog's verb rather than its identity. */

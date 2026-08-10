@@ -66,12 +66,42 @@ describe("Daily Story outbound URL policy", () => {
     ).toBe("https://api.example.com");
   });
 
+  test("allows only compatible-mode/v1 DashScope Beijing workspace hosts", () => {
+    for (const hostname of [
+      "a.cn-beijing.maas.aliyuncs.com",
+      "ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com",
+    ]) {
+      expect(
+        assertDailyProviderUrlAllowed(`https://${hostname}/compatible-mode/v1`, {
+          production: true,
+          allowedOrigins: [],
+        }).origin,
+      ).toBe(`https://${hostname}`);
+    }
+
+    for (const value of [
+      "https://cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "https://a.b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "https://a.cn-beijing.maas.aliyuncs.com.evil.com/compatible-mode/v1",
+      "https://a.cn-beijing.maas.aliyuncs.com/v1",
+    ]) {
+      expect(() =>
+        assertDailyProviderUrlAllowed(value, {
+          production: true,
+          allowedOrigins: [],
+        }),
+      ).toThrow();
+    }
+  });
+
   test("rejects private, documentation, multicast, and mixed DNS answers", async () => {
     for (const address of [
       "127.0.0.1",
       "10.0.0.1",
       "100.64.0.1",
       "169.254.169.254",
+      "192.31.196.1",
+      "192.52.193.1",
       "192.0.2.1",
       "198.51.100.1",
       "203.0.113.1",
@@ -81,6 +111,13 @@ describe("Daily Story outbound URL policy", () => {
       "fe80::1",
       "2001:db8::1",
       "::ffff:127.0.0.1",
+      "::c000:0201",
+      "64:ff9b::c000:0201",
+      "64:ff9b:1::1",
+      "2002:c000:0201::1",
+      "2001:0:c000:0201::1",
+      "2001:20::1",
+      "3ffe::1",
     ]) {
       expect(isPublicInternetAddress(address)).toBe(false);
     }
@@ -106,5 +143,18 @@ describe("Daily Story outbound URL policy", () => {
         true,
       ),
     ).resolves.toHaveLength(1);
+  });
+
+  test("accepts ordinary global-unicast IPv6 without allowing special prefixes", () => {
+    for (const address of [
+      "2001:4860:4860::8888",
+      "2606:4700:4700::1111",
+      "2a00:1450:4001:81b::200e",
+    ]) {
+      expect(isPublicInternetAddress(address)).toBe(true);
+    }
+    for (const address of ["4000::1", "5f00::1", "2001:db8::1"]) {
+      expect(isPublicInternetAddress(address)).toBe(false);
+    }
   });
 });

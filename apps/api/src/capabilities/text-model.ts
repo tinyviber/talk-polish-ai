@@ -25,6 +25,6 @@ export type TextModelResponse = {
 export interface TextModel {
   readonly name: string;
   generate(input: TextModelRequest): Promise<TextModelResponse>;
-  check?(): Promise<void>;
+  check?(requestId?: string): Promise<void>;
   probe?(): Promise<void>;
 }

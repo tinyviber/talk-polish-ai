@@ -59,6 +59,32 @@ describe("Daily Story policy service", () => {
     });
   });
 
+  test("passes the request ID into provider checks", async () => {
+    const requestIds: string[] = [];
+    const service = createDailyStoryService(env(), {
+      providerFactory: () => ({
+        chat: {
+          name: "fixture-chat",
+          async generate() {
+            return { content: "", provider: "fixture" };
+          },
+          async check(requestId?: string) {
+            if (requestId) requestIds.push(requestId);
+          },
+        },
+      }),
+      guard: async ({ run }) => run(),
+    });
+
+    await service.providerCheck({
+      learnerId: "learner",
+      requestId: "provider-check-request",
+      request: { capability: "chat", provider: chatConfig },
+    });
+
+    expect(requestIds).toEqual(["provider-check-request"]);
+  });
+
   test.each([
     [401, "unauthorized"],
     [403, "unauthorized"],

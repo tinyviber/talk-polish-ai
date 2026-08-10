@@ -37,31 +37,51 @@ type RequestInput = {
 };
 
 type SafeResponse = { bytes: Uint8Array; contentType?: string; status: number };
+type DailySafeHttpsClientDependencies = {
+  resolveAddresses?: typeof resolveDailyProviderPublicAddresses;
+  request?: typeof httpsRequest;
+};
 
 /**
  * Dynamic OpenAI-compatible transport. Never uses fetch: every attempt resolves
  * all DNS answers, dials one validated numeric address, retains TLS SNI/Host,
  * disables redirects and keep-alive, and bounds response bytes.
  */
-export function createDailySafeHttpsClient(options: DailySafeHttpsClientOptions) {
+export function createDailySafeHttpsClient(
+  options: DailySafeHttpsClientOptions,
+  dependencies: DailySafeHttpsClientDependencies = {},
+) {
   const target = assertDailyProviderUrlAllowed(options.baseUrl, options);
+  const resolveAddresses = dependencies.resolveAddresses ?? resolveDailyProviderPublicAddresses;
+  const request = dependencies.request ?? httpsRequest;
 
   return {
     async request(input: RequestInput): Promise<SafeResponse> {
       let lastError: DailyProviderRequestError | undefined;
       for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+        const attemptDeadline = Date.now() + options.timeoutMs;
         try {
           if (options.allowSyntheticDns && !options.production) {
             return await requestWithSystemFetch(target, input, options);
           }
           // This call intentionally remains inside retry loop: DNS is not cached.
-          const addresses = await resolveDailyProviderPublicAddresses(
-            target.hostname,
-            undefined,
-            options.allowSyntheticDns && !options.production,
+          const addresses = await withTimeout(
+            resolveAddresses(
+              target.hostname,
+              undefined,
+              options.allowSyntheticDns && !options.production,
+            ),
+            remainingAttemptMs(attemptDeadline),
           );
           const selected = addresses[0]!;
-          const response = await requestPinned(target, selected, input, options);
+          const response = await requestPinned(
+            target,
+            selected,
+            input,
+            options,
+            request,
+            attemptDeadline,
+          );
           if (response.status >= 300 && response.status < 400) {
             throw new DailyProviderRequestError("redirect", response.status);
           }
@@ -118,7 +138,7 @@ async function requestWithSystemFetch(
       throw new DailyProviderRequestError(
         "http",
         response.status,
-        await providerResponseReason(response),
+        await providerResponseReason(response, options.apiKey),
       );
     }
     const declared = Number(response.headers.get("content-length"));
@@ -142,7 +162,7 @@ async function requestWithSystemFetch(
   }
 }
 
-async function providerResponseReason(response: Response) {
+async function providerResponseReason(response: Response, secret: string) {
   try {
     const text = await response.text();
     if (!text) return undefined;
@@ -161,7 +181,8 @@ async function providerResponseReason(response: Response) {
           ? value.message
           : value;
     if (typeof message !== "string") return undefined;
-    return message
+    const redacted = secret ? message.split(secret).join("<redacted>") : message;
+    return redacted
       .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
       .replace(/sk-[a-z0-9_-]+/gi, "sk-<redacted>")
       .slice(0, 400);
@@ -175,12 +196,40 @@ function requestPinned(
   selected: { address: string; family: 4 | 6 },
   input: RequestInput,
   options: DailySafeHttpsClientOptions,
+  requestFn: typeof httpsRequest,
+  attemptDeadline: number,
 ): Promise<SafeResponse> {
   const url = joinDailyProviderPath(target, input.path);
   const body = input.body ? Buffer.from(input.body) : undefined;
   const maxBytes = input.maxResponseBytes ?? options.maxResponseBytes ?? 2 * 1024 * 1024;
   return new Promise((resolve, reject) => {
-    const request = httpsRequest(
+    let totalTimeout: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    let responseLimitExceeded = false;
+    const cleanup = () => {
+      if (totalTimeout !== undefined) {
+        clearTimeout(totalTimeout);
+        totalTimeout = undefined;
+      }
+    };
+    const fail = (error: DailyProviderRequestError) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const succeed = (response: SafeResponse) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(response);
+    };
+    const remaining = remainingAttemptMs(attemptDeadline);
+    if (remaining <= 0) {
+      fail(new DailyProviderRequestError("timeout"));
+      return;
+    }
+    const request = requestFn(
       {
         protocol: "https:",
         hostname: target.hostname,
@@ -212,7 +261,7 @@ function requestPinned(
         const declared = Number(response.headers["content-length"]);
         if (Number.isFinite(declared) && declared > maxBytes) {
           response.resume();
-          reject(new DailyProviderRequestError("response", response.statusCode));
+          fail(new DailyProviderRequestError("response", response.statusCode));
           return;
         }
         const chunks: Buffer[] = [];
@@ -220,23 +269,27 @@ function requestPinned(
         response.on("data", (chunk: Buffer) => {
           size += chunk.byteLength;
           if (size > maxBytes) {
+            responseLimitExceeded = true;
+            fail(new DailyProviderRequestError("response", response.statusCode));
             response.destroy();
             return;
           }
           chunks.push(chunk);
         });
-        response.on("error", () =>
-          reject(new DailyProviderRequestError("network", response.statusCode)),
-        );
+        response.on("error", () => {
+          if (!responseLimitExceeded) {
+            fail(new DailyProviderRequestError("network", response.statusCode));
+          }
+        });
         response.on("end", () => {
           if (size > maxBytes) {
-            reject(new DailyProviderRequestError("response", response.statusCode));
+            fail(new DailyProviderRequestError("response", response.statusCode));
             return;
           }
           const bytes = Buffer.concat(chunks);
           const rawContentType = response.headers["content-type"];
           const contentType = Array.isArray(rawContentType) ? rawContentType[0] : rawContentType;
-          resolve({
+          succeed({
             bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
             ...(contentType ? { contentType } : {}),
             status: response.statusCode ?? 0,
@@ -244,9 +297,12 @@ function requestPinned(
         });
       },
     );
-    request.setTimeout(options.timeoutMs, () => request.destroy(new Error("timeout")));
+    // Keep the idle timeout below for stalled sockets, but also bound the full
+    // attempt so a peer sending occasional bytes cannot keep it alive forever.
+    totalTimeout = setTimeout(() => request.destroy(new Error("timeout")), remaining);
+    request.setTimeout(remaining, () => request.destroy(new Error("timeout")));
     request.on("error", (error: NodeJS.ErrnoException) => {
-      reject(new DailyProviderRequestError(error.message === "timeout" ? "timeout" : "network"));
+      fail(new DailyProviderRequestError(error.message === "timeout" ? "timeout" : "network"));
     });
     request.end(body);
   });
@@ -255,6 +311,26 @@ function requestPinned(
 function normalizeError(error: unknown) {
   if (error instanceof DailyProviderRequestError) return error;
   return new DailyProviderRequestError("network");
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new DailyProviderRequestError("timeout")), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function remainingAttemptMs(deadline: number) {
+  return Math.max(0, deadline - Date.now());
 }
 
 function retryable(error: DailyProviderRequestError) {

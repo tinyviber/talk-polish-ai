@@ -14,7 +14,7 @@ describe("provider preset catalog", () => {
     expect(OPENAI_COMPATIBLE_DEFAULT_BASE_URL).toBe("https://api.openai.com/v1");
     expect(DEEPSEEK_DEFAULT_BASE_URL).toBe("https://api.deepseek.com/v1");
     expect(DASHSCOPE_COMPATIBLE_DEFAULT_BASE_URL).toBe(
-      "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
     );
     expect(
       Object.values(PROVIDER_PRESETS).every((preset) => preset.defaultBaseUrl.endsWith("/v1")),
@@ -38,9 +38,11 @@ describe("provider preset catalog", () => {
     expect(normalizeProviderBaseUrl(endpoint.replace(/\/v1$/, ""))).toBe(endpoint);
   });
 
-  test("recognizes known providers and falls back to generic compatibility", () => {
+  test("recognizes canonical provider endpoints and leaves other paths custom", () => {
     expect(identifyProviderPreset("https://api.openai.com")).toBe("openai-compatible");
+    expect(identifyProviderPreset("https://api.openai.com/custom/v1")).toBeUndefined();
     expect(identifyProviderPreset("https://api.deepseek.com/v1")).toBe("deepseek");
+    expect(identifyProviderPreset("https://api.deepseek.com/custom/v1")).toBeUndefined();
     expect(identifyProviderPreset("https://dashscope.aliyuncs.com/compatible-mode/v1")).toBe(
       "dashscope-compatible",
     );
@@ -49,7 +51,10 @@ describe("provider preset catalog", () => {
         "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode",
       ),
     ).toBe("dashscope-compatible");
-    expect(identifyProviderPreset("https://provider.example.com/v1")).toBe("openai-compatible");
+    expect(
+      identifyProviderPreset("https://workspace.cn-shanghai.maas.aliyuncs.com/compatible-mode/v1"),
+    ).toBeUndefined();
+    expect(identifyProviderPreset("https://provider.example.com/v1")).toBeUndefined();
   });
 
   test("rejects operation URLs instead of appending a second version suffix", () => {

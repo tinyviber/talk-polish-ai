@@ -32,8 +32,8 @@ export function createDashScopeCompatibleSpeechToText(
 
   return {
     name: "dashscope-compatible-asr",
-    async check() {
-      await requestDashScopeAsr(client, provider, silentWav(), "audio/wav", "en");
+    async check(requestId?: string) {
+      await requestDashScopeAsr(client, provider, silentWav(), "audio/wav", "en", requestId);
     },
     async transcribe(input) {
       const response = await requestDashScopeAsr(

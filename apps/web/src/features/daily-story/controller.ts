@@ -52,6 +52,14 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
 }
 
+export function isDailyStoryCachedAudioRetryCurrent(
+  mounted: boolean,
+  retryGeneration: number,
+  currentGeneration: number,
+) {
+  return mounted && retryGeneration === currentGeneration;
+}
+
 function persistenceSignature(session: {
   phase: string;
   storyZh: string;
@@ -89,6 +97,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const stateRef = useRef(state);
   const ownerIdRef = useRef(createId("tab"));
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const generationRef = useRef(0);
   const retryRef = useRef<(() => void) | null>(null);
   const reviewInFlightRef = useRef(false);
   const blobRef = useRef<Blob | null>(null);
@@ -101,6 +111,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     const playback = ttsPlaybackRef.current;
     ttsPlaybackRef.current = null;
     releaseTransientTtsPlayback(playback);
+  }, []);
+  const invalidateCurrent = useCallback(() => {
+    generationRef.current += 1;
+    abortRef.current?.abort();
   }, []);
 
   const refreshCachedAudio = useCallback(async () => {
@@ -136,14 +150,15 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     setBusy(isDailyBusy(state.phase), "daily-story");
   }, [setBusy, state]);
 
-  useEffect(
-    () => () => {
-      abortRef.current?.abort();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      invalidateCurrent();
       releaseTtsPlayback();
       setBusy(false, "daily-story");
-    },
-    [releaseTtsPlayback, setBusy],
-  );
+    };
+  }, [invalidateCurrent, releaseTtsPlayback, setBusy]);
 
   useEffect(() => {
     let alive = true;
@@ -201,7 +216,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
             const hadActiveOperation = stateRef.current.operation !== null;
             settingsRevisionRef.current = settings.revision;
             if (hadActiveOperation) {
-              abortRef.current?.abort();
+              invalidateCurrent();
               setStorageError("API 配置已在另一标签页更新。当前操作已取消，请按新配置重试。");
             }
             dispatch({ type: "settingsRevisionChanged", settingsRevision: settings.revision });
@@ -213,7 +228,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (event.conversationId !== conversationId || event.ownerId === owner) return;
         leaseActive = false;
         setCanEdit(false);
-        abortRef.current?.abort();
+        invalidateCurrent();
         void readStorySession(conversationId)
           .then((session) => {
             if (!alive) return;
@@ -231,7 +246,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       // Metadata-only signal. Reload from IndexedDB; never trust cross-tab payloads.
       setCanEdit(false);
       leaseActive = false;
-      abortRef.current?.abort();
+      invalidateCurrent();
       void readStorySession(conversationId)
         .then((session) => {
           if (!alive) return;
@@ -250,7 +265,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       unsubscribe();
       void releaseStoryLease(conversationId, owner);
     };
-  }, [allowCompose, conversationId]);
+  }, [allowCompose, conversationId, invalidateCurrent]);
 
   useEffect(() => {
     const snapshot = snapshotDailyState(state);
@@ -276,11 +291,11 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
 
   const guard = useCallback(() => canEdit && !isDailyBusy(stateRef.current.phase), [canEdit]);
   const abortCurrent = useCallback(() => {
-    abortRef.current?.abort();
+    invalidateCurrent();
     const controller = new AbortController();
     abortRef.current = controller;
     return controller;
-  }, []);
+  }, [invalidateCurrent]);
   const currentSettings = useCallback(async () => {
     try {
       const settings = await readProviderSettings();
@@ -454,15 +469,33 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const retryCachedAudio = useCallback(() => {
     const attemptId = cachedAudio?.clientAttemptId;
     if (!canEdit || !attemptId) return;
+    const retryGeneration = generationRef.current;
     void getDailyStoryAudio(attemptId)
       .then((item) => {
+        if (
+          !isDailyStoryCachedAudioRetryCurrent(
+            mountedRef.current,
+            retryGeneration,
+            generationRef.current,
+          )
+        )
+          return;
         if (!item) throw new Error("找不到缓存录音。录音可能已超过 7 天或已被清理。");
         blobRef.current = item.blob;
         audioOutboxAttemptRef.current = item.clientAttemptId;
         const readAloud = item.purpose === "readAloud";
         return transcribe(item.blob, readAloud, item.durationSec, true, item.readAloudTarget);
       })
-      .catch((error: unknown) => setStorageError(message(error)));
+      .catch((error: unknown) => {
+        if (
+          isDailyStoryCachedAudioRetryCurrent(
+            mountedRef.current,
+            retryGeneration,
+            generationRef.current,
+          )
+        )
+          setStorageError(message(error));
+      });
   }, [cachedAudio, canEdit, transcribe]);
 
   const send = useCallback(
@@ -619,7 +652,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const newStory = useCallback(async () => {
     if (stateRef.current.messages.length && !window.confirm("开始新故事会放弃当前对话。继续吗？"))
       return;
-    abortRef.current?.abort();
+    invalidateCurrent();
     blobRef.current = null;
     audioOutboxAttemptRef.current = null;
     persistenceSignatureRef.current = null;
@@ -630,7 +663,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       return;
     }
     dispatch({ type: "newStory" });
-  }, [conversationId]);
+  }, [conversationId, invalidateCurrent]);
 
   return {
     state,

@@ -255,7 +255,15 @@ function requestPinned(
         agent: false,
         servername: target.hostname,
         rejectUnauthorized: true,
-        lookup(_hostname, _lookupOptions, callback) {
+        lookup(_hostname, lookupOptions, callback) {
+          // Node 22.14+ asks for all addresses when it uses the
+          // lookupAndConnectMultiple path. Returning the legacy scalar form
+          // in that mode makes node:net read an undefined address and fail
+          // with ERR_INVALID_IP_ADDRESS before TLS starts.
+          if (lookupOptions.all) {
+            callback(null, [{ address: selected.address, family: selected.family }]);
+            return;
+          }
           callback(null, selected.address, selected.family);
         },
         headers: {

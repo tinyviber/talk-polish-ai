@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Loader2, MessageCircle, Plus } from "lucide-react";
+import { ArrowRight, Download, Loader2, MessageCircle, Plus, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  exportStorySessions,
+  importStorySessions,
   listStorySessions,
   subscribeDailyStorage,
 } from "@/features/daily-story/settings-repository";
@@ -21,9 +23,12 @@ function updatedLabel(value: string) {
 
 export function ConversationListPage() {
   const navigate = useNavigate();
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [sessions, setSessions] = useState<StorySessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferStatus, setTransferStatus] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -58,6 +63,49 @@ export function ConversationListPage() {
     });
   };
 
+  const exportConversations = async () => {
+    setTransferBusy(true);
+    setTransferStatus(null);
+    setError(null);
+    try {
+      const json = await exportStorySessions();
+      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "daily-story-conversations-v1.json";
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setTransferStatus("对话已导出。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法导出对话。");
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
+  const importConversations = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setTransferBusy(true);
+    setTransferStatus(null);
+    setError(null);
+    try {
+      const result = await importStorySessions(await file.text());
+      const next = await listStorySessions();
+      setSessions(next);
+      setTransferStatus(
+        result.migratedLegacy
+          ? `已导入 ${result.imported} 个对话，并迁移旧对话。`
+          : `已导入 ${result.imported} 个对话。`,
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法导入对话。现有对话未修改。");
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
   return (
     <div className="min-h-screen">
       <DailyStoryHeader />
@@ -70,12 +118,48 @@ export function ConversationListPage() {
               <p className="mt-3 text-muted-foreground">
                 每个对话都有独立地址。打开旧链接，就能回到对应的练习，不会和其它标签页互相覆盖。
               </p>
+              <p className="mt-2 text-xs text-muted-foreground">
+                JSON 包含文字对话、转写和复盘内容，不包含 API 配置或录音；文件未加密，请妥善保存。
+              </p>
             </div>
-            <Button className="rounded-full shadow-tactile" onClick={startNewConversation}>
-              <Plus className="size-4" aria-hidden />
-              新对话
-            </Button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(event) => void importConversations(event)}
+              />
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={() => void exportConversations()}
+                disabled={transferBusy}
+              >
+                <Download className="size-4" aria-hidden />
+                导出
+              </Button>
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={() => importInputRef.current?.click()}
+                disabled={transferBusy}
+              >
+                <Upload className="size-4" aria-hidden />
+                导入
+              </Button>
+              <Button className="rounded-full shadow-tactile" onClick={startNewConversation}>
+                <Plus className="size-4" aria-hidden />
+                新对话
+              </Button>
+            </div>
           </div>
+
+          {transferStatus ? (
+            <p className="mt-4 text-sm text-muted-foreground" role="status">
+              {transferStatus}
+            </p>
+          ) : null}
 
           {error ? (
             <p

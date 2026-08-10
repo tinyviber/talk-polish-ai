@@ -90,6 +90,8 @@ set its production Compose service to exactly `network_mode: host` before proxyi
 `127.0.0.1`; container-default networking cannot reach host-loopback services.
 
 ```sh
+sudo install -m 0644 deploy/systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo install -m 0755 deploy/deploy-host.sh /opt/kotoba/deploy/deploy-host.sh
 sudo systemctl enable talk-polish-infra.service talk-polish-api.service talk-polish-web.service
 sudo systemctl start talk-polish-infra.service

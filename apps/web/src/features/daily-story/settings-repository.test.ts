@@ -5,6 +5,9 @@ import {
   clearProvider,
   acquireStoryLease,
   claimStoryLease,
+  deleteStorySession,
+  exportStorySessions,
+  importStorySessions,
   listStorySessions,
   readProviderSettings,
   readStorySession,
@@ -57,6 +60,81 @@ async function readRawSettings() {
       db.close();
       reject(read.error);
     };
+  });
+}
+
+async function mutateRawStore(
+  storeName: "storySessions" | "storyLeases",
+  mutate: (store: IDBObjectStore) => void,
+) {
+  const request = indexedDB.open("kotoba-loop-settings", 2);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readwrite");
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+    transaction.onabort = () => {
+      db.close();
+      reject(transaction.error);
+    };
+    mutate(transaction.objectStore(storeName));
+  });
+}
+
+async function readRawStore(storeName: "storySessions" | "storyLeases") {
+  const request = indexedDB.open("kotoba-loop-settings", 2);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return new Promise<Record<string, unknown>[]>((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readonly");
+    const read = transaction.objectStore(storeName).getAll();
+    read.onsuccess = () => {
+      db.close();
+      resolve(read.result as Record<string, unknown>[]);
+    };
+    read.onerror = () => {
+      db.close();
+      reject(read.error);
+    };
+  });
+}
+
+async function clearRawStore(storeName: "storySessions" | "storyLeases") {
+  await mutateRawStore(storeName, (store) => {
+    const read = store.getAll();
+    read.onsuccess = () => {
+      for (const record of read.result as Array<{ id: string }>) store.delete(record.id);
+    };
+  });
+}
+
+function exportFixture(id: string, text = "I stayed home.") {
+  return JSON.stringify({
+    format: "kotoba-daily-story",
+    version: 1,
+    sessions: [
+      {
+        id,
+        updatedAt: "2026-08-10T00:00:00.000Z",
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [
+          { id: `${id}-ai`, role: "assistant", text: "How was your day?" },
+          { id: `${id}-user`, role: "user", text, source: "typed" },
+        ],
+      },
+    ],
   });
 }
 
@@ -227,5 +305,286 @@ describe("Daily Story IndexedDB", () => {
     expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(true);
     await releaseStoryLease("conversation-a", "owner-b");
     await releaseStoryLease("conversation-b", "owner-b");
+  });
+
+  test("round-trips projected sessions without secrets or revision", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    const saved = await writeStorySession(
+      "conversation-roundtrip",
+      {
+        phase: "review",
+        storyZh: "今天下雨",
+        messages: [
+          { id: "ai-roundtrip", role: "assistant", text: "How was your day?" },
+          {
+            id: "user-roundtrip",
+            role: "user",
+            source: "typed",
+            text: "I stayed home.",
+          },
+        ],
+        review: {
+          suggestions: [
+            {
+              sourceTurnId: "user-roundtrip",
+              original: "I stayed home.",
+              improved: "I stayed at home.",
+              category: "naturalness",
+              explanationZh: "这里更自然。",
+            },
+          ],
+        },
+      },
+      null,
+    );
+    const exported = JSON.parse(await exportStorySessions()) as Record<string, unknown>;
+    const exportedSession = (exported["sessions"] as Array<Record<string, unknown>>)[0]!;
+    expect(exported).toEqual({
+      format: "kotoba-daily-story",
+      version: 1,
+      sessions: [
+        {
+          id: "conversation-roundtrip",
+          updatedAt: saved.updatedAt,
+          phase: "review",
+          storyZh: "今天下雨",
+          messages: [
+            { id: "ai-roundtrip", role: "assistant", text: "How was your day?" },
+            {
+              id: "user-roundtrip",
+              role: "user",
+              text: "I stayed home.",
+              source: "typed",
+            },
+          ],
+          review: {
+            suggestions: [
+              {
+                sourceTurnId: "user-roundtrip",
+                original: "I stayed home.",
+                improved: "I stayed at home.",
+                category: "naturalness",
+                explanationZh: "这里更自然。",
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect(exportedSession).not.toHaveProperty("revision");
+    expect(await exportStorySessions()).not.toContain("apiKey");
+    expect(await exportStorySessions()).not.toContain("audio");
+
+    await deleteStorySession("conversation-roundtrip", saved.revision);
+    await importStorySessions(JSON.stringify(exported));
+    const restored = await readStorySession("conversation-roundtrip");
+    expect(restored?.revision).toBe(1);
+    expect(restored?.updatedAt).toBe(saved.updatedAt);
+    expect(restored?.review?.suggestions[0]?.category).toBe("naturalness");
+  });
+
+  test("refuses to export a legacy record that cannot pass the import schema", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    await mutateRawStore("storySessions", (store) => {
+      store.put({
+        id: "conversation-legacy",
+        schemaVersion: 1,
+        revision: 3,
+        updatedAt: "2026-08-10T00:00:00.000Z",
+        phase: "chatting",
+        storyZh: "旧对话",
+        // The storage schema historically allowed this ID, while the
+        // transfer schema rejects it to keep imported IDs safe and stable.
+        messages: [{ id: "legacy message", role: "assistant", text: "Tell me more." }],
+      });
+    });
+
+    await expect(exportStorySessions()).rejects.toMatchObject({ name: "StoryImportError" });
+    expect(await readRawStore("storySessions")).toHaveLength(1);
+  });
+
+  test("rejects invalid, duplicate, current, and sensitive-field imports", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    const cases: Array<[string, () => string]> = [
+      ["current", () => exportFixture("current")],
+      ["unsafe id", () => exportFixture("unsafe id")],
+      [
+        "unknown field",
+        () => {
+          const value = JSON.parse(exportFixture("unknown-field")) as {
+            sessions: Array<Record<string, unknown>>;
+          };
+          value.sessions[0]!["revision"] = 9;
+          value.sessions[0]!["apiKey"] = "secret";
+          value.sessions[0]!["audio"] = { blob: "no" };
+          value.sessions[0]!["lease"] = { ownerId: "no" };
+          return JSON.stringify(value);
+        },
+      ],
+      [
+        "duplicate message id",
+        () => {
+          const value = JSON.parse(exportFixture("duplicate-message")) as {
+            sessions: Array<{ messages: Array<{ id: string }> }>;
+          };
+          value.sessions[0]!.messages[1]!.id = value.sessions[0]!.messages[0]!.id;
+          return JSON.stringify(value);
+        },
+      ],
+      [
+        "pending id collision",
+        () => {
+          const value = JSON.parse(exportFixture("pending-collision")) as {
+            sessions: Array<{ messages: Array<{ id: string }>; pendingAsrTranscript?: unknown }>;
+          };
+          value.sessions[0]!.pendingAsrTranscript = {
+            id: value.sessions[0]!.messages[0]!.id,
+            text: "pending",
+          };
+          return JSON.stringify(value);
+        },
+      ],
+      [
+        "review source semantics",
+        () => {
+          const value = JSON.parse(exportFixture("bad-review")) as {
+            sessions: Array<{ review?: unknown }>;
+          };
+          value.sessions[0]!.review = {
+            suggestions: [
+              {
+                sourceTurnId: "bad-source",
+                original: "not the user text",
+                improved: "new text",
+                category: "grammar",
+                explanationZh: "说明",
+              },
+            ],
+          };
+          return JSON.stringify(value);
+        },
+      ],
+    ];
+    for (const [label, json] of cases) {
+      await expect(importStorySessions(json()), label).rejects.toBeInstanceOf(Error);
+    }
+
+    const duplicate = JSON.parse(exportFixture("duplicate-session")) as {
+      sessions: unknown[];
+    };
+    duplicate.sessions.push(duplicate.sessions[0]);
+    await expect(importStorySessions(JSON.stringify(duplicate))).rejects.toBeInstanceOf(Error);
+    expect(await readRawStore("storySessions")).toHaveLength(0);
+  });
+
+  test("enforces transfer byte, session, and message count limits", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    const tooLarge = JSON.stringify({
+      format: "kotoba-daily-story",
+      version: 1,
+      sessions: [],
+      padding: "x".repeat(10 * 1024 * 1024),
+    });
+    await expect(importStorySessions(tooLarge)).rejects.toBeInstanceOf(Error);
+
+    const tooManySessions = JSON.parse(exportFixture("many-sessions")) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    tooManySessions.sessions = Array.from({ length: 201 }, (_, index) => ({
+      ...(tooManySessions.sessions[0] as Record<string, unknown>),
+      id: `many-${index}`,
+    }));
+    await expect(importStorySessions(JSON.stringify(tooManySessions))).rejects.toBeInstanceOf(
+      Error,
+    );
+
+    const tooManyMessages = JSON.parse(exportFixture("many-messages")) as {
+      sessions: Array<{ messages: Array<Record<string, unknown>> }>;
+    };
+    tooManyMessages.sessions[0]!.messages = Array.from({ length: 41 }, (_, index) => ({
+      id: `message-${index}`,
+      role: "assistant",
+      text: "A message.",
+    }));
+    await expect(importStorySessions(JSON.stringify(tooManyMessages))).rejects.toBeInstanceOf(
+      Error,
+    );
+    expect(await readRawStore("storySessions")).toHaveLength(0);
+  });
+
+  test("rejects an existing ID as one file and keeps all records unchanged", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    await writeStorySession(
+      "conversation-conflict",
+      { phase: "chatting", storyZh: "已有故事", messages: [] },
+      null,
+    );
+    const before = await readRawStore("storySessions");
+    const value = JSON.parse(exportFixture("conversation-conflict")) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    value.sessions.push({
+      ...(value.sessions[0] as Record<string, unknown>),
+      id: "conversation-fresh",
+    });
+    await expect(importStorySessions(JSON.stringify(value))).rejects.toBeInstanceOf(Error);
+    expect(await readRawStore("storySessions")).toEqual(before);
+  });
+
+  test("does not migrate legacy current on preflight failure, then migrates it on success", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    await writeStorySession(
+      "conversation-existing",
+      { phase: "chatting", storyZh: "已有故事", messages: [] },
+      null,
+    );
+    await mutateRawStore("storySessions", (store) => {
+      store.put({
+        id: "current",
+        schemaVersion: 1,
+        revision: 7,
+        updatedAt: "2025-01-01T00:00:00.000Z",
+        phase: "transcriptReady",
+        storyZh: "旧故事",
+        messages: [{ id: "old-ai", role: "assistant", text: "Tell me more." }],
+        pendingAsrTranscript: { id: "old-asr", text: "I went home." },
+      });
+    });
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({ id: "current", ownerId: "old-tab", expiresAt: Date.now() + 10_000 });
+    });
+
+    const beforeSessions = await readRawStore("storySessions");
+    const beforeLeases = await readRawStore("storyLeases");
+    await expect(
+      importStorySessions(exportFixture("conversation-existing")),
+    ).rejects.toBeInstanceOf(Error);
+    expect(await readRawStore("storySessions")).toEqual(beforeSessions);
+    expect(await readRawStore("storyLeases")).toEqual(beforeLeases);
+
+    await importStorySessions(exportFixture("conversation-imported"));
+    expect(await readStorySession("current")).toBeNull();
+    expect((await readStorySession("conversation-imported"))?.revision).toBe(1);
+    const migrated = (await readRawStore("storySessions")).find(
+      (record) =>
+        record["id"] !== "conversation-existing" && record["id"] !== "conversation-imported",
+    );
+    expect(migrated).toMatchObject({
+      revision: 7,
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      storyZh: "旧故事",
+    });
+    expect((await readRawStore("storyLeases")).find((record) => record["id"] === "current")).toBe(
+      undefined,
+    );
+    expect(
+      (await readRawStore("storyLeases")).find((record) => record["ownerId"] === "old-tab"),
+    ).toMatchObject({ ownerId: "old-tab" });
   });
 });

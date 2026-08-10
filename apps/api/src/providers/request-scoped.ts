@@ -4,7 +4,8 @@ import type {
   DailyStoryChatConfig,
   DailyStoryTtsConfig,
 } from "@kotoba/contracts";
-import { normalizeProviderBaseUrl } from "@kotoba/contracts";
+import { identifyProviderPreset, normalizeProviderBaseUrl } from "@kotoba/contracts";
+import { createStructuredGenerator } from "../capabilities/structured-generator";
 import type { Env } from "../env";
 import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
 import type { TextModel } from "../capabilities/text-model";
@@ -19,9 +20,16 @@ import {
   isDashScopeFunAsrProvider,
 } from "./dashscope-fun-asr-speech-to-text";
 import { createOpenAICompatibleTextModel } from "./openai-text-model";
+import {
+  DAILY_STORY_OPENING_MAX_TOKENS,
+  conversationSystemPrompt,
+  openingResultSchema,
+  openingUserPrompt,
+} from "../modules/daily-story/policy";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
 const AUDIO_RESPONSE_BYTES = 15 * 1024 * 1024;
+const PROVIDER_CHECK_STORY = "这是一次 provider connectivity check。";
 
 export type DailyStoryRequestProviders = {
   chat: TextModel;
@@ -62,6 +70,11 @@ export function normalizeDailyStoryProvider<T extends { baseUrl: string }>(provi
 }
 
 export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatConfig): TextModel {
+  // The browser-provided preset is only a UI hint. Derive provider-specific
+  // behavior from the canonical endpoint so DeepSeek options cannot be
+  // spoofed onto a custom endpoint, and legacy DeepSeek settings without a
+  // preset still receive the required request shape.
+  const providerPreset = identifyProviderPreset(provider.baseUrl);
   const model = createOpenAICompatibleTextModel(
     {
       baseUrl: provider.baseUrl,
@@ -71,6 +84,7 @@ export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatC
       // Retry policy lives in the pinned transport below; avoid multiplying
       // attempts with AI SDK's own retry loop.
       maxAttempts: 1,
+      ...(providerPreset === "deepseek" ? { providerPreset: "deepseek" as const } : {}),
     },
     {
       name: "daily-story-request-scoped-chat",
@@ -81,11 +95,13 @@ export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatC
     ...model,
     name: "daily-story-request-scoped-chat",
     async check(requestId?: string) {
-      await model.generate({
-        messages: [{ role: "user", content: "Reply with OK." }],
-        // Some reasoning-compatible gateways reject max_tokens=1 before
-        // producing even a short probe response.
-        maxTokens: 32,
+      await createStructuredGenerator(model).generate({
+        messages: [
+          { role: "system", content: conversationSystemPrompt },
+          { role: "user", content: openingUserPrompt(PROVIDER_CHECK_STORY) },
+        ],
+        schema: openingResultSchema,
+        maxTokens: DAILY_STORY_OPENING_MAX_TOKENS,
         requestId,
       });
     },

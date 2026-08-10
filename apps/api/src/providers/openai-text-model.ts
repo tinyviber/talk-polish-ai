@@ -7,6 +7,7 @@ export type OpenAITextModelConfig = {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  providerPreset?: "deepseek";
   timeoutMs: number;
   maxAttempts: number;
 };
@@ -38,6 +39,7 @@ export function createOpenAICompatibleTextModel(
       : {}),
   });
   const model = provider.chatModel(config.model ?? "unconfigured-model");
+  const providerName = options.name ?? "openai-compatible";
 
   return {
     name: "openai-compatible-text-model",
@@ -46,14 +48,19 @@ export function createOpenAICompatibleTextModel(
     },
     async probe() {
       requireConfigured(config);
-      await generateRequest(model, config, {
-        messages: [{ role: "user", content: "Reply with OK." }],
-        maxTokens: 1,
-      });
+      await generateRequest(
+        model,
+        config,
+        {
+          messages: [{ role: "user", content: "Reply with OK." }],
+          maxTokens: 1,
+        },
+        providerName,
+      );
     },
     async generate(input) {
       requireConfigured(config);
-      return generateRequest(model, config, input);
+      return generateRequest(model, config, input, providerName);
     },
   };
 }
@@ -62,6 +69,7 @@ async function generateRequest(
   model: ReturnType<ReturnType<typeof createOpenAICompatible>["chatModel"]>,
   config: OpenAITextModelConfig,
   input: TextModelRequest,
+  providerName: string,
 ): Promise<TextModelResponse> {
   let result: Awaited<ReturnType<typeof generateText>>;
   try {
@@ -71,15 +79,7 @@ async function generateRequest(
       messages: input.messages.filter((message) => message.role !== "system"),
       ...(input.temperature === undefined ? {} : { temperature: input.temperature }),
       ...(input.maxTokens === undefined ? {} : { maxOutputTokens: input.maxTokens }),
-      ...(input.responseFormat === "json"
-        ? {
-            // OpenAI-compatible provider forwards unknown provider options to
-            // the request body, preserving legacy JSON mode semantics.
-            providerOptions: {
-              openaiCompatible: { response_format: { type: "json_object" } },
-            },
-          }
-        : {}),
+      ...providerOptions(config, input, providerName),
       maxRetries: Math.max(0, config.maxAttempts - 1),
       timeout: config.timeoutMs,
       ...(input.requestId
@@ -105,6 +105,32 @@ async function generateRequest(
       outputTokens: numberValue(result.usage.outputTokens),
     },
   };
+}
+
+function providerOptions(
+  config: OpenAITextModelConfig,
+  input: TextModelRequest,
+  providerName: string,
+) {
+  if (input.responseFormat !== "json") return {};
+
+  return {
+    // OpenAI-compatible forwards unknown provider options to the request body.
+    // The key must match the actual provider name; request-scoped Daily Story
+    // models use a custom name instead of the default openai-compatible name.
+    providerOptions: {
+      [toProviderOptionsKey(providerName)]: {
+        response_format: { type: "json_object" },
+        ...(config.providerPreset === "deepseek"
+          ? { thinking: { type: "disabled" as const } }
+          : {}),
+      },
+    },
+  };
+}
+
+function toProviderOptionsKey(providerName: string) {
+  return providerName.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
 }
 
 function requireConfigured(config: OpenAITextModelConfig) {

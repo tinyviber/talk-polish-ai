@@ -39,6 +39,14 @@ function createObjectStoreHandle(store: StoreData, tx: ReturnType<typeof createT
         store.records.set(key, record);
         return key;
       }),
+    add: (value: Record<string, unknown>) =>
+      run(() => {
+        const record = clone(value);
+        const key = record[store.keyPath] as IDBValidKey;
+        if (store.records.has(key)) throw new Error("ConstraintError");
+        store.records.set(key, record);
+        return key;
+      }),
     delete: (key: IDBValidKey) =>
       run(() => {
         store.records.delete(key);
@@ -80,19 +88,25 @@ function createObjectStoreHandle(store: StoreData, tx: ReturnType<typeof createT
 function createTransaction(data: DatabaseData, storeNames: string[]) {
   let pending = 0;
   let completed = false;
+  let aborted = false;
 
   const tx = {
     error: null as Error | null,
     oncomplete: null as ((event: Event) => void) | null,
     onerror: null as ((event: Event) => void) | null,
     onabort: null as ((event: Event) => void) | null,
+    abort() {
+      if (completed || aborted) return;
+      aborted = true;
+      tx.onabort?.(new Event("abort"));
+    },
     begin() {
       pending += 1;
     },
     end() {
       pending -= 1;
       queueMicrotask(() => {
-        if (completed || pending > 0 || tx.error) return;
+        if (completed || aborted || pending > 0 || tx.error) return;
         completed = true;
         tx.oncomplete?.(new Event("complete"));
       });
@@ -101,6 +115,7 @@ function createTransaction(data: DatabaseData, storeNames: string[]) {
       const request = createRequest<T>();
       tx.begin();
       queueMicrotask(() => {
+        if (aborted) return;
         try {
           request.result = action();
           request.onsuccess?.(new Event("success"));

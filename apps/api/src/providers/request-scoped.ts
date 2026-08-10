@@ -4,6 +4,7 @@ import type {
   DailyStoryChatConfig,
   DailyStoryTtsConfig,
 } from "@kotoba/contracts";
+import { normalizeProviderBaseUrl } from "@kotoba/contracts";
 import type { Env } from "../env";
 import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
 import type { TextModel } from "../capabilities/text-model";
@@ -35,23 +36,21 @@ export function createDailyStoryRequestProviders(
 ): Partial<DailyStoryRequestProviders> {
   return {
     ...(input.chat
-      ? { chat: createDailyStoryTextModel(config, normalizeProvider(input.chat)) }
+      ? { chat: createDailyStoryTextModel(config, normalizeDailyStoryProvider(input.chat)) }
       : {}),
     ...(input.asr
-      ? { asr: createDailyStorySpeechToText(config, normalizeProvider(input.asr)) }
+      ? { asr: createDailyStorySpeechToText(config, normalizeDailyStoryProvider(input.asr)) }
       : {}),
     ...(input.tts
-      ? { tts: createDailyStoryTextToSpeech(config, normalizeProvider(input.tts)) }
+      ? { tts: createDailyStoryTextToSpeech(config, normalizeDailyStoryProvider(input.tts)) }
       : {}),
   };
 }
 
 /** Accept both `https://host` and the OpenAI-compatible `https://host/v1` form. */
-function normalizeProvider<T extends { baseUrl: string }>(provider: T): T {
+export function normalizeDailyStoryProvider<T extends { baseUrl: string }>(provider: T): T {
   try {
-    const url = new URL(provider.baseUrl);
-    if (url.pathname === "" || url.pathname === "/") url.pathname = "/v1/";
-    return { ...provider, baseUrl: url.toString().replace(/\/$/, "") };
+    return { ...provider, baseUrl: normalizeProviderBaseUrl(provider.baseUrl) };
   } catch {
     // URL validation remains the provider boundary's responsibility.
     return provider;
@@ -77,12 +76,13 @@ export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatC
   return {
     ...model,
     name: "daily-story-request-scoped-chat",
-    async check() {
+    async check(requestId?: string) {
       await model.generate({
         messages: [{ role: "user", content: "Reply with OK." }],
         // Some reasoning-compatible gateways reject max_tokens=1 before
         // producing even a short probe response.
         maxTokens: 32,
+        requestId,
       });
     },
   };
@@ -152,10 +152,11 @@ export function createDailyStorySpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
 ): SpeechToText {
-  if (isDashScopeCompatibleAsrUrl(provider.baseUrl)) {
-    return createDashScopeCompatibleSpeechToText(config, provider);
+  const normalizedProvider = normalizeDailyStoryProvider(provider);
+  if (isDashScopeCompatibleAsrUrl(normalizedProvider.baseUrl)) {
+    return createDashScopeCompatibleSpeechToText(config, normalizedProvider);
   }
-  return createOpenAICompatibleDailyStorySpeechToText(config, provider);
+  return createOpenAICompatibleDailyStorySpeechToText(config, normalizedProvider);
 }
 
 function createOpenAICompatibleDailyStorySpeechToText(
@@ -169,14 +170,14 @@ function createOpenAICompatibleDailyStorySpeechToText(
   const client = transport(config, provider, { maxAttempts: 1 });
   return {
     name: "daily-story-request-scoped-asr",
-    async check() {
+    async check(requestId?: string) {
       await sendTranscription(
         client,
         provider,
         silentWav(),
         "audio/wav",
         "probe.wav",
-        undefined,
+        requestId,
         config.NODE_ENV !== "production",
       );
     },
@@ -201,8 +202,8 @@ export function createDailyStoryTextToSpeech(
   const client = transport(config, provider);
   return {
     name: "daily-story-request-scoped-tts",
-    async check() {
-      await synthesize(client, provider, "ping", undefined);
+    async check(requestId?: string) {
+      await synthesize(client, provider, "ping", requestId);
     },
     async synthesize(input): Promise<SynthesizedAudio> {
       const result = await synthesize(client, provider, input.text, input.requestId, input.voice);

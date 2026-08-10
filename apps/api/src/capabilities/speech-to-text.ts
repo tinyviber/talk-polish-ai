@@ -31,6 +31,6 @@ export interface SpeechToText {
     granularity?: "text" | "segment" | "word";
     requestId?: string;
   }): Promise<Transcript>;
-  check?(): Promise<void>;
+  check?(requestId?: string): Promise<void>;
   probe?(): Promise<void>;
 }

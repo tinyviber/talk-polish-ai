@@ -8,6 +8,7 @@ import {
   startDailyStory,
   synthesizeDailyStory,
   transcribeDailyStory,
+  isDailyStoryAbortError,
 } from "./api";
 import {
   SessionConflictError,
@@ -52,6 +53,19 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
 }
 
+export function isDailyStoryCachedAudioRetryCurrent(
+  mounted: boolean,
+  retryGeneration: number,
+  currentGeneration: number,
+  pageActive = true,
+) {
+  return isDailyStoryPageActive(mounted, pageActive) && retryGeneration === currentGeneration;
+}
+
+export function isDailyStoryPageActive(mounted: boolean, pageActive: boolean) {
+  return mounted && pageActive;
+}
+
 function persistenceSignature(session: {
   phase: string;
   storyZh: string;
@@ -89,6 +103,9 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const stateRef = useRef(state);
   const ownerIdRef = useRef(createId("tab"));
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const pageActiveRef = useRef(true);
+  const generationRef = useRef(0);
   const retryRef = useRef<(() => void) | null>(null);
   const reviewInFlightRef = useRef(false);
   const blobRef = useRef<Blob | null>(null);
@@ -101,6 +118,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     const playback = ttsPlaybackRef.current;
     ttsPlaybackRef.current = null;
     releaseTransientTtsPlayback(playback);
+  }, []);
+  const invalidateCurrent = useCallback(() => {
+    generationRef.current += 1;
+    abortRef.current?.abort();
   }, []);
 
   const refreshCachedAudio = useCallback(async () => {
@@ -136,14 +157,16 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     setBusy(isDailyBusy(state.phase), "daily-story");
   }, [setBusy, state]);
 
-  useEffect(
-    () => () => {
-      abortRef.current?.abort();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pageActiveRef.current = false;
+      invalidateCurrent();
       releaseTtsPlayback();
       setBusy(false, "daily-story");
-    },
-    [releaseTtsPlayback, setBusy],
-  );
+    };
+  }, [invalidateCurrent, releaseTtsPlayback, setBusy]);
 
   useEffect(() => {
     let alive = true;
@@ -153,7 +176,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       try {
         await ensureDailyStorage();
         const session = await readStorySession(conversationId);
-        if (!alive) return;
+        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
         if (!session && !allowCompose) {
           setCanEdit(false);
           setConversationMissing(true);
@@ -162,46 +185,63 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         }
         setConversationMissing(false);
         const lease = await claimStoryLease(conversationId, owner);
-        if (!alive) return;
+        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
         leaseActive = lease;
         setCanEdit(lease);
         const settings = await readProviderSettings();
-        if (!alive) return;
+        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
         settingsRevisionRef.current = settings.revision;
         setCapabilities({ chat: !!settings.chat, asr: !!settings.asr, tts: !!settings.tts });
         persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
         dispatch({ type: "ready", session, settingsRevision: settings.revision });
       } catch (error) {
-        if (!alive) return;
+        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
         setStorageError(message(error));
         dispatch({ type: "ready", session: null, settingsRevision: settingsRevisionRef.current });
       }
     };
     void load();
+    const onPageHide = () => {
+      pageActiveRef.current = false;
+      mountedRef.current = false;
+      leaseActive = false;
+      setCanEdit(false);
+      invalidateCurrent();
+    };
+    const onPageShow = () => {
+      pageActiveRef.current = true;
+      mountedRef.current = true;
+      void load();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
     const renew = window.setInterval(() => {
-      if (!leaseActive) return;
+      if (!leaseActive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
+        return;
       void acquireStoryLease(conversationId, owner)
         .then((lease) => {
-          if (alive) {
+          if (alive && isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) {
             setCanEdit(lease);
             leaseActive = lease;
           }
         })
         .catch((error: unknown) => {
-          if (alive) setStorageError(message(error));
+          if (alive && isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
+            setStorageError(message(error));
         });
     }, 8_000);
     const unsubscribe = subscribeDailyStorage((event) => {
       if (event.kind === "settings") {
         void readProviderSettings()
           .then((settings) => {
-            if (!alive) return;
+            if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
+              return;
             setCapabilities({ chat: !!settings.chat, asr: !!settings.asr, tts: !!settings.tts });
             if (settings.revision <= settingsRevisionRef.current) return;
             const hadActiveOperation = stateRef.current.operation !== null;
             settingsRevisionRef.current = settings.revision;
             if (hadActiveOperation) {
-              abortRef.current?.abort();
+              invalidateCurrent();
               setStorageError("API 配置已在另一标签页更新。当前操作已取消，请按新配置重试。");
             }
             dispatch({ type: "settingsRevisionChanged", settingsRevision: settings.revision });
@@ -213,10 +253,11 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (event.conversationId !== conversationId || event.ownerId === owner) return;
         leaseActive = false;
         setCanEdit(false);
-        abortRef.current?.abort();
+        invalidateCurrent();
         void readStorySession(conversationId)
           .then((session) => {
-            if (!alive) return;
+            if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
+              return;
             persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
             dispatch({
               type: "ready",
@@ -231,10 +272,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       // Metadata-only signal. Reload from IndexedDB; never trust cross-tab payloads.
       setCanEdit(false);
       leaseActive = false;
-      abortRef.current?.abort();
+      invalidateCurrent();
       void readStorySession(conversationId)
         .then((session) => {
-          if (!alive) return;
+          if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
           persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
           dispatch({
             type: "ready",
@@ -246,11 +287,15 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     });
     return () => {
       alive = false;
+      pageActiveRef.current = false;
+      mountedRef.current = false;
       window.clearInterval(renew);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
       unsubscribe();
       void releaseStoryLease(conversationId, owner);
     };
-  }, [allowCompose, conversationId]);
+  }, [allowCompose, conversationId, invalidateCurrent]);
 
   useEffect(() => {
     const snapshot = snapshotDailyState(state);
@@ -274,13 +319,19 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       });
   }, [canEdit, conversationId, state]);
 
-  const guard = useCallback(() => canEdit && !isDailyBusy(stateRef.current.phase), [canEdit]);
+  const guard = useCallback(
+    () =>
+      isDailyStoryPageActive(mountedRef.current, pageActiveRef.current) &&
+      canEdit &&
+      !isDailyBusy(stateRef.current.phase),
+    [canEdit],
+  );
   const abortCurrent = useCallback(() => {
-    abortRef.current?.abort();
+    invalidateCurrent();
     const controller = new AbortController();
     abortRef.current = controller;
     return controller;
-  }, []);
+  }, [invalidateCurrent]);
   const currentSettings = useCallback(async () => {
     try {
       const settings = await readProviderSettings();
@@ -306,13 +357,17 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       });
       return;
     }
+    let operationId: string | undefined;
+    let operationSettingsRevision: number | undefined;
     try {
       const settings = await currentSettings();
+      if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
       if (!settings.chat) {
         setStorageError("开始聊天前，请先在设置中保存 Chat 配置。");
         return;
       }
-      const operationId = createId("start");
+      operationId = createId("start");
+      operationSettingsRevision = settings.revision;
       const controller = abortCurrent();
       dispatch({ type: "startRequest", operationId, settingsRevision: settings.revision, storyZh });
       const result = await startDailyStory({
@@ -327,8 +382,19 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         opening: { id: result.opening.id, role: "assistant", text: result.opening.text },
       });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      dispatch({ type: "failure", message: message(error), resumePhase: "chatting" });
+      if (
+        isDailyStoryAbortError(error) ||
+        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+      )
+        return;
+      dispatch({
+        type: "failure",
+        message: message(error),
+        resumePhase: "chatting",
+        ...(operationId && operationSettingsRevision !== undefined
+          ? { operationId, settingsRevision: operationSettingsRevision }
+          : {}),
+      });
       retryRef.current = () => void start();
     }
   }, [abortCurrent, currentSettings, guard]);
@@ -343,6 +409,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     ) => {
       const target = readAloudTarget ?? stateRef.current.readAloudTarget ?? undefined;
       if (
+        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current) ||
         !canEdit ||
         !(
           ["recording", "readingAloudRecording", "error"].includes(stateRef.current.phase) ||
@@ -357,6 +424,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       const clientAttemptId = audioOutboxAttemptRef.current ?? createId("asr");
       audioOutboxAttemptRef.current = clientAttemptId;
       const controller = abortCurrent();
+      let operationId: string | undefined;
+      let operationSettingsRevision: number | undefined;
       try {
         try {
           await putDailyStoryAudio({
@@ -376,13 +445,22 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           // unavailable, keep the direct upload path usable.
           setStorageError(`录音未能写入本地缓存，将直接上传：${message(error)}`);
         }
-        if (controller.signal.aborted) {
+        if (
+          controller.signal.aborted ||
+          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+        ) {
           await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
             () => {},
           );
           return;
         }
         const settings = await currentSettings();
+        if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) {
+          await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
+            () => {},
+          );
+          return;
+        }
         if (!settings.asr) {
           await updateDailyStoryAudio(clientAttemptId, {
             status: "queued",
@@ -393,7 +471,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           dispatch({ type: readAloud ? "resetReadAloud" : "reRecord" });
           return;
         }
-        const operationId = createId(readAloud ? "read" : "asr");
+        operationId = createId(readAloud ? "read" : "asr");
+        operationSettingsRevision = settings.revision;
         dispatch({
           type: "transcribeRequest",
           operationId,
@@ -426,7 +505,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           transcript: { id: createId(readAloud ? "read" : "asr"), source: "asr", text },
         });
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
+        if (
+          isDailyStoryAbortError(error) ||
+          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+        ) {
           await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
             () => {},
           );
@@ -441,6 +523,9 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           type: "failure",
           message: message(error),
           resumePhase: readAloud ? "review" : "chatting",
+          ...(operationId && operationSettingsRevision !== undefined
+            ? { operationId, settingsRevision: operationSettingsRevision }
+            : {}),
         });
         retryRef.current = () => {
           if (blobRef.current)
@@ -454,20 +539,44 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const retryCachedAudio = useCallback(() => {
     const attemptId = cachedAudio?.clientAttemptId;
     if (!canEdit || !attemptId) return;
+    const retryGeneration = generationRef.current;
     void getDailyStoryAudio(attemptId)
       .then((item) => {
+        if (
+          !isDailyStoryCachedAudioRetryCurrent(
+            mountedRef.current,
+            retryGeneration,
+            generationRef.current,
+            pageActiveRef.current,
+          )
+        )
+          return;
         if (!item) throw new Error("找不到缓存录音。录音可能已超过 7 天或已被清理。");
         blobRef.current = item.blob;
         audioOutboxAttemptRef.current = item.clientAttemptId;
         const readAloud = item.purpose === "readAloud";
         return transcribe(item.blob, readAloud, item.durationSec, true, item.readAloudTarget);
       })
-      .catch((error: unknown) => setStorageError(message(error)));
+      .catch((error: unknown) => {
+        if (
+          isDailyStoryCachedAudioRetryCurrent(
+            mountedRef.current,
+            retryGeneration,
+            generationRef.current,
+            pageActiveRef.current,
+          )
+        )
+          setStorageError(message(error));
+      });
   }, [cachedAudio, canEdit, transcribe]);
 
   const send = useCallback(
     async (source: TurnSource, rawText: string): Promise<boolean> => {
-      if (!guard() && stateRef.current.phase !== "error") return false;
+      if (
+        (!guard() && stateRef.current.phase !== "error") ||
+        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+      )
+        return false;
       const text = rawText.trim();
       if (!text) return false;
       if (text.length > DAILY_STORY_TURN_MAX) {
@@ -475,13 +584,17 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         return false;
       }
       const turn = { id: stateRef.current.pendingTranscript?.id ?? createId(source), source, text };
+      let operationId: string | undefined;
+      let operationSettingsRevision: number | undefined;
       try {
         const settings = await currentSettings();
+        if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return false;
         if (!settings.chat) {
           setStorageError("请先在设置中保存 Chat 配置。");
           return false;
         }
-        const operationId = createId("reply");
+        operationId = createId("reply");
+        operationSettingsRevision = settings.revision;
         const controller = abortCurrent();
         dispatch({ type: "sendRequest", operationId, settingsRevision: settings.revision, turn });
         const result = await replyDailyStory({
@@ -500,8 +613,19 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         });
         return true;
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return false;
-        dispatch({ type: "failure", message: message(error), resumePhase: "chatting" });
+        if (
+          isDailyStoryAbortError(error) ||
+          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+        )
+          return false;
+        dispatch({
+          type: "failure",
+          message: message(error),
+          resumePhase: "chatting",
+          ...(operationId && operationSettingsRevision !== undefined
+            ? { operationId, settingsRevision: operationSettingsRevision }
+            : {}),
+        });
         retryRef.current = () => void send(source, rawText);
         return false;
       }
@@ -515,10 +639,14 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     if (!current.messages.some((item) => item.role === "user" && item.text.trim())) return;
     if (reviewInFlightRef.current) return;
     reviewInFlightRef.current = true;
+    let operationId: string | undefined;
+    let operationSettingsRevision: number | undefined;
     try {
       const settings = await currentSettings();
+      if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
       if (!settings.chat) return;
-      const operationId = createId("review");
+      operationId = createId("review");
+      operationSettingsRevision = settings.revision;
       const controller = abortCurrent();
       dispatch({ type: "reviewRequest", operationId, settingsRevision: settings.revision });
       const review = await reviewDailyStory({
@@ -529,8 +657,19 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       });
       dispatch({ type: "reviewSuccess", operationId, settingsRevision: settings.revision, review });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      dispatch({ type: "failure", message: message(error), resumePhase: "chatting" });
+      if (
+        isDailyStoryAbortError(error) ||
+        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+      )
+        return;
+      dispatch({
+        type: "failure",
+        message: message(error),
+        resumePhase: "chatting",
+        ...(operationId && operationSettingsRevision !== undefined
+          ? { operationId, settingsRevision: operationSettingsRevision }
+          : {}),
+      });
       retryRef.current = () => void finish();
     } finally {
       reviewInFlightRef.current = false;
@@ -587,7 +726,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           throw error;
         }
       } catch (error) {
-        if (!(error instanceof DOMException && error.name === "AbortError"))
+        if (
+          !isDailyStoryAbortError(error) &&
+          isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+        )
           setStorageError(message(error));
       }
     },
@@ -619,7 +761,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const newStory = useCallback(async () => {
     if (stateRef.current.messages.length && !window.confirm("开始新故事会放弃当前对话。继续吗？"))
       return;
-    abortRef.current?.abort();
+    invalidateCurrent();
     blobRef.current = null;
     audioOutboxAttemptRef.current = null;
     persistenceSignatureRef.current = null;
@@ -630,7 +772,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       return;
     }
     dispatch({ type: "newStory" });
-  }, [conversationId]);
+  }, [conversationId, invalidateCurrent]);
 
   return {
     state,

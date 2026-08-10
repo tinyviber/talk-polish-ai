@@ -49,6 +49,31 @@ export class DailyApiError extends Error {
   }
 }
 
+export class DailyApiAbortedError extends Error {
+  constructor() {
+    super("Daily Story 请求已取消。");
+    this.name = "AbortError";
+  }
+}
+
+export function isDailyStoryAbortError(error: unknown): error is DailyApiAbortedError {
+  return (
+    error instanceof DailyApiAbortedError ||
+    (typeof DOMException !== "undefined" &&
+      error instanceof DOMException &&
+      error.name === "AbortError")
+  );
+}
+
+export function dailyApiErrorFromTransport(error: unknown, signal?: AbortSignal) {
+  // fetchWithRetry uses status 0 for both caller cancellation and transport
+  // failures. Only an already-aborted caller signal is an AbortError; a
+  // timeout or ordinary network failure must remain visible as failure.
+  if (signal?.aborted || isDailyStoryAbortError(error)) return new DailyApiAbortedError();
+  if (error instanceof ApiClientError) return new DailyApiError(error.status);
+  return new DailyApiError(0);
+}
+
 function dailyErrorMessage(status: number) {
   if (status === 401 || status === 403) return "配置验证失败。请检查对应服务的 API Key。";
   if (status === 429) return "请求过于频繁。请稍后重试。";
@@ -87,9 +112,7 @@ async function request<T>(
       ...(signal ? { signal } : {}),
     });
   } catch (error) {
-    if (error instanceof ApiClientError) throw new DailyApiError(error.status);
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new DailyApiError(0);
+    throw dailyApiErrorFromTransport(error, signal);
   }
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
@@ -204,9 +227,7 @@ export async function synthesizeDailyStory(input: {
       ...(input.signal ? { signal: input.signal } : {}),
     });
   } catch (error) {
-    if (error instanceof ApiClientError) throw new DailyApiError(error.status);
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new DailyApiError(0);
+    throw dailyApiErrorFromTransport(error, input.signal);
   }
   if (!response.ok) throw new DailyApiError(response.status);
   if (!response.headers.get("content-type")?.toLowerCase().startsWith("audio/")) {

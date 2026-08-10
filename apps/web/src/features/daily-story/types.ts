@@ -1,9 +1,13 @@
+import type { ProviderPresetId } from "@kotoba/contracts";
+
 export type DailyCapability = "chat" | "asr" | "tts";
 
 export type ChatProvider = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Optional identity; omitted by legacy browser settings. */
+  preset?: ProviderPresetId;
 };
 
 export type AsrProvider = ChatProvider & {

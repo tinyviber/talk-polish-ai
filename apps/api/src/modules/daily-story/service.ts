@@ -249,7 +249,7 @@ export function createDailyStoryService(
                 : input.request.capability === "asr"
                   ? providers.asr
                   : providers.tts;
-            await required(provider).check?.();
+            await required(provider).check?.(input.requestId);
             return { capability: input.request.capability, status: "connected" as const };
           }),
         true,

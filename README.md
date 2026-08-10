@@ -55,17 +55,36 @@ always go through its same-origin API routes.
 - `POST /api/daily-story/provider-check`
 
 Provider configuration is validated per capability. Production accepts only
-server-owned DeepSeek/SiliconFlow/DashScope origins by default; development
+server-owned OpenAI/DeepSeek/SiliconFlow/DashScope origins by default; development
 still uses HTTPS-only, public-DNS, address-pinned transport. Failures return
 safe generic categories and never expose keys or upstream response bodies.
 
-For Alibaba Cloud Model Studio (DashScope) ASR, use its Beijing workspace's
-OpenAI-compatible endpoint and a Qwen3-ASR-Flash model:
+The Settings page uses three provider presets: OpenAI Compatible, DeepSeek, and
+阿里百炼. Every saved Base URL is canonicalized to end in `/v1`; users may
+still edit the endpoint and model for compatible gateways. DeepSeek supports
+Chat only. 阿里百炼 supports Chat and Qwen3-ASR; its TTS option is not enabled
+yet. Existing browser settings without a preset are inferred and normalized on
+read/save, without moving keys out of IndexedDB.
+
+Recommended preset endpoints:
 
 ```text
-Base URL: https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+OpenAI Compatible: https://api.openai.com/v1
+DeepSeek:          https://api.deepseek.com/v1
+阿里百炼:          https://dashscope.aliyuncs.com/compatible-mode/v1
+```
+
+For Alibaba Cloud Model Studio (DashScope) ASR, use its OpenAI-compatible
+endpoint and a Qwen3-ASR-Flash model:
+
+```text
+Base URL: https://dashscope.aliyuncs.com/compatible-mode/v1
 Model: qwen3-asr-flash
 ```
+
+For a Beijing workspace-dedicated endpoint, replace the shared hostname with
+`https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`.
+Production accepts only this exact DashScope workspace hostname shape.
 
 This adapter sends audio as a Base64 Data URL in `chat/completions`, matching
 DashScope's OpenAI-compatible ASR API. It is distinct from the multipart

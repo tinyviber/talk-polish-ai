@@ -15,6 +15,51 @@ import {
 
 let restore: () => void;
 
+async function seedRawSettings(record: Record<string, unknown>) {
+  const request = indexedDB.open("kotoba-loop-settings", 2);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction("providerSettings", "readwrite");
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+    transaction.onabort = () => {
+      db.close();
+      reject(transaction.error);
+    };
+    transaction.objectStore("providerSettings").put(record);
+  });
+}
+
+async function readRawSettings() {
+  const request = indexedDB.open("kotoba-loop-settings", 2);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+    const transaction = db.transaction("providerSettings", "readonly");
+    const read = transaction.objectStore("providerSettings").get("current");
+    read.onsuccess = () => {
+      db.close();
+      resolve(read.result as Record<string, unknown> | undefined);
+    };
+    read.onerror = () => {
+      db.close();
+      reject(read.error);
+    };
+  });
+}
+
 beforeAll(() => {
   restore = installFakeIndexedDb();
 });
@@ -34,6 +79,98 @@ describe("Daily Story IndexedDB", () => {
     const cleared = await clearProvider("chat");
     expect(cleared.revision).toBe(2);
     expect((await readProviderSettings()).chat).toBeUndefined();
+  });
+
+  test("normalizes legacy endpoint and infers provider preset on save", async () => {
+    const saved = await saveProvider("chat", {
+      baseUrl: "https://api.deepseek.com/",
+      apiKey: "deepseek-key",
+      model: "deepseek-v4-flash",
+      preset: "openai-compatible",
+    });
+    expect(saved.chat?.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(saved.chat?.preset).toBe("deepseek");
+  });
+
+  test("rejects known providers that do not support the selected capability", async () => {
+    expect(() =>
+      saveProvider("asr", {
+        baseUrl: "https://api.deepseek.com/v1",
+        apiKey: "deepseek-key",
+        model: "deepseek-v4-flash",
+      }),
+    ).toThrow();
+    expect(() =>
+      saveProvider("tts", {
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        apiKey: "dashscope-key",
+        model: "qwen-plus",
+        voice: "alloy",
+      }),
+    ).toThrow();
+  });
+
+  test("does not persist a preset for an unknown custom endpoint", async () => {
+    const saved = await saveProvider("chat", {
+      baseUrl: "https://provider.example.com/v1",
+      apiKey: "custom-key",
+      model: "custom-model",
+      preset: "openai-compatible",
+    });
+
+    expect(saved.chat).not.toHaveProperty("preset");
+    expect((await readProviderSettings()).chat).not.toHaveProperty("preset");
+  });
+
+  test("drops stale raw presets for custom endpoints and infers known endpoints", async () => {
+    await seedRawSettings({
+      id: "current",
+      schemaVersion: 1,
+      revision: 9,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      chat: {
+        baseUrl: "https://provider.example.com/custom",
+        apiKey: "custom-key",
+        model: "custom-model",
+        preset: "openai-compatible",
+      },
+      asr: {
+        baseUrl: "https://api.deepseek.com",
+        apiKey: "deepseek-key",
+        model: "deepseek-model",
+        preset: "openai-compatible",
+        responseFormat: "json",
+      },
+    });
+
+    const settings = await readProviderSettings();
+
+    expect(settings.chat).toEqual({
+      baseUrl: "https://provider.example.com/custom/v1",
+      apiKey: "custom-key",
+      model: "custom-model",
+    });
+    expect(settings.chat).not.toHaveProperty("preset");
+    expect(settings.asr?.preset).toBe("deepseek");
+
+    expect(await readRawSettings()).toEqual({
+      id: "current",
+      schemaVersion: 1,
+      revision: 9,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      chat: {
+        baseUrl: "https://provider.example.com/custom/v1",
+        apiKey: "custom-key",
+        model: "custom-model",
+      },
+      asr: {
+        baseUrl: "https://api.deepseek.com/v1",
+        apiKey: "deepseek-key",
+        model: "deepseek-model",
+        preset: "deepseek",
+        responseFormat: "json",
+      },
+    });
   });
 
   test("uses revision CAS for stable story snapshots", async () => {

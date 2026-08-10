@@ -1,23 +1,12 @@
-import type { DailyStoryAsrConfig } from "@kotoba/contracts";
+import { identifyProviderPreset, type DailyStoryAsrConfig } from "@kotoba/contracts";
 import type { Env } from "../env";
 import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
 import { DailyProviderRequestError, createDailySafeHttpsClient } from "./safe-https-client";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
-const DASHSCOPE_COMPATIBLE_HOST_SUFFIX = ".cn-beijing.maas.aliyuncs.com";
-
 /** Detect the Beijing DashScope OpenAI-compatible ASR endpoint. */
 export function isDashScopeCompatibleAsrUrl(value: string) {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      url.hostname.endsWith(DASHSCOPE_COMPATIBLE_HOST_SUFFIX) &&
-      url.pathname.replace(/\/+$/, "") === "/compatible-mode/v1"
-    );
-  } catch {
-    return false;
-  }
+  return identifyProviderPreset(value) === "dashscope-compatible";
 }
 
 /** Pure ASR transport for DashScope's chat-completions-compatible interface. */
@@ -43,8 +32,8 @@ export function createDashScopeCompatibleSpeechToText(
 
   return {
     name: "dashscope-compatible-asr",
-    async check() {
-      await requestDashScopeAsr(client, provider, silentWav(), "audio/wav", "en");
+    async check(requestId?: string) {
+      await requestDashScopeAsr(client, provider, silentWav(), "audio/wav", "en", requestId);
     },
     async transcribe(input) {
       const response = await requestDashScopeAsr(
@@ -123,17 +112,19 @@ async function requestDashScopeAsr(
 }
 
 function contentText(value: unknown): string | undefined {
-  if (typeof value === "string") return value.trim() || undefined;
-  if (!Array.isArray(value)) return undefined;
-  const text = value
-    .flatMap((item) => {
-      if (typeof item === "string") return [item];
-      const record = asRecord(item);
-      return typeof record?.text === "string" ? [record.text] : [];
-    })
-    .join("")
-    .trim();
-  return text || undefined;
+  const text =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value)
+        ? value
+            .flatMap((item) => {
+              if (typeof item === "string") return [item];
+              const record = asRecord(item);
+              return typeof record?.text === "string" ? [record.text] : [];
+            })
+            .join("")
+        : undefined;
+  return text?.trim() ? text : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -1,11 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
+  dailyProviderBaseUrlSchema,
+  dailyStoryAsrConfigSchema,
+  dailyStoryChatConfigSchema,
   dailyStoryProviderCheckRequestSchema,
   dailyStoryReplyRequestSchema,
   dailyStoryReviewSuggestionSchema,
+  dailyStoryTtsConfigSchema,
 } from "./daily-story";
 
-const chat = { baseUrl: "https://api.example.com/v1", apiKey: "test-key", model: "chat" };
+const chat = {
+  baseUrl: "https://api.example.com/v1",
+  apiKey: "test-key",
+  model: "chat",
+  preset: "openai-compatible" as const,
+};
 
 describe("Daily Story contracts", () => {
   test("keeps provider checks capability-discriminated and strict", () => {
@@ -21,6 +30,127 @@ describe("Daily Story contracts", () => {
         provider: { ...chat, voice: "alloy" },
       }).success,
     ).toBe(false);
+  });
+
+  test("rejects provider capability combinations that have no adapter", () => {
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "asr",
+        provider: {
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test-key",
+          model: "deepseek-v4-flash",
+          preset: "deepseek",
+        },
+      }).success,
+    ).toBe(false);
+
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "asr",
+        provider: {
+          baseUrl: "https://provider.example.com/custom/v1",
+          apiKey: "test-key",
+          model: "asr-model",
+          preset: "deepseek",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "tts",
+        provider: {
+          baseUrl: "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+          apiKey: "test-key",
+          model: "qwen-plus",
+          preset: "dashscope-compatible",
+          voice: "alloy",
+        },
+      }).success,
+    ).toBe(false);
+
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "tts",
+        provider: {
+          baseUrl: "https://provider.example.com/custom/v1",
+          apiKey: "test-key",
+          model: "tts-model",
+          preset: "dashscope-compatible",
+          voice: "alloy",
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  test("rejects stale presets for known endpoints but permits custom metadata", () => {
+    expect(
+      dailyStoryChatConfigSchema.safeParse({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "chat",
+        preset: "dashscope-compatible",
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryAsrConfigSchema.safeParse({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "whisper-1",
+        preset: "deepseek",
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryTtsConfigSchema.safeParse({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "tts",
+        preset: "dashscope-compatible",
+        voice: "alloy",
+      }).success,
+    ).toBe(false);
+
+    const customBaseUrl = "https://provider.example.com/custom/v1";
+    expect(
+      dailyStoryChatConfigSchema.safeParse({
+        baseUrl: customBaseUrl,
+        apiKey: "test-key",
+        model: "chat",
+        preset: "dashscope-compatible",
+      }).success,
+    ).toBe(true);
+    expect(
+      dailyStoryAsrConfigSchema.safeParse({
+        baseUrl: customBaseUrl,
+        apiKey: "test-key",
+        model: "asr",
+        preset: "deepseek",
+      }).success,
+    ).toBe(true);
+    expect(
+      dailyStoryTtsConfigSchema.safeParse({
+        baseUrl: customBaseUrl,
+        apiKey: "test-key",
+        model: "tts",
+        preset: "dashscope-compatible",
+        voice: "alloy",
+      }).success,
+    ).toBe(true);
+  });
+
+  test("normalizes legacy provider roots at the contract boundary", () => {
+    expect(dailyProviderBaseUrlSchema.parse(" https://api.deepseek.com/ ")).toBe(
+      "https://api.deepseek.com/v1",
+    );
+    expect(
+      dailyProviderBaseUrlSchema.parse(
+        "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      ),
+    ).toBe("https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
+    expect(dailyProviderBaseUrlSchema.safeParse("http://api.example.com").success).toBe(false);
+    expect(dailyProviderBaseUrlSchema.safeParse("https://api.example.com?key=secret").success).toBe(
+      false,
+    );
   });
 
   test("keeps typed turns distinct and rejects duplicate history ids", () => {

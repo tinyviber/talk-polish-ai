@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { resolve4, resolve6 } from "node:dns/promises";
+import { normalizeProviderBaseUrl } from "@kotoba/contracts";
 
 export class DailyProviderConfigurationError extends Error {
   readonly code = "daily_provider_configuration";
@@ -36,12 +37,14 @@ type DnsResolver = {
 };
 
 const nodeResolver: DnsResolver = { resolve4, resolve6 };
+const DASHSCOPE_WORKSPACE_HOST =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/;
 
 /** Parse once. Dynamic URLs must be canonical HTTPS DNS names with no escape hatches. */
 export function parseDailyProviderBaseUrl(value: string): DailyProviderTarget {
   let baseUrl: URL;
   try {
-    baseUrl = new URL(value);
+    baseUrl = new URL(normalizeProviderBaseUrl(value));
   } catch {
     throw new DailyProviderConfigurationError();
   }
@@ -108,7 +111,11 @@ export function assertDailyProviderUrlAllowed(value: string, policy: DailyProvid
       }
     }),
   );
-  if (!allowedOrigins.has(target.origin)) throw new DailyProviderConfigurationError();
+  const isAllowedDashScopeWorkspace =
+    target.basePath === "/compatible-mode/v1/" && DASHSCOPE_WORKSPACE_HOST.test(target.hostname);
+  if (!allowedOrigins.has(target.origin) && !isAllowedDashScopeWorkspace) {
+    throw new DailyProviderConfigurationError();
+  }
   return target;
 }
 
@@ -166,6 +173,9 @@ function isPublicIpv4(address: string) {
   if (a === 169 && b === 254) return false; // link-local / cloud metadata
   if (a === 172 && b >= 16 && b <= 31) return false;
   if (a === 192 && (b === 0 || b === 168 || b === 88 || b === 175)) return false;
+  if (a === 192 && ((b === 31 && parts[2] === 196) || (b === 52 && parts[2] === 193))) {
+    return false;
+  }
   if (a === 198 && (b === 18 || b === 19 || b === 51)) return false;
   if (a === 203 && b === 0) return false;
   return true;
@@ -174,13 +184,25 @@ function isPublicIpv4(address: string) {
 function isPublicIpv6(address: string) {
   const value = ipv6ToBigInt(address);
   if (value === undefined || value === 0n || value === 1n) return false;
+  // Only the assigned global-unicast block is a valid public destination.
+  if (!inIpv6Range(value, "20000000000000000000000000000000", 3)) return false;
   // IPv4-mapped answers are not useful as IPv6 transport and evade v4 policy.
   if (inIpv6Range(value, "00000000000000000000ffff00000000", 96)) return false;
+  // Deprecated IPv4-compatible and NAT64/IPv4-translation addresses are not
+  // ordinary IPv6 provider destinations.
+  if (inIpv6Range(value, "00000000000000000000000000000000", 96)) return false;
+  if (inIpv6Range(value, "0064ff9b000000000000000000000000", 96)) return false;
+  if (inIpv6Range(value, "0064ff9b000100000000000000000000", 48)) return false;
+  // IETF protocol assignments (including Teredo, benchmarking, and ORCHID)
+  // and 6to4 are special-purpose/tunnel address space, not provider origins.
+  if (inIpv6Range(value, "20010000000000000000000000000000", 23)) return false;
+  if (inIpv6Range(value, "20020000000000000000000000000000", 16)) return false;
   if (inIpv6Range(value, "fc000000000000000000000000000000", 7)) return false; // ULA
   if (inIpv6Range(value, "fe800000000000000000000000000000", 10)) return false; // link-local
   if (inIpv6Range(value, "ff000000000000000000000000000000", 8)) return false; // multicast
   if (inIpv6Range(value, "20010db8000000000000000000000000", 32)) return false; // documentation
   if (inIpv6Range(value, "20010002000000000000000000000000", 48)) return false; // benchmarking
+  if (inIpv6Range(value, "3ffe0000000000000000000000000000", 16)) return false; // special-purpose
   if (inIpv6Range(value, "3fff0000000000000000000000000000", 20)) return false; // documentation
   return true;
 }

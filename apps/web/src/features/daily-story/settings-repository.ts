@@ -1,4 +1,14 @@
 import { z } from "zod";
+import {
+  DAILY_STORY_LIMITS,
+  dailyStoryAsrConfigSchema,
+  dailyStoryChatConfigSchema,
+  dailyStoryTtsConfigSchema,
+  identifyProviderPreset,
+  normalizeProviderBaseUrl,
+  providerPresetIdSchema,
+  type ProviderPresetId,
+} from "@kotoba/contracts";
 import type {
   AsrProvider,
   ChatProvider,
@@ -20,9 +30,10 @@ const LEASE_MS = 15_000;
 
 const providerSchema = z
   .object({
-    baseUrl: z.string().trim().min(1).max(500),
-    apiKey: z.string().min(1).max(1_000),
-    model: z.string().trim().min(1).max(200),
+    baseUrl: z.string().trim().min(1).max(DAILY_STORY_LIMITS.providerUrlChars),
+    apiKey: z.string().min(1).max(DAILY_STORY_LIMITS.providerKeyChars),
+    model: z.string().trim().min(1).max(DAILY_STORY_LIMITS.modelChars),
+    preset: providerPresetIdSchema.optional(),
   })
   .strict();
 const settingsSchema = z
@@ -33,16 +44,18 @@ const settingsSchema = z
     updatedAt: z.string().datetime(),
     chat: providerSchema.optional(),
     asr: providerSchema
-      .extend({ responseFormat: z.string().trim().min(1).max(100).optional() })
+      .extend({ responseFormat: z.enum(["json", "verbose_json"]).optional() })
       .optional(),
-    tts: providerSchema.extend({ voice: z.string().trim().min(1).max(200) }).optional(),
+    tts: providerSchema
+      .extend({ voice: z.string().trim().min(1).max(DAILY_STORY_LIMITS.voiceChars) })
+      .optional(),
   })
   .strict();
 const messageSchema = z
   .object({
-    id: z.string().min(1).max(160),
+    id: z.string().min(1).max(128),
     role: z.enum(["assistant", "user"]),
-    text: z.string().min(1).max(8_000),
+    text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
     source: z.enum(["asr", "typed"]).optional(),
   })
   .strict();
@@ -54,9 +67,12 @@ const sessionSchema = z
     updatedAt: z.string().datetime(),
     phase: z.enum(["chatting", "transcriptReady", "review"]),
     storyZh: z.string().min(1).max(4_000),
-    messages: z.array(messageSchema).max(30),
+    messages: z.array(messageSchema).max(DAILY_STORY_LIMITS.historyMessages),
     pendingAsrTranscript: z
-      .object({ id: z.string().min(1).max(160), text: z.string().min(1).max(8_000) })
+      .object({
+        id: z.string().min(1).max(128),
+        text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+      })
       .strict()
       .optional(),
     review: z
@@ -65,13 +81,13 @@ const sessionSchema = z
           .array(
             z
               .object({
-                sourceTurnId: z.string().min(1).max(160),
-                original: z.string().min(1).max(8_000),
-                improved: z.string().min(1).max(8_000),
+                sourceTurnId: z.string().min(1).max(128),
+                original: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+                improved: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
                 // Existing local review snapshots predate category. Defaulting
                 // keeps them recoverable; next write stores the explicit value.
                 category: z.enum(["clarity", "grammar", "naturalness"]).default("naturalness"),
-                explanationZh: z.string().min(1).max(1_000),
+                explanationZh: z.string().min(1).max(600),
               })
               .strict(),
           )
@@ -117,7 +133,7 @@ const listeners = new Set<(event: DailyStorageEvent) => void>();
 function database() {
   if (typeof indexedDB === "undefined") return Promise.reject(new DailyStorageError());
   if (!openPromise) {
-    openPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const pendingPromise = new Promise<IDBDatabase>((resolve, reject) => {
       let request: IDBOpenDBRequest;
       try {
         request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -134,19 +150,35 @@ function database() {
         if (!db.objectStoreNames.contains(LEASE_STORE))
           db.createObjectStore(LEASE_STORE, { keyPath: "id" });
       };
-      request.onblocked = () =>
+      request.onblocked = () => {
+        reset();
         reject(
           new DailyStorageError(
             "浏览器正在阻止设置数据库升级。请关闭其它打开此应用的标签页后重试。",
           ),
         );
-      request.onerror = () => reject(new DailyStorageError());
+      };
+      request.onerror = () => {
+        reset();
+        reject(new DailyStorageError());
+      };
       request.onsuccess = () => {
         const db = request.result;
-        db.onversionchange = () => db.close();
+        db.onversionchange = () => {
+          db.close();
+          reset();
+        };
         resolve(db);
       };
     });
+    const reset = () => {
+      if (openPromise === trackedPromise) openPromise = undefined;
+    };
+    const trackedPromise = pendingPromise.catch((error: unknown) => {
+      reset();
+      throw error;
+    });
+    openPromise = trackedPromise;
   }
   return openPromise;
 }
@@ -200,21 +232,48 @@ function notifyLease(conversationId: string, ownerId: string) {
 }
 
 function fromStoredSettings(value: StoredSettings): ProviderSettings {
+  const normalize = <
+    T extends {
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      preset?: ProviderPresetId | undefined;
+    },
+  >(
+    provider: T,
+  ): Omit<T, "preset"> & { preset?: ProviderPresetId } => {
+    let baseUrl = provider.baseUrl.trim();
+    try {
+      baseUrl = normalizeProviderBaseUrl(baseUrl);
+    } catch {
+      // Preserve malformed legacy data so the user can repair it in Settings.
+    }
+    const preset = identifyProviderPreset(baseUrl);
+    const { preset: _storedPreset, ...providerWithoutPreset } = provider;
+    return {
+      ...providerWithoutPreset,
+      baseUrl,
+      ...(preset ? { preset } : {}),
+    };
+  };
   const asr = value.asr
-    ? {
+    ? normalize({
         baseUrl: value.asr.baseUrl,
         apiKey: value.asr.apiKey,
         model: value.asr.model,
+        ...(value.asr.preset ? { preset: value.asr.preset } : {}),
         ...(value.asr.responseFormat ? { responseFormat: value.asr.responseFormat } : {}),
-      }
+      })
     : undefined;
+  const chat = value.chat ? normalize(value.chat) : undefined;
+  const tts = value.tts ? normalize(value.tts) : undefined;
   return {
     schemaVersion: value.schemaVersion,
     revision: value.revision,
     updatedAt: value.updatedAt,
-    ...(value.chat ? { chat: value.chat } : {}),
+    ...(chat ? { chat } : {}),
     ...(asr ? { asr } : {}),
-    ...(value.tts ? { tts: value.tts } : {}),
+    ...(tts ? { tts } : {}),
   };
 }
 
@@ -240,8 +299,61 @@ function settingsRecord(settings: ProviderSettings): StoredSettings {
   return settingsSchema.parse({ id: CURRENT, ...settings });
 }
 
+function sameValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => sameValue(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+        sameValue(leftRecord[key], rightRecord[key]),
+    )
+  );
+}
+
 function sessionRecord(session: StorySession, conversationId: string): StoredSession {
   return sessionSchema.parse({ id: conversationId, ...session });
+}
+
+function normalizeProviderForStorage<T extends ChatProvider>(provider: T): T {
+  try {
+    const baseUrl = normalizeProviderBaseUrl(provider.baseUrl);
+    if (!baseUrl.startsWith("https://")) throw new TypeError("HTTPS required");
+    const preset = identifyProviderPreset(baseUrl);
+    const { preset: _providedPreset, ...providerWithoutPreset } = provider;
+    return {
+      ...providerWithoutPreset,
+      baseUrl,
+      ...(preset ? { preset } : {}),
+    } as T;
+  } catch {
+    throw new DailyStorageError("Endpoint 必须是有效的 HTTPS Base URL。请检查地址后重试。");
+  }
+}
+
+function validateProviderForStorage(
+  capability: DailyCapability,
+  provider: ChatProvider | AsrProvider | TtsProvider,
+) {
+  try {
+    if (capability === "chat") return dailyStoryChatConfigSchema.parse(provider);
+    if (capability === "asr") return dailyStoryAsrConfigSchema.parse(provider);
+    return dailyStoryTtsConfigSchema.parse(provider);
+  } catch {
+    const label = capability === "chat" ? "Chat" : capability.toUpperCase();
+    throw new DailyStorageError(
+      `${label} 配置与当前 provider 能力或 Daily Story 参数限制不匹配，请检查 endpoint、model、API Key${capability === "asr" ? " 和 responseFormat" : capability === "tts" ? " 和 voice" : ""} 后重试。`,
+    );
+  }
 }
 
 export async function ensureDailyStorage() {
@@ -250,8 +362,9 @@ export async function ensureDailyStorage() {
 }
 
 export async function readProviderSettings(): Promise<ProviderSettings> {
-  const result = await transaction<ProviderSettings>(SETTINGS_STORE, "readonly", (tx) => {
-    const request = tx.objectStore(SETTINGS_STORE).get(CURRENT);
+  const result = await transaction<ProviderSettings>(SETTINGS_STORE, "readwrite", (tx) => {
+    const store = tx.objectStore(SETTINGS_STORE);
+    const request = store.get(CURRENT);
     request.onsuccess = () => {
       const record = request.result as unknown;
       const defaultSettings: ProviderSettings = {
@@ -259,10 +372,19 @@ export async function readProviderSettings(): Promise<ProviderSettings> {
         revision: 0,
         updatedAt: new Date(0).toISOString(),
       };
-      setResult(
-        tx,
-        record === undefined ? defaultSettings : fromStoredSettings(settingsSchema.parse(record)),
-      );
+      if (record === undefined) {
+        setResult(tx, defaultSettings);
+        return;
+      }
+      const parsed = settingsSchema.parse(record);
+      const normalized = fromStoredSettings(parsed);
+      const canonical = settingsRecord(normalized);
+      if (sameValue(parsed, canonical)) {
+        setResult(tx, normalized);
+        return;
+      }
+      const write = store.put(canonical);
+      write.onsuccess = () => setResult(tx, normalized);
     };
   });
   return result;
@@ -301,15 +423,25 @@ export function saveProvider(
   provider: ProviderSettings[DailyCapability],
 ) {
   if (!provider) throw new DailyStorageError("配置不完整，无法保存。");
+  const normalized = normalizeProviderForStorage(provider);
+  const validated = validateProviderForStorage(capability, normalized);
   return writeProviderSettings(
     (current) =>
       ({
         ...(current.chat ? { chat: current.chat } : {}),
         ...(current.asr ? { asr: current.asr } : {}),
         ...(current.tts ? { tts: current.tts } : {}),
-        [capability]: provider,
+        [capability]: validated,
       }) as Omit<ProviderSettings, "schemaVersion" | "revision" | "updatedAt">,
   );
+}
+
+/** Test-only seam: close the cached connection so open failure recovery is measurable. */
+export async function __resetDailyStorageForTests() {
+  const pending = openPromise;
+  openPromise = undefined;
+  const db = await pending?.catch(() => undefined);
+  db?.close();
 }
 
 export function clearProvider(capability: DailyCapability) {

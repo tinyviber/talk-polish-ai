@@ -111,6 +111,24 @@ if [[ -z "$old_sha" ]]; then
   api_changed=1
   deps_changed=1
 fi
+package_dependency_fingerprint() {
+  "$BUN_BIN" -e '
+    const raw = await new Response(Bun.stdin.stream()).text();
+    const packageJson = JSON.parse(raw);
+    delete packageJson.scripts;
+    process.stdout.write(JSON.stringify(packageJson));
+  '
+}
+
+package_dependency_manifest_changed() {
+  local path="$1" old_fingerprint new_fingerprint
+  if [[ "$path" == bun.lock || "$path" == bunfig.toml ]]; then return 0; fi
+  if ! git --git-dir="$REPO_DIR" cat-file -e "$old_sha:$path" 2>/dev/null; then return 0; fi
+  old_fingerprint="$(git --git-dir="$REPO_DIR" show "$old_sha:$path" | package_dependency_fingerprint)"
+  new_fingerprint="$(git --git-dir="$REPO_DIR" show "$TARGET_SHA:$path" | package_dependency_fingerprint)"
+  [[ "$old_fingerprint" != "$new_fingerprint" ]]
+}
+
 for path in "${changed_paths[@]}"; do
   case "$path" in
     apps/web/*) web_changed=1 ;;
@@ -119,7 +137,9 @@ for path in "${changed_paths[@]}"; do
       web_changed=1; api_changed=1 ;;
   esac
   case "$path" in
-    package.json|*/package.json|bun.lock|bunfig.toml) deps_changed=1 ;;
+    package.json|*/package.json|bun.lock|bunfig.toml)
+      if package_dependency_manifest_changed "$path"; then deps_changed=1; fi
+      ;;
   esac
   [[ "$path" == apps/api/src/db/migrations/* ]] && migrations_changed=1
 done

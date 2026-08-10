@@ -175,6 +175,55 @@ describe("Daily safe pinned HTTPS client", () => {
     expect(elapsedMs).toBeLessThan(timeoutMs + 50);
   });
 
+  test("returns the pinned address array for Node's all-address lookup path", async () => {
+    let lookupResult:
+      | {
+          error: unknown;
+          address: unknown;
+          family: unknown;
+        }
+      | undefined;
+    const client = createDailySafeHttpsClient(
+      {
+        baseUrl: "https://provider.example.com/v1",
+        apiKey: "fixture-key",
+        timeoutMs: 20,
+        maxAttempts: 1,
+        production: true,
+        allowedOrigins: ["https://provider.example.com"],
+      },
+      {
+        request: ((options: unknown) => {
+          const lookup = (
+            options as {
+              lookup: (
+                hostname: string,
+                lookupOptions: { all?: boolean },
+                callback: (error: unknown, address: unknown, family?: unknown) => void,
+              ) => void;
+            }
+          ).lookup;
+          lookup("provider.example.com", { all: true }, (error, address, family) => {
+            lookupResult = { error, address, family };
+          });
+          return new HangingRequest();
+        }) as unknown as typeof Https.request,
+        resolveAddresses: async () => [{ address: "8.8.8.8", family: 4 }],
+      },
+    );
+
+    const outcome = await client
+      .request({ path: "/chat/completions" })
+      .catch((error: unknown) => error);
+
+    expect(lookupResult).toEqual({
+      error: null,
+      address: [{ address: "8.8.8.8", family: 4 }],
+      family: undefined,
+    });
+    expect(outcome).toMatchObject({ code: "timeout" });
+  });
+
   test("uses one end-to-end deadline across pinned retries and backoff", async () => {
     const pinnedRequests: FailingRequest[] = [];
     const timeoutMs = 260;

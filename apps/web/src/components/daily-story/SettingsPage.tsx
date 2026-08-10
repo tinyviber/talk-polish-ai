@@ -27,6 +27,11 @@ import {
   readProviderSettings,
   saveProvider,
 } from "@/features/daily-story/settings-repository";
+import {
+  hasEffectiveProviderEndpointChanged,
+  isCurrentSettingsOperation,
+  type SettingsOperation,
+} from "./settings-logic";
 import type {
   AsrProvider,
   DailyCapability,
@@ -43,6 +48,8 @@ type Draft = {
 };
 type Status = "idle" | "saving" | "checking" | "connected" | "failed";
 type ProviderSelection = Record<DailyCapability, ProviderId>;
+const DAILY_CAPABILITIES: DailyCapability[] = ["chat", "asr", "tts"];
+
 function defaultDraft(capability: DailyCapability): Draft {
   const preset = getProviderCapability("openai-compatible", capability).preset;
   return {
@@ -112,12 +119,31 @@ export function SettingsPage() {
     tts: false,
   });
   const [error, setError] = useState<string | null>(null);
-  const revisionRef = useRef(0);
+  const operationRef = useRef<Record<DailyCapability, SettingsOperation>>({
+    chat: { operationId: 0, draftVersion: 0 },
+    asr: { operationId: 0, draftVersion: 0 },
+    tts: { operationId: 0, draftVersion: 0 },
+  });
+
+  const invalidateOperations = (capability: DailyCapability) => {
+    const current = operationRef.current[capability];
+    operationRef.current[capability] = {
+      ...current,
+      draftVersion: current.draftVersion + 1,
+    };
+  };
+  const beginOperation = (capability: DailyCapability) => {
+    const current = operationRef.current[capability];
+    const captured = { ...current, operationId: current.operationId + 1 };
+    operationRef.current[capability] = captured;
+    return captured;
+  };
+  const isCurrentOperation = (capability: DailyCapability, captured: SettingsOperation) =>
+    isCurrentSettingsOperation(operationRef.current[capability], captured);
 
   const load = async () => {
     try {
       const loaded = await readProviderSettings();
-      revisionRef.current = loaded.revision;
       setSettings(loaded);
       setDrafts({
         chat: toDraft("chat", loaded.chat),
@@ -137,6 +163,8 @@ export function SettingsPage() {
     const provider = getProvider(id);
     const info = provider.capabilities[capability];
     if (!info.supported) return;
+    invalidateOperations(capability);
+    const currentProviderId = providerIds[capability];
     setProviderIds((current) => ({ ...current, [capability]: id }));
     setStatus((current) => ({ ...current, [capability]: "idle" }));
     const preset = info.preset;
@@ -145,6 +173,7 @@ export function SettingsPage() {
       ...current,
       [capability]: {
         ...current[capability],
+        ...(currentProviderId !== id ? { apiKey: "" } : {}),
         baseUrl: preset.endpoint,
         model: preset.model,
         ...(capability === "asr" ? { responseFormat: preset.responseFormat ?? "" } : {}),
@@ -157,9 +186,17 @@ export function SettingsPage() {
   }, []);
 
   const update = (capability: DailyCapability, key: keyof Draft, value: string) => {
+    invalidateOperations(capability);
     setDrafts((current) => ({
       ...current,
-      [capability]: { ...current[capability], [key]: value },
+      [capability]: {
+        ...current[capability],
+        [key]: value,
+        ...(key === "baseUrl" &&
+        hasEffectiveProviderEndpointChanged(current[capability].baseUrl, value)
+          ? { apiKey: "" }
+          : {}),
+      },
     }));
     if (key === "baseUrl") {
       setProviderIds((current) => ({
@@ -178,11 +215,12 @@ export function SettingsPage() {
       return;
     }
     setError(null);
+    const operation = beginOperation(capability);
     setStatus((current) => ({ ...current, [capability]: "saving" }));
     try {
       const saved = await saveProvider(capability, provider);
-      revisionRef.current = saved.revision;
-      setSettings(saved);
+      if (!isCurrentOperation(capability, operation)) return;
+      setSettings((current) => (current && current.revision > saved.revision ? current : saved));
       setDrafts((current) => ({
         ...current,
         [capability]: toDraft(capability, saved[capability]),
@@ -193,37 +231,42 @@ export function SettingsPage() {
       }));
       setStatus((current) => ({ ...current, [capability]: checkAfter ? "checking" : "idle" }));
       if (!checkAfter) return;
-      const checkedRevision = saved.revision;
       await checkDailyProvider({ capability, provider });
-      if (revisionRef.current === checkedRevision)
+      if (isCurrentOperation(capability, operation))
         setStatus((current) => ({ ...current, [capability]: "connected" }));
     } catch (cause) {
-      if (revisionRef.current === (settings?.revision ?? 0) + 1)
-        setStatus((current) => ({ ...current, [capability]: "failed" }));
+      if (!isCurrentOperation(capability, operation)) return;
+      setStatus((current) => ({ ...current, [capability]: "failed" }));
       setError(cause instanceof Error ? cause.message : "配置保存或连接检查失败。请重试。");
     }
   };
   const clear = async (capability: DailyCapability) => {
     if (!window.confirm(`清除 ${capability.toUpperCase()} 配置？此浏览器将无法恢复该 Key。`))
       return;
+    const operation = beginOperation(capability);
     try {
       const saved = await clearProvider(capability);
-      revisionRef.current = saved.revision;
-      setSettings(saved);
+      if (!isCurrentOperation(capability, operation)) return;
+      setSettings((current) => (current && current.revision > saved.revision ? current : saved));
       setDrafts((current) => ({ ...current, [capability]: defaultDraft(capability) }));
       setProviderIds((current) => ({ ...current, [capability]: "openai-compatible" }));
       setStatus((current) => ({ ...current, [capability]: "idle" }));
       setError(null);
     } catch (cause) {
+      if (!isCurrentOperation(capability, operation)) return;
       setError(cause instanceof Error ? cause.message : "无法清除配置。");
     }
   };
   const clearAll = async () => {
     if (!window.confirm("清除全部 API 配置？当前浏览器将无法恢复这些 Key。")) return;
+    const operations = DAILY_CAPABILITIES.map(
+      (capability) => [capability, beginOperation(capability)] as const,
+    );
     try {
       const saved = await clearAllProviders();
-      revisionRef.current = saved.revision;
-      setSettings(saved);
+      if (!operations.every(([capability, operation]) => isCurrentOperation(capability, operation)))
+        return;
+      setSettings((current) => (current && current.revision > saved.revision ? current : saved));
       setDrafts({ chat: defaultDraft("chat"), asr: defaultDraft("asr"), tts: defaultDraft("tts") });
       setProviderIds({
         chat: "openai-compatible",
@@ -233,6 +276,8 @@ export function SettingsPage() {
       setStatus({ chat: "idle", asr: "idle", tts: "idle" });
       setError(null);
     } catch (cause) {
+      if (!operations.every(([capability, operation]) => isCurrentOperation(capability, operation)))
+        return;
       setError(cause instanceof Error ? cause.message : "无法清除配置。");
     }
   };

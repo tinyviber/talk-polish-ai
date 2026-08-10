@@ -16,6 +16,7 @@ const envKeys = [
   "CHAT_BASE_URL",
   "TRANSCRIPTION_BASE_URL",
   "TTS_BASE_URL",
+  "DAILY_PROVIDER_ALLOWED_ORIGINS",
   "REALTIME_FEATURE_ENABLED",
 ] as const;
 const initialEnv = new Map(envKeys.map((name) => [name, process.env[name]]));
@@ -52,6 +53,13 @@ function configureProduction(overrides: Record<string, string> = {}) {
 }
 
 describe("production configuration safety", () => {
+  test("includes OpenAI in the default Daily Story provider origins", () => {
+    delete process.env.DAILY_PROVIDER_ALLOWED_ORIGINS;
+    resetEnvForTests();
+
+    expect(env().DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")).toContain("https://api.openai.com");
+  });
+
   test("rejects default and placeholder token secrets", () => {
     expect(() => assertProductionSecret("local-development-anon-token-secret")).toThrow();
     expect(() => assertProductionSecret("replace-with-a-long-random-secret")).toThrow();

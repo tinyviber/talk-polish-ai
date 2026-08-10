@@ -4,6 +4,7 @@ import {
   isDashScopeCompatibleAsrUrl,
   parseDashScopeTranscript,
 } from "./dashscope-compatible-speech-to-text";
+import { DailyProviderRequestError } from "./safe-https-client";
 
 describe("DashScope OpenAI-compatible ASR", () => {
   test("recognizes the Beijing compatible-mode endpoint", () => {
@@ -40,6 +41,31 @@ describe("DashScope OpenAI-compatible ASR", () => {
       parseDashScopeTranscript({
         choices: [{ message: { content: " hello from qwen " } }],
       }),
-    ).toEqual({ text: "hello from qwen", provider: "dashscope-compatible-asr" });
+    ).toEqual({ text: " hello from qwen ", provider: "dashscope-compatible-asr" });
+  });
+
+  test("preserves whitespace in content arrays", () => {
+    expect(
+      parseDashScopeTranscript({
+        choices: [
+          {
+            message: {
+              content: [
+                { type: "text", text: "  hello " },
+                { type: "text", text: " from qwen  " },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toEqual({ text: "  hello  from qwen  ", provider: "dashscope-compatible-asr" });
+  });
+
+  test("rejects missing or whitespace-only content", () => {
+    for (const content of [undefined, "   ", [{ type: "text", text: " \n\t" }]]) {
+      expect(() => parseDashScopeTranscript({ choices: [{ message: { content } }] })).toThrow(
+        DailyProviderRequestError,
+      );
+    }
   });
 });

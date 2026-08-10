@@ -112,17 +112,19 @@ async function requestDashScopeAsr(
 }
 
 function contentText(value: unknown): string | undefined {
-  if (typeof value === "string") return value.trim() || undefined;
-  if (!Array.isArray(value)) return undefined;
-  const text = value
-    .flatMap((item) => {
-      if (typeof item === "string") return [item];
-      const record = asRecord(item);
-      return typeof record?.text === "string" ? [record.text] : [];
-    })
-    .join("")
-    .trim();
-  return text || undefined;
+  const text =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value)
+        ? value
+            .flatMap((item) => {
+              if (typeof item === "string") return [item];
+              const record = asRecord(item);
+              return typeof record?.text === "string" ? [record.text] : [];
+            })
+            .join("")
+        : undefined;
+  return text?.trim() ? text : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -55,7 +55,7 @@ always go through its same-origin API routes.
 - `POST /api/daily-story/provider-check`
 
 Provider configuration is validated per capability. Production accepts only
-server-owned DeepSeek/SiliconFlow/DashScope origins by default; development
+server-owned OpenAI/DeepSeek/SiliconFlow/DashScope origins by default; development
 still uses HTTPS-only, public-DNS, address-pinned transport. Failures return
 safe generic categories and never expose keys or upstream response bodies.
 

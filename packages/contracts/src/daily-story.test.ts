@@ -30,6 +30,18 @@ describe("Daily Story contracts", () => {
         provider: { ...chat, voice: "alloy" },
       }).success,
     ).toBe(false);
+    expect(
+      dailyStoryProviderCheckRequestSchema.safeParse({
+        capability: "asr",
+        provider: {
+          baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+          apiKey: "test-key",
+          model: "fun-asr-realtime",
+          responseFormat: "json",
+          directAsr: true,
+        },
+      }).success,
+    ).toBe(false);
   });
 
   test("rejects provider capability combinations that have no adapter", () => {

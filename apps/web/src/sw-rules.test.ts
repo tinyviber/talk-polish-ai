@@ -34,6 +34,17 @@ describe("service worker cache boundaries", () => {
     expect(isNetworkOnlyPath(new URL("https://app.example.com/assets/app-abc.js"))).toBe(false);
   });
 
+  test("does not treat cross-origin API paths as this service worker's network-only routes", () => {
+    expect(
+      isNetworkOnlyPath(
+        new URL(
+          "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+        ),
+        "https://app.example.com",
+      ),
+    ).toBe(false);
+  });
+
   test("does not cache user-specific navigation requests", () => {
     const url = new URL("https://app.example.com/practice");
     const navigation = (headers?: HeadersInit) =>

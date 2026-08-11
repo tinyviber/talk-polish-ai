@@ -50,6 +50,12 @@ const settingsSchema = z
     asr: providerSchema
       .extend({ responseFormat: z.enum(["json", "verbose_json"]).optional() })
       .optional(),
+    local: z
+      .object({
+        asrDirect: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
     tts: providerSchema
       .extend({ voice: z.string().trim().min(1).max(DAILY_STORY_LIMITS.voiceChars) })
       .optional(),
@@ -561,6 +567,7 @@ function fromStoredSettings(value: StoredSettings): ProviderSettings {
     updatedAt: value.updatedAt,
     ...(chat ? { chat } : {}),
     ...(asr ? { asr } : {}),
+    ...(value.local?.asrDirect ? { local: { asrDirect: true } } : {}),
     ...(tts ? { tts } : {}),
   };
 }
@@ -892,10 +899,20 @@ export function saveProvider(
       ({
         ...(current.chat ? { chat: current.chat } : {}),
         ...(current.asr ? { asr: current.asr } : {}),
+        ...(current.local ? { local: current.local } : {}),
         ...(current.tts ? { tts: current.tts } : {}),
         [capability]: validated,
       }) as Omit<ProviderSettings, "schemaVersion" | "revision" | "updatedAt">,
   );
+}
+
+export function saveAsrDirectPreference(enabled: boolean) {
+  return writeProviderSettings((current) => ({
+    ...(current.chat ? { chat: current.chat } : {}),
+    ...(current.asr ? { asr: current.asr } : {}),
+    ...(enabled ? { local: { asrDirect: true } } : {}),
+    ...(current.tts ? { tts: current.tts } : {}),
+  }));
 }
 
 /** Test-only seam: close the cached connection so open failure recovery is measurable. */
@@ -917,7 +934,10 @@ export function clearProvider(capability: DailyCapability) {
       ...(current.tts ? { tts: current.tts } : {}),
     };
     delete next[capability];
-    return next as Omit<ProviderSettings, "schemaVersion" | "revision" | "updatedAt">;
+    return {
+      ...next,
+      ...(current.local ? { local: current.local } : {}),
+    } as Omit<ProviderSettings, "schemaVersion" | "revision" | "updatedAt">;
   });
 }
 

@@ -16,6 +16,27 @@ export const OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 export const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 export const DASHSCOPE_COMPATIBLE_DEFAULT_BASE_URL =
   "https://dashscope.aliyuncs.com/compatible-mode/v1";
+export const DASHSCOPE_DIRECT_CONNECT_SOURCES = [
+  "https://dashscope.aliyuncs.com",
+  "https://dashscope-intl.aliyuncs.com",
+] as const;
+export const DASHSCOPE_FUN_ASR_HTTP_MODELS = [
+  "fun-asr-realtime",
+  "fun-asr-realtime-2026-02-28",
+] as const;
+export const DASHSCOPE_FUN_ASR_NATIVE_PATH =
+  "/api/v1/services/aigc/multimodal-generation/generation";
+
+export type DashScopeFunAsrBrowserDirectResolution =
+  | {
+      supported: true;
+      endpoint: URL;
+    }
+  | {
+      supported: false;
+      code: "unsupported-model" | "unsupported-endpoint" | "workspace-no-cors";
+      message: string;
+    };
 
 export type ProviderPreset = {
   id: ProviderPresetId;
@@ -116,11 +137,86 @@ export function isDashScopeBaseUrl(value: string) {
 
 function isDashScopeHostname(value: string) {
   const hostname = value.toLowerCase().replace(/\.+$/, "");
-  return (
-    hostname === "dashscope.aliyuncs.com" ||
-    hostname === "dashscope-intl.aliyuncs.com" ||
-    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/.test(hostname)
-  );
+  return isDashScopeBrowserDirectHostname(hostname) || isDashScopeWorkspaceHostname(hostname);
+}
+
+function isDashScopeBrowserDirectHostname(value: string) {
+  return value === "dashscope.aliyuncs.com" || value === "dashscope-intl.aliyuncs.com";
+}
+
+function isDashScopeWorkspaceHostname(value: string) {
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/.test(value);
+}
+
+export function isDashScopeFunAsrHttpModel(value: string) {
+  return (DASHSCOPE_FUN_ASR_HTTP_MODELS as readonly string[]).includes(value);
+}
+
+export function getDashScopeFunAsrNativeEndpoint(
+  provider: Pick<{ baseUrl: string; model: string }, "baseUrl" | "model">,
+) {
+  if (!isDashScopeFunAsrHttpModel(provider.model)) return undefined;
+  try {
+    const url = new URL(normalizeProviderBaseUrl(provider.baseUrl));
+    if (
+      url.protocol !== "https:" ||
+      url.port !== "" ||
+      !isDashScopeHostname(url.hostname) ||
+      (url.pathname !== "/compatible-mode/v1" && url.pathname !== "/api/v1")
+    ) {
+      return undefined;
+    }
+    return new URL(DASHSCOPE_FUN_ASR_NATIVE_PATH, `${url.origin}/`);
+  } catch {
+    return undefined;
+  }
+}
+
+export function resolveDashScopeFunAsrBrowserDirect(
+  provider: Pick<{ baseUrl: string; model: string }, "baseUrl" | "model">,
+): DashScopeFunAsrBrowserDirectResolution {
+  if (!isDashScopeFunAsrHttpModel(provider.model)) {
+    return unsupportedBrowserDirectResolution("unsupported-model");
+  }
+  try {
+    const url = new URL(normalizeProviderBaseUrl(provider.baseUrl));
+    if (
+      url.protocol !== "https:" ||
+      url.port !== "" ||
+      (url.pathname !== "/compatible-mode/v1" && url.pathname !== "/api/v1")
+    ) {
+      return unsupportedBrowserDirectResolution();
+    }
+    const hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
+    if (isDashScopeBrowserDirectHostname(hostname)) {
+      return {
+        supported: true,
+        endpoint: new URL(DASHSCOPE_FUN_ASR_NATIVE_PATH, `${url.origin}/`),
+      };
+    }
+    if (isDashScopeWorkspaceHostname(hostname)) {
+      return {
+        supported: false,
+        code: "workspace-no-cors",
+        message:
+          "该 workspace DashScope endpoint 不支持浏览器 CORS，请关闭直连使用 proxy，或改用公共 DashScope endpoint。",
+      };
+    }
+    return unsupportedBrowserDirectResolution();
+  } catch {
+    return unsupportedBrowserDirectResolution();
+  }
+}
+
+function unsupportedBrowserDirectResolution(
+  code: "unsupported-model" | "unsupported-endpoint" = "unsupported-endpoint",
+): DashScopeFunAsrBrowserDirectResolution {
+  return {
+    supported: false,
+    code,
+    message:
+      "浏览器直连 ASR 仅支持公共 DashScope HTTPS endpoint（dashscope.aliyuncs.com 或 dashscope-intl.aliyuncs.com）与 Fun-ASR HTTP model；请关闭直连使用 proxy，或改用公共 DashScope endpoint。",
+  };
 }
 
 function canonicalEndpointIdentity(value: string) {

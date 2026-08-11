@@ -36,6 +36,35 @@ describe("Daily Story reducer", () => {
     expect(dailyReducer(recording, { type: "recordingCancelled" }).phase).toBe("chatting");
   });
 
+  test("moves between recording and draft-ready phases without losing context", () => {
+    const chatting = { ...initialDailyState, phase: "chatting" as const, storyZh: "故事" };
+    const recording = dailyReducer(chatting, { type: "recording" });
+    const draftReady = dailyReducer(recording, { type: "recordingDraftReady" });
+    const continued = dailyReducer(draftReady, { type: "continueRecording" });
+    expect(recording.phase).toBe("recording");
+    expect(draftReady.phase).toBe("recordingDraftReady");
+    expect(continued.phase).toBe("recording");
+
+    const review = { ...initialDailyState, phase: "review" as const, storyZh: "故事" };
+    const readAloudRecording = dailyReducer(review, {
+      type: "readAloudRecording",
+      target: "I shared my idea.",
+    });
+    const readAloudDraftReady = dailyReducer(readAloudRecording, {
+      type: "recordingDraftReady",
+      readAloud: true,
+    });
+    const readAloudContinued = dailyReducer(readAloudDraftReady, {
+      type: "continueRecording",
+      readAloud: true,
+    });
+    expect(readAloudDraftReady).toMatchObject({
+      phase: "readingAloudDraftReady",
+      readAloudTarget: "I shared my idea.",
+    });
+    expect(readAloudContinued.phase).toBe("readingAloudRecording");
+  });
+
   test("returns from denied read-aloud recording to review", () => {
     const recording = dailyReducer(
       { ...initialDailyState, phase: "review" as const, storyZh: "故事" },

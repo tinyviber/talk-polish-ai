@@ -1,4 +1,5 @@
 import { getStartContext } from "@tanstack/start-storage-context";
+import { DASHSCOPE_DIRECT_CONNECT_SOURCES } from "@kotoba/contracts";
 
 const nonces = new WeakMap<Request, string>();
 
@@ -35,7 +36,7 @@ export function cspHeader(nonce: string) {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self'",
-    "connect-src 'self'",
+    `connect-src 'self' ${DASHSCOPE_DIRECT_CONNECT_SOURCES.join(" ")}`,
     "media-src 'self' blob:",
     "worker-src 'self'",
     "manifest-src 'self'",

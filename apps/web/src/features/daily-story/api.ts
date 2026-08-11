@@ -1,8 +1,22 @@
 import { z } from "zod";
-import { isDashScopeBaseUrl } from "@kotoba/contracts";
-import { authenticatedApiFetch, ApiClientError } from "@/lib/practice/api";
+import { authenticatedApiFetch } from "@/lib/practice/api";
 import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practice/audio-format";
 import { apiBaseUrl } from "@/lib/practice/mode";
+export {
+  dailyApiErrorFromTransport,
+  DailyApiError,
+  isDailyStoryAbortError,
+} from "./daily-api-errors";
+import {
+  dailyApiErrorFromTransport,
+  DailyApiError,
+  isDailyStoryAbortError,
+} from "./daily-api-errors";
+import {
+  checkDashScopeFunAsrDirectProvider,
+  isDashScopeFunAsrDirectEnabled,
+  transcribeWithDashScopeFunAsrDirect,
+} from "./asr-direct";
 import type {
   AsrProvider,
   ChatProvider,
@@ -39,59 +53,6 @@ const checkSchema = z.object({
   capability: z.enum(["chat", "asr", "tts"]),
   status: z.literal("connected"),
 });
-
-const FUN_ASR_REALTIME_MODELS = new Set(["fun-asr-realtime", "fun-asr-realtime-2026-02-28"]);
-const FUN_ASR_HTTP_AUDIO_MIME_TYPES = new Set([
-  "audio/wav",
-  "audio/x-wav",
-  "audio/mp3",
-  "audio/mpeg",
-  "audio/opus",
-]);
-
-export class DailyApiError extends Error {
-  readonly status: number;
-
-  constructor(status: number, message = dailyErrorMessage(status)) {
-    super(message);
-    this.name = "DailyApiError";
-    this.status = status;
-  }
-}
-
-export class DailyApiAbortedError extends Error {
-  constructor() {
-    super("Daily Story 请求已取消。");
-    this.name = "AbortError";
-  }
-}
-
-export function isDailyStoryAbortError(error: unknown): error is DailyApiAbortedError {
-  return (
-    error instanceof DailyApiAbortedError ||
-    (typeof DOMException !== "undefined" &&
-      error instanceof DOMException &&
-      error.name === "AbortError")
-  );
-}
-
-export function dailyApiErrorFromTransport(error: unknown, signal?: AbortSignal) {
-  // fetchWithRetry uses status 0 for both caller cancellation and transport
-  // failures. Only an already-aborted caller signal is an AbortError; a
-  // timeout or ordinary network failure must remain visible as failure.
-  if (signal?.aborted || isDailyStoryAbortError(error)) return new DailyApiAbortedError();
-  if (error instanceof ApiClientError) return new DailyApiError(error.status);
-  return new DailyApiError(0);
-}
-
-function dailyErrorMessage(status: number) {
-  if (status === 401 || status === 403) return "配置验证失败。请检查对应服务的 API Key。";
-  if (status === 429) return "请求过于频繁。请稍后重试。";
-  if (status === 408 || status === 504) return "服务响应超时。请重试。";
-  if (status >= 400 && status < 500) return "请求无法完成。请检查配置或缩短内容后重试。";
-  if (status >= 500) return "服务暂时不可用。请稍后重试。";
-  return "无法连接服务。请检查网络后重试。";
-}
 
 function assertDailySameOrigin() {
   if (typeof window === "undefined") return;
@@ -171,6 +132,7 @@ export async function startDailyStory(input: {
 export async function transcribeDailyStory(input: {
   audio: Blob;
   asr: AsrProvider;
+  directAsr?: boolean;
   signal?: AbortSignal;
 }) {
   // Normalize cached WebM recordings too. Some compatible gateways reject
@@ -179,14 +141,13 @@ export async function transcribeDailyStory(input: {
   if (normalized.blob.size > MAX_NORMALIZED_AUDIO_BYTES) {
     throw new Error("录音超过 25 MiB 限制，请缩短录音后重试。");
   }
-  if (
-    isDashScopeBaseUrl(input.asr.baseUrl) &&
-    FUN_ASR_REALTIME_MODELS.has(input.asr.model) &&
-    !FUN_ASR_HTTP_AUDIO_MIME_TYPES.has(normalized.mimeType)
-  ) {
-    throw new DailyApiError(
-      422,
-      "Fun-ASR-Realtime HTTP 接口仅支持 WAV、MP3 或 Opus 音频；当前录音无法转换为兼容格式，请改用支持 WAV/MP3/Opus 的录音设置后重试。",
+  const effectiveDirectAsr = isDashScopeFunAsrDirectEnabled(input.asr, input.directAsr === true);
+  if (effectiveDirectAsr) {
+    return transcribeWithDashScopeFunAsrDirect(
+      input.asr,
+      normalized.blob,
+      normalized.mimeType,
+      input.signal,
     );
   }
   const form = new FormData();
@@ -223,8 +184,16 @@ export async function reviewDailyStory(input: {
 export async function checkDailyProvider(input: {
   capability: DailyCapability;
   provider: NonNullable<ProviderSettings[DailyCapability]>;
+  directAsr?: boolean;
   signal?: AbortSignal;
 }) {
+  const effectiveDirectAsr =
+    input.capability === "asr" &&
+    isDashScopeFunAsrDirectEnabled(input.provider as AsrProvider, input.directAsr === true);
+  if (effectiveDirectAsr) {
+    await checkDashScopeFunAsrDirectProvider(input.provider as AsrProvider, input.signal);
+    return { capability: "asr" as const, status: "connected" as const };
+  }
   return request(
     "/api/daily-story/provider-check",
     checkSchema,

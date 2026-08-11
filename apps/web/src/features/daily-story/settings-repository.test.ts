@@ -18,6 +18,7 @@ import {
   readProviderSettings,
   readStorySession,
   releaseStoryLease,
+  saveAsrDirectPreference,
   saveProvider,
   writeStorySession,
 } from "./settings-repository";
@@ -163,6 +164,31 @@ describe("Daily Story IndexedDB", () => {
     const cleared = await clearProvider("chat");
     expect(cleared.revision).toBe(2);
     expect((await readProviderSettings()).chat).toBeUndefined();
+  });
+
+  test("loads legacy settings with ASR direct opt-in defaulting to false, then persists opt-in locally", async () => {
+    await seedRawSettings({
+      id: "current",
+      schemaVersion: 1,
+      revision: 4,
+      updatedAt: "2026-08-10T00:00:00.000Z",
+      asr: {
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        apiKey: "dashscope-key",
+        model: "fun-asr-realtime",
+        responseFormat: "json",
+      },
+    });
+
+    const loaded = await readProviderSettings();
+    expect(loaded.local?.asrDirect ?? false).toBe(false);
+
+    const saved = await saveAsrDirectPreference(true);
+    expect(saved.local?.asrDirect).toBe(true);
+    expect((await readProviderSettings()).local?.asrDirect).toBe(true);
+    expect(await readRawSettings()).toMatchObject({
+      local: { asrDirect: true },
+    });
   });
 
   test("recovers when the cached IndexedDB connection has gone stale", async () => {
@@ -469,6 +495,7 @@ describe("Daily Story IndexedDB", () => {
     expect(exportedSession).not.toHaveProperty("revision");
     expect(await exportStorySessions()).not.toContain("apiKey");
     expect(await exportStorySessions()).not.toContain("audio");
+    expect(await exportStorySessions()).not.toContain("asrDirect");
 
     await deleteStorySession("conversation-roundtrip", saved.revision);
     await importStorySessions(JSON.stringify(exported));

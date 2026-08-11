@@ -219,6 +219,9 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     };
     void load();
     const onPageHide = () => {
+      if (stateRef.current.phase === "reviewing") {
+        dispatch({ type: "reviewCancelled" });
+      }
       pageActiveRef.current = false;
       mountedRef.current = false;
       leaseActive = false;

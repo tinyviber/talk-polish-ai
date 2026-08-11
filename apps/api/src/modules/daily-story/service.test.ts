@@ -282,6 +282,40 @@ describe("Daily Story policy service", () => {
     ]);
   });
 
+  test("restores review originals from submitted history", async () => {
+    const service = serviceFor([
+      {
+        suggestions: [
+          {
+            sourceTurnId: "u1",
+            original: "The model repeated this inaccurately.",
+            improved: "The meeting took too long.",
+            category: "naturalness",
+            explanationZh: "更自然。",
+          },
+        ],
+      },
+    ]);
+    const result = await service.review({
+      learnerId: "learner",
+      requestId: "review-request",
+      storyZh: "今天开会。",
+      history: [
+        { id: "u1", role: "user", source: "typed", text: "The meeting spend too much time." },
+      ],
+      chat: chatConfig,
+    });
+    expect(result.suggestions).toEqual([
+      {
+        sourceTurnId: "u1",
+        original: "The meeting spend too much time.",
+        improved: "The meeting took too long.",
+        category: "naturalness",
+        explanationZh: "更自然。",
+      },
+    ]);
+  });
+
   test("keeps ASR text verbatim, including trailing whitespace", async () => {
     const service = serviceFor([]);
     const result = await service.transcribe({
@@ -294,15 +328,46 @@ describe("Daily Story policy service", () => {
     expect(result.transcript).toBe("The meeting spend too much time.  ");
   });
 
-  test("rejects review suggestions whose original is not exact submitted source", async () => {
+  test("rejects review suggestions with an unknown source turn", async () => {
+    const service = serviceFor([
+      {
+        suggestions: [
+          {
+            sourceTurnId: "unknown",
+            improved: "The meeting was too long.",
+            category: "grammar",
+            explanationZh: "更自然。",
+          },
+        ],
+      },
+    ]);
+    await expect(
+      service.review({
+        learnerId: "learner",
+        requestId: "request",
+        storyZh: "今天开会。",
+        history: [
+          { id: "u1", role: "user", source: "typed", text: "The meeting spend too much time." },
+        ],
+        chat: chatConfig,
+      }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  test("rejects duplicate review source turns", async () => {
     const service = serviceFor([
       {
         suggestions: [
           {
             sourceTurnId: "u1",
-            original: "The meeting took too long.",
             improved: "The meeting was too long.",
             category: "grammar",
+            explanationZh: "更自然。",
+          },
+          {
+            sourceTurnId: "u1",
+            improved: "The meeting took too long.",
+            category: "naturalness",
             explanationZh: "更自然。",
           },
         ],

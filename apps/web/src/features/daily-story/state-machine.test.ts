@@ -105,6 +105,15 @@ describe("Daily Story reducer", () => {
     expect(stale).toEqual(invalidated);
   });
 
+  test("returns to chatting when a hidden page cancels review", () => {
+    const reviewing = dailyReducer(
+      { ...initialDailyState, phase: "chatting" as const, storyZh: "故事" },
+      { type: "reviewRequest", ...op },
+    );
+    const cancelled = dailyReducer(reviewing, { type: "reviewCancelled" });
+    expect(cancelled).toMatchObject({ phase: "chatting", operation: null, error: null });
+  });
+
   test("binds read-aloud recording to selected improved sentence", () => {
     const review = { ...initialDailyState, phase: "review" as const, storyZh: "故事" };
     const recording = dailyReducer(review, {

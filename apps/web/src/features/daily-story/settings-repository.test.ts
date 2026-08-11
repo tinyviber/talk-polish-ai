@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { installFakeIndexedDb } from "@/lib/practice/test/fakeIndexedDb";
 import {
+  closeNextFakeIndexedDbTransaction,
+  installFakeIndexedDb,
+} from "@/lib/practice/test/fakeIndexedDb";
+import {
+  __closeDailyStorageConnectionForTests,
+  __resetDailyStorageForTests,
   SessionConflictError,
+  DailyStorageError,
   clearProvider,
   acquireStoryLease,
   claimStoryLease,
@@ -159,6 +165,64 @@ describe("Daily Story IndexedDB", () => {
     expect((await readProviderSettings()).chat).toBeUndefined();
   });
 
+  test("recovers when the cached IndexedDB connection has gone stale", async () => {
+    const before = await readProviderSettings();
+    await __closeDailyStorageConnectionForTests();
+
+    const after = await saveProvider("chat", {
+      baseUrl: "https://recovered.example.com/v1",
+      apiKey: "recovered-key",
+      model: "recovered-model",
+    });
+
+    expect(after.revision).toBe(before.revision + 1);
+    expect((await readProviderSettings()).chat?.model).toBe("recovered-model");
+  });
+
+  test("retries an AbortError from a closed active transaction without duplicate writes", async () => {
+    const before = await readProviderSettings();
+    closeNextFakeIndexedDbTransaction();
+
+    const after = await saveProvider("chat", {
+      baseUrl: "https://abort-recovered.example.com/v1",
+      apiKey: "abort-recovered-key",
+      model: "abort-recovered-model",
+    });
+
+    expect(after.revision).toBe(before.revision + 1);
+    expect(await readRawSettings()).toMatchObject({
+      revision: before.revision + 1,
+      chat: { model: "abort-recovered-model" },
+    });
+
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    closeNextFakeIndexedDbTransaction();
+    await expect(importStorySessions(exportFixture("abort-import"))).resolves.toEqual({
+      imported: 1,
+      migratedLegacy: false,
+    });
+    expect(
+      (await listStorySessions()).filter((session) => session.id === "abort-import"),
+    ).toHaveLength(1);
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+  });
+
+  test("uses a storage-specific message for unavailable IndexedDB", async () => {
+    await __resetDailyStorageForTests();
+    const indexedDb = globalThis.indexedDB;
+    Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: undefined });
+    try {
+      await expect(readProviderSettings()).rejects.toMatchObject({
+        name: "DailyStorageError",
+        message: "当前浏览器无法访问本机存储。请允许此网站使用 IndexedDB 后重试。",
+      } satisfies Partial<DailyStorageError>);
+    } finally {
+      Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: indexedDb });
+    }
+  });
+
   test("normalizes legacy endpoint and infers provider preset on save", async () => {
     const saved = await saveProvider("chat", {
       baseUrl: "https://api.deepseek.com/",
@@ -273,6 +337,36 @@ describe("Daily Story IndexedDB", () => {
         null,
       ),
     ).rejects.toBeInstanceOf(SessionConflictError);
+  });
+
+  test("preserves session conflicts for asynchronous write and delete checks", async () => {
+    const saved = await writeStorySession(
+      "conversation-conflict",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+
+    await expect(
+      writeStorySession(
+        "conversation-conflict",
+        {
+          phase: "chatting",
+          storyZh: "旧标签页",
+          messages: [],
+        },
+        null,
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+
+    await expect(deleteStorySession("conversation-conflict", null)).rejects.toBeInstanceOf(
+      SessionConflictError,
+    );
+    expect((await readStorySession("conversation-conflict"))?.revision).toBe(saved.revision);
+    await deleteStorySession("conversation-conflict", saved.revision);
   });
 
   test("migrates the legacy current session and keeps conversations separate", async () => {

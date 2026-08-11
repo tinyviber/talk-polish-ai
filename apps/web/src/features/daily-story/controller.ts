@@ -180,6 +180,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (!session && !allowCompose) {
           setCanEdit(false);
           setConversationMissing(true);
+          setStorageError(null);
           dispatch({ type: "ready", session: null, settingsRevision: settingsRevisionRef.current });
           return;
         }
@@ -193,6 +194,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         settingsRevisionRef.current = settings.revision;
         setCapabilities({ chat: !!settings.chat, asr: !!settings.asr, tts: !!settings.tts });
         persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
+        setStorageError(null);
         dispatch({ type: "ready", session, settingsRevision: settings.revision });
       } catch (error) {
         if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
@@ -306,6 +308,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     void writeStorySession(conversationId, snapshot, state.revision, ownerIdRef.current)
       .then((session) => {
         persistenceSignatureRef.current = persistenceSignature(session);
+        setStorageError(null);
         dispatch({ type: "persisted", session });
       })
       .catch((error: unknown) => {
@@ -339,6 +342,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         settingsRevisionRef.current = settings.revision;
         dispatch({ type: "settingsRevisionChanged", settingsRevision: settings.revision });
       }
+      setStorageError(null);
       return settings;
     } catch (error) {
       setStorageError(message(error));

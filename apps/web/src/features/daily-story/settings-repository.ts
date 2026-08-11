@@ -241,7 +241,7 @@ type DailyStorageEvent =
   | { kind: "lease"; conversationId: string; ownerId: string };
 
 export class DailyStorageError extends Error {
-  constructor(message = "当前浏览器无法安全保存 API 配置。请允许此网站使用 IndexedDB 后重试。") {
+  constructor(message = "当前浏览器无法访问本机存储。请允许此网站使用 IndexedDB 后重试。") {
     super(message);
     this.name = "DailyStorageError";
   }
@@ -262,8 +262,56 @@ export class StoryImportError extends Error {
 }
 
 let openPromise: Promise<IDBDatabase> | undefined;
+let cachedDatabase: IDBDatabase | undefined;
 let channel: BroadcastChannel | undefined;
 const listeners = new Set<(event: DailyStorageEvent) => void>();
+
+type DailyDatabase = IDBDatabase & {
+  /** Chromium exposes this event when the connection is closed abnormally. */
+  onclose?: ((event: Event) => void) | null;
+};
+
+const RECOVERABLE_DATABASE_ERROR_NAMES = new Set([
+  "AbortError",
+  "InvalidStateError",
+  "TransactionInactiveError",
+  "TransactionClosedError",
+  "DatabaseClosedError",
+]);
+
+function errorName(error: unknown) {
+  return error && typeof error === "object" && "name" in error
+    ? (error as { name?: unknown }).name
+    : undefined;
+}
+
+function isRecoverableDatabaseError(error: unknown) {
+  return (
+    typeof errorName(error) === "string" &&
+    RECOVERABLE_DATABASE_ERROR_NAMES.has(errorName(error) as string)
+  );
+}
+
+function normalizeStorageError(error: unknown) {
+  if (
+    error instanceof DailyStorageError ||
+    error instanceof SessionConflictError ||
+    error instanceof StoryImportError
+  )
+    return error;
+  return new DailyStorageError();
+}
+
+function resetCachedConnection() {
+  const db = cachedDatabase;
+  cachedDatabase = undefined;
+  openPromise = undefined;
+  try {
+    db?.close();
+  } catch {
+    // The connection is already unusable; the next operation will reopen it.
+  }
+}
 
 function database() {
   if (typeof indexedDB === "undefined") return Promise.reject(new DailyStorageError());
@@ -286,7 +334,7 @@ function database() {
           db.createObjectStore(LEASE_STORE, { keyPath: "id" });
       };
       request.onblocked = () => {
-        reset();
+        resetCachedConnection();
         reject(
           new DailyStorageError(
             "浏览器正在阻止设置数据库升级。请关闭其它打开此应用的标签页后重试。",
@@ -294,61 +342,94 @@ function database() {
         );
       };
       request.onerror = () => {
-        reset();
         reject(new DailyStorageError());
       };
       request.onsuccess = () => {
         const db = request.result;
-        db.onversionchange = () => {
+        cachedDatabase = db;
+        const dailyDb = db as DailyDatabase;
+        const clearIfCached = () => {
+          if (cachedDatabase !== db) return;
+          cachedDatabase = undefined;
+          openPromise = undefined;
+        };
+        dailyDb.onclose = clearIfCached;
+        dailyDb.onversionchange = () => {
           db.close();
-          reset();
+          clearIfCached();
         };
         resolve(db);
       };
     });
-    const reset = () => {
-      if (openPromise === trackedPromise) openPromise = undefined;
-    };
     const trackedPromise = pendingPromise.catch((error: unknown) => {
-      reset();
-      throw error;
+      if (openPromise === trackedPromise) openPromise = undefined;
+      throw normalizeStorageError(error);
     });
     openPromise = trackedPromise;
   }
   return openPromise;
 }
 
-function transaction<T>(
+function runTransaction<T>(
   stores: string | string[],
   mode: IDBTransactionMode,
-  run: (tx: IDBTransaction) => void,
+  run: (tx: IDBTransaction, abort: (error: unknown) => void) => void,
 ) {
   return database().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
         let result: T;
         let tx: IDBTransaction;
+        let failure: unknown;
+        let aborted = false;
+        const abort = (error: unknown) => {
+          failure = error;
+          if (aborted) return;
+          aborted = true;
+          try {
+            tx.abort();
+          } catch {
+            reject(error);
+          }
+        };
         try {
           tx = db.transaction(stores, mode);
-          run(tx);
-        } catch {
-          reject(new DailyStorageError());
-          return;
+          tx.oncomplete = () => resolve(result!);
+          tx.onerror = tx.onabort = () => reject(failure ?? tx.error ?? new DailyStorageError());
+          (tx as IDBTransaction & { __dailyResult?: (value: T) => void }).__dailyResult = (
+            value,
+          ) => {
+            result = value;
+          };
+          run(tx, abort);
+        } catch (error) {
+          abort(error);
         }
-        tx.oncomplete = () => resolve(result!);
-        tx.onerror = tx.onabort = () => reject(tx.error ?? new DailyStorageError());
-        (tx as IDBTransaction & { __dailyResult?: (value: T) => void }).__dailyResult = (value) => {
-          result = value;
-        };
       }),
   );
+}
+
+function transaction<T>(
+  stores: string | string[],
+  mode: IDBTransactionMode,
+  run: (tx: IDBTransaction, abort: (error: unknown) => void) => void,
+) {
+  const attempt = (canRecover: boolean): Promise<T> =>
+    runTransaction<T>(stores, mode, run).catch((error: unknown) => {
+      if (canRecover && isRecoverableDatabaseError(error)) {
+        resetCachedConnection();
+        return attempt(false);
+      }
+      throw normalizeStorageError(error);
+    });
+  return attempt(true);
 }
 
 function setResult<T>(tx: IDBTransaction, value: T) {
   (tx as IDBTransaction & { __dailyResult?: (value: T) => void }).__dailyResult?.(value);
 }
 
-function sessionImportTransaction<T>(
+function runSessionImportTransaction<T>(
   run: (
     tx: IDBTransaction,
     setTransactionResult: (value: T) => void,
@@ -400,6 +481,24 @@ function sessionImportTransaction<T>(
         }
       }),
   );
+}
+
+function sessionImportTransaction<T>(
+  run: (
+    tx: IDBTransaction,
+    setTransactionResult: (value: T) => void,
+    abort: (error: unknown) => void,
+  ) => void,
+) {
+  const attempt = (canRecover: boolean): Promise<T> =>
+    runSessionImportTransaction(run).catch((error: unknown) => {
+      if (canRecover && isRecoverableDatabaseError(error)) {
+        resetCachedConnection();
+        return attempt(false);
+      }
+      throw normalizeStorageError(error);
+    });
+  return attempt(true);
 }
 
 function notifySettings(revision: number) {
@@ -801,10 +900,13 @@ export function saveProvider(
 
 /** Test-only seam: close the cached connection so open failure recovery is measurable. */
 export async function __resetDailyStorageForTests() {
-  const pending = openPromise;
-  openPromise = undefined;
-  const db = await pending?.catch(() => undefined);
-  db?.close();
+  resetCachedConnection();
+}
+
+/** Test-only seam: leave the stale connection cached so the next operation must recover it. */
+export async function __closeDailyStorageConnectionForTests() {
+  const db = await database();
+  db.close();
 }
 
 export function clearProvider(capability: DailyCapability) {
@@ -927,7 +1029,7 @@ export async function writeStorySession(
   const result = await transaction<StorySession>(
     ownerId ? [SESSION_STORE, LEASE_STORE] : SESSION_STORE,
     "readwrite",
-    (tx) => {
+    (tx, abort) => {
       const store = tx.objectStore(SESSION_STORE);
       const request = store.get(conversationId);
       const leaseRequest = ownerId ? tx.objectStore(LEASE_STORE).get(conversationId) : undefined;
@@ -937,43 +1039,56 @@ export async function writeStorySession(
       let leaseReady = !ownerId;
       const commit = () => {
         if (!sessionReady || !leaseReady) return;
-        if (ownerId) {
-          const lease = leaseRecord === undefined ? null : leaseSchema.parse(leaseRecord);
-          if (lease?.ownerId !== ownerId) throw new SessionConflictError();
+        try {
+          if (ownerId) {
+            const lease = leaseRecord === undefined ? null : leaseSchema.parse(leaseRecord);
+            if (lease?.ownerId !== ownerId) {
+              abort(new SessionConflictError());
+              return;
+            }
+          }
+          const previous =
+            storedSessionRecord === undefined
+              ? null
+              : fromStoredSession(sessionSchema.parse(storedSessionRecord));
+          if ((previous?.revision ?? null) !== expectedRevision) {
+            abort(new SessionConflictError());
+            return;
+          }
+          const next: StorySession = {
+            ...session,
+            schemaVersion: 1,
+            revision: (previous?.revision ?? 0) + 1,
+            updatedAt: new Date().toISOString(),
+          };
+          const write = store.put(sessionRecord(next, conversationId));
+          write.onsuccess = () => setResult(tx, next);
+        } catch (error) {
+          abort(error);
         }
-        const previous =
-          storedSessionRecord === undefined
-            ? null
-            : fromStoredSession(sessionSchema.parse(storedSessionRecord));
-        if ((previous?.revision ?? null) !== expectedRevision) {
-          throw new SessionConflictError();
-        }
-        const next: StorySession = {
-          ...session,
-          schemaVersion: 1,
-          revision: (previous?.revision ?? 0) + 1,
-          updatedAt: new Date().toISOString(),
-        };
-        const write = store.put(sessionRecord(next, conversationId));
-        write.onsuccess = () => setResult(tx, next);
       };
       request.onsuccess = () => {
-        storedSessionRecord = request.result as StoredSession | undefined;
-        sessionReady = true;
-        commit();
+        try {
+          storedSessionRecord = request.result as StoredSession | undefined;
+          sessionReady = true;
+          commit();
+        } catch (error) {
+          abort(error);
+        }
       };
       if (leaseRequest) {
         leaseRequest.onsuccess = () => {
-          leaseRecord = leaseRequest.result;
-          leaseReady = true;
-          commit();
+          try {
+            leaseRecord = leaseRequest.result;
+            leaseReady = true;
+            commit();
+          } catch (error) {
+            abort(error);
+          }
         };
       }
     },
-  ).catch((error: unknown) => {
-    if (error instanceof DailyStorageError) throw error;
-    throw new SessionConflictError();
-  });
+  );
   notifySession(conversationId, result.revision);
   return result;
 }
@@ -995,23 +1110,27 @@ export async function deleteStorySession(
     typeof conversationIdOrExpectedRevision === "string"
       ? explicitExpectedRevision!
       : conversationIdOrExpectedRevision;
-  return transaction<void>(SESSION_STORE, "readwrite", (tx) => {
+  const result = await transaction<void>(SESSION_STORE, "readwrite", (tx, abort) => {
     const store = tx.objectStore(SESSION_STORE);
     const request = store.get(conversationId);
     request.onsuccess = () => {
-      const record = request.result as unknown;
-      const current = record === undefined ? null : fromStoredSession(sessionSchema.parse(record));
-      if ((current?.revision ?? null) !== expectedRevision) {
-        throw new SessionConflictError();
+      try {
+        const record = request.result as unknown;
+        const current =
+          record === undefined ? null : fromStoredSession(sessionSchema.parse(record));
+        if ((current?.revision ?? null) !== expectedRevision) {
+          abort(new SessionConflictError());
+          return;
+        }
+        const deletion = store.delete(conversationId);
+        deletion.onsuccess = () => setResult(tx, undefined);
+      } catch (error) {
+        abort(error);
       }
-      const deletion = store.delete(conversationId);
-      deletion.onsuccess = () => setResult(tx, undefined);
     };
-  }).catch((error: unknown) => {
-    if (error instanceof DailyStorageError) throw error;
-    throw new SessionConflictError();
   });
   notifySession(conversationId, (expectedRevision ?? 0) + 1);
+  return result;
 }
 
 export function acquireStoryLease(ownerId: string): Promise<boolean>;

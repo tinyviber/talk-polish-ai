@@ -31,6 +31,7 @@ import {
   list as listDailyStoryAudio,
   put as putDailyStoryAudio,
   update as updateDailyStoryAudio,
+  type DailyStoryAudioOutboxItem,
   type DailyStoryAudioPurpose,
 } from "./audio-outbox";
 import { runSingleFlight } from "./single-flight";
@@ -62,6 +63,29 @@ export type DailyStoryTranscribeResult =
       clientAttemptId: string;
       error?: string;
     };
+
+function toCachedAudio(item: DailyStoryAudioOutboxItem): DailyStoryCachedAudio {
+  return {
+    clientAttemptId: item.clientAttemptId,
+    blob: item.blob,
+    mimeType: item.mimeType,
+    durationSec: item.durationSec,
+    createdAt: item.createdAt,
+    status: item.status,
+    purpose: item.purpose,
+    ...(item.readAloudTarget ? { readAloudTarget: item.readAloudTarget } : {}),
+    ...(item.error ? { error: item.error } : {}),
+  };
+}
+
+export function splitDailyStoryAudio(items: DailyStoryAudioOutboxItem[]) {
+  const latest = items.at(-1);
+  return {
+    // Keep cachedAudio as the latest item of either purpose for failed/read-aloud retries.
+    cachedAudio: latest ? toCachedAudio(latest) : null,
+    conversationAudios: items.filter((item) => item.purpose === "conversation").map(toCachedAudio),
+  };
+}
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
@@ -114,6 +138,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   });
   const [conversationMissing, setConversationMissing] = useState(false);
   const [cachedAudio, setCachedAudio] = useState<DailyStoryCachedAudio | null>(null);
+  const [conversationAudios, setConversationAudios] = useState<DailyStoryCachedAudio[]>([]);
+  const [conversationAudiosLoading, setConversationAudiosLoading] = useState(true);
   const stateRef = useRef(state);
   const ownerIdRef = useRef(createId("tab"));
   const abortRef = useRef<AbortController | null>(null);
@@ -140,26 +166,16 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   }, []);
 
   const refreshCachedAudio = useCallback(async () => {
+    setConversationAudiosLoading(true);
     try {
       const items = await listDailyStoryAudio({ conversationId });
-      const item = items.at(-1);
-      setCachedAudio(
-        item
-          ? {
-              clientAttemptId: item.clientAttemptId,
-              blob: item.blob,
-              mimeType: item.mimeType,
-              durationSec: item.durationSec,
-              createdAt: item.createdAt,
-              status: item.status,
-              purpose: item.purpose,
-              ...(item.readAloudTarget ? { readAloudTarget: item.readAloudTarget } : {}),
-              ...(item.error ? { error: item.error } : {}),
-            }
-          : null,
-      );
+      const audio = splitDailyStoryAudio(items);
+      setCachedAudio(audio.cachedAudio);
+      setConversationAudios(audio.conversationAudios);
     } catch {
       // Cache inspection must never block the conversation UI.
+    } finally {
+      setConversationAudiosLoading(false);
     }
   }, [conversationId]);
 
@@ -850,6 +866,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     capabilities,
     conversationMissing,
     cachedAudio,
+    conversationAudios,
+    conversationAudiosLoading,
     setDraft: (draft: string) => dispatch({ type: "draft", draft }),
     start,
     beginRecording,

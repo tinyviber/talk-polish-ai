@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useRecorder,
   type MicrophoneTestStatus,
@@ -21,7 +22,11 @@ import {
 } from "@/lib/practice/useRecorder";
 import { cn } from "@/lib/utils";
 import { mergeRecordedAudio } from "@/lib/practice/audio-format";
-import { DAILY_STORY_TURN_MAX, useDailyStoryController } from "@/features/daily-story/controller";
+import {
+  DAILY_STORY_TURN_MAX,
+  type DailyStoryCachedAudio,
+  useDailyStoryController,
+} from "@/features/daily-story/controller";
 import {
   canCompleteRecordingDraft,
   submitRecordingDraft,
@@ -85,6 +90,8 @@ export function DailyStoryPage({
   const [typed, setTyped] = useState("");
   const [transcriptDraft, setTranscriptDraft] = useState("");
   const [cachedAudioUrl, setCachedAudioUrl] = useState<string | null>(null);
+  const [conversationAudioUrls, setConversationAudioUrls] = useState<Record<string, string>>({});
+  const [reviewTab, setReviewTab] = useState<"conversation" | "suggestions">("conversation");
   const [recordingDrafts, setRecordingDrafts] = useState<
     Record<DailyStoryAudioPurpose, RecordingDraft | null>
   >({ conversation: null, readAloud: null });
@@ -222,6 +229,19 @@ export function DailyStoryPage({
     setCachedAudioUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [story.cachedAudio?.blob]);
+
+  useEffect(() => {
+    const urls = Object.fromEntries(
+      story.conversationAudios.map((audio) => [
+        audio.clientAttemptId,
+        URL.createObjectURL(audio.blob),
+      ]),
+    );
+    setConversationAudioUrls(urls);
+    return () => {
+      Object.values(urls).forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [story.conversationAudios]);
 
   useEffect(() => {
     if (
@@ -368,6 +388,38 @@ export function DailyStoryPage({
       finishConfirmingRef.current = false;
       dispatchFinishConfirmation({ type: "settled" });
     });
+  };
+
+  const reviewProps: ReviewProps = {
+    suggestions: story.state.review?.suggestions ?? [],
+    ttsEnabled: story.capabilities.tts,
+    asrEnabled: story.capabilities.asr,
+    readAloudRecording:
+      phase === "readingAloudRecording" ||
+      phase === "readingAloudDraftReady" ||
+      Boolean(readAloudDraft),
+    recordingDraft: readAloudDraft,
+    pendingSegment,
+    draftError,
+    draftSaving,
+    recorderStatus: recorder.status,
+    recorderError: recorder.error,
+    readAloudTranscript: story.state.readAloudTranscript,
+    readAloudTarget: readAloudDraft?.readAloudTarget ?? story.state.readAloudTarget,
+    onPlay: story.playTts,
+    onReadAloud: beginReadAloud,
+    onStop: () => void recorder.stop(),
+    onContinueRecording: () => continueDraftRecording(true),
+    onCompleteRecording: () => void completeDraft(true),
+    onDiscardRecording: () => void discardDraft(true),
+    onRetrySave: retryPendingSegment,
+    onDiscardPending: discardPendingSegment,
+    onCancel: () => {
+      story.resetReadAloud();
+      recorder.reset();
+    },
+    onNewStory: startNewConversation,
+    canEdit: story.canEdit,
   };
 
   return (
@@ -559,38 +611,21 @@ export function DailyStoryPage({
               </section>
             ) : null}
             {showReadAloudDraft ? (
-              <Review
-                suggestions={story.state.review?.suggestions ?? []}
-                ttsEnabled={story.capabilities.tts}
-                asrEnabled={story.capabilities.asr}
-                readAloudRecording={
-                  phase === "readingAloudRecording" ||
-                  phase === "readingAloudDraftReady" ||
-                  Boolean(readAloudDraft)
-                }
-                recordingDraft={readAloudDraft}
-                pendingSegment={pendingSegment}
-                draftError={draftError}
-                draftSaving={draftSaving}
-                recorderStatus={recorder.status}
-                recorderError={recorder.error}
-                readAloudTranscript={story.state.readAloudTranscript}
-                readAloudTarget={readAloudDraft?.readAloudTarget ?? story.state.readAloudTarget}
-                onPlay={story.playTts}
-                onReadAloud={beginReadAloud}
-                onStop={() => void recorder.stop()}
-                onContinueRecording={() => continueDraftRecording(true)}
-                onCompleteRecording={() => void completeDraft(true)}
-                onDiscardRecording={() => void discardDraft(true)}
-                onRetrySave={retryPendingSegment}
-                onDiscardPending={discardPendingSegment}
-                onCancel={() => {
-                  story.resetReadAloud();
-                  recorder.reset();
-                }}
-                onNewStory={startNewConversation}
-                canEdit={story.canEdit}
-              />
+              phase === "review" ? (
+                <ReviewTabs
+                  value={reviewTab}
+                  onValueChange={setReviewTab}
+                  messages={story.state.messages}
+                  conversationAudios={story.conversationAudios}
+                  conversationAudiosLoading={story.conversationAudiosLoading}
+                  conversationAudioUrls={conversationAudioUrls}
+                  reviewProps={reviewProps}
+                />
+              ) : (
+                // Keep the operation panel mounted while read-aloud recording is active so
+                // stopping or cancelling never depends on which review tab was last selected.
+                <Review {...reviewProps} />
+              )
             ) : null}
             {phase === "error" ? (
               <section className="mx-auto max-w-xl rounded-3xl border border-destructive/30 bg-card p-6 text-center shadow-lift">
@@ -774,19 +809,7 @@ function Conversation({
   return (
     <section className="mx-auto max-w-2xl">
       <div className="space-y-3" aria-live="polite">
-        {messages.map((item) => (
-          <article
-            key={item.id}
-            className={cn(
-              "max-w-[88%] rounded-3xl px-4 py-3 leading-7 shadow-sm",
-              item.role === "assistant"
-                ? "mr-auto bg-card"
-                : "ml-auto bg-primary text-primary-foreground",
-            )}
-          >
-            {item.text}
-          </article>
-        ))}
+        <MessageList messages={messages} />
       </div>
       <div className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-lift">
         {!voiceEnabled ? (
@@ -1135,6 +1158,152 @@ function MicProblem({ error, onRetry }: { error: string | null; onRetry: () => v
   );
 }
 
+type ReviewProps = {
+  suggestions: ReviewSuggestion[];
+  ttsEnabled: boolean;
+  asrEnabled: boolean;
+  readAloudRecording: boolean;
+  recordingDraft: RecordingDraft | null;
+  pendingSegment: RecorderDraft | null;
+  draftError: string | null;
+  draftSaving: boolean;
+  recorderStatus: string;
+  recorderError: string | null;
+  readAloudTranscript: string | null;
+  readAloudTarget: string | null;
+  onPlay: (text: string) => void;
+  onReadAloud: (target: string) => void;
+  onStop: () => void;
+  onContinueRecording: () => void;
+  onCompleteRecording: () => void;
+  onDiscardRecording: () => void;
+  onRetrySave: () => void;
+  onDiscardPending: () => void;
+  onCancel: () => void;
+  onNewStory: () => void;
+  canEdit: boolean;
+};
+
+function ReviewTabs({
+  value,
+  onValueChange,
+  messages,
+  conversationAudios,
+  conversationAudiosLoading,
+  conversationAudioUrls,
+  reviewProps,
+}: {
+  value: "conversation" | "suggestions";
+  onValueChange: (value: "conversation" | "suggestions") => void;
+  messages: { id: string; role: "assistant" | "user"; text: string }[];
+  conversationAudios: DailyStoryCachedAudio[];
+  conversationAudiosLoading: boolean;
+  conversationAudioUrls: Record<string, string>;
+  reviewProps: ReviewProps;
+}) {
+  return (
+    <Tabs
+      value={value}
+      onValueChange={(nextValue) => onValueChange(nextValue as "conversation" | "suggestions")}
+      className="mx-auto max-w-2xl"
+    >
+      <TabsList className="grid h-auto w-full grid-cols-2 rounded-2xl p-1">
+        <TabsTrigger value="conversation" className="rounded-xl py-2.5">
+          原始对话
+        </TabsTrigger>
+        <TabsTrigger value="suggestions" className="rounded-xl py-2.5">
+          修改建议
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="conversation">
+        <OriginalConversation
+          messages={messages}
+          audios={conversationAudios}
+          audiosLoading={conversationAudiosLoading}
+          audioUrls={conversationAudioUrls}
+        />
+      </TabsContent>
+      <TabsContent value="suggestions">
+        <Review {...reviewProps} />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+function OriginalConversation({
+  messages,
+  audios,
+  audiosLoading,
+  audioUrls,
+}: {
+  messages: { id: string; role: "assistant" | "user"; text: string }[];
+  audios: DailyStoryCachedAudio[];
+  audiosLoading: boolean;
+  audioUrls: Record<string, string>;
+}) {
+  return (
+    <section className="mx-auto max-w-2xl">
+      <p className="text-sm font-semibold text-primary">原始对话</p>
+      <h1 className="mt-2 font-display text-3xl">这次聊了什么</h1>
+      <div className="mt-6 space-y-3" aria-live="polite">
+        <MessageList messages={messages} />
+      </div>
+      <section className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-lift">
+        <h2 className="font-medium">本地录音</h2>
+        {audiosLoading ? (
+          <p className="mt-2 text-sm text-muted-foreground">正在加载本地录音…</p>
+        ) : audios.length ? (
+          <div className="mt-4 space-y-4">
+            {audios.map((audio, index) => {
+              const url = audioUrls[audio.clientAttemptId];
+              return (
+                <div key={audio.clientAttemptId}>
+                  <p className="mb-2 text-sm text-muted-foreground">录音 {index + 1}</p>
+                  {url ? (
+                    <audio
+                      className="w-full"
+                      controls
+                      preload="metadata"
+                      src={url}
+                      aria-label={`原始对话录音 ${index + 1}`}
+                    />
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">暂无本地录音。</p>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function MessageList({
+  messages,
+}: {
+  messages: { id: string; role: "assistant" | "user"; text: string }[];
+}) {
+  return (
+    <>
+      {messages.map((item) => (
+        <article
+          key={item.id}
+          className={cn(
+            "max-w-[88%] rounded-3xl px-4 py-3 leading-7 shadow-sm",
+            item.role === "assistant"
+              ? "mr-auto bg-card"
+              : "ml-auto bg-primary text-primary-foreground",
+          )}
+        >
+          {item.text}
+        </article>
+      ))}
+    </>
+  );
+}
+
 function Review({
   suggestions,
   ttsEnabled,
@@ -1159,31 +1328,7 @@ function Review({
   onCancel,
   onNewStory,
   canEdit,
-}: {
-  suggestions: ReviewSuggestion[];
-  ttsEnabled: boolean;
-  asrEnabled: boolean;
-  readAloudRecording: boolean;
-  recordingDraft: RecordingDraft | null;
-  pendingSegment: RecorderDraft | null;
-  draftError: string | null;
-  draftSaving: boolean;
-  recorderStatus: string;
-  recorderError: string | null;
-  readAloudTranscript: string | null;
-  readAloudTarget: string | null;
-  onPlay: (text: string) => void;
-  onReadAloud: (target: string) => void;
-  onStop: () => void;
-  onContinueRecording: () => void;
-  onCompleteRecording: () => void;
-  onDiscardRecording: () => void;
-  onRetrySave: () => void;
-  onDiscardPending: () => void;
-  onCancel: () => void;
-  onNewStory: () => void;
-  canEdit: boolean;
-}) {
+}: ReviewProps) {
   const categoryLabel = {
     clarity: "表达清晰度",
     grammar: "语法",

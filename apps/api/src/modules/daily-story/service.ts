@@ -318,6 +318,9 @@ async function safeProviderCall<T>(config: Env, run: () => Promise<T>) {
             : "Daily Story provider configuration is invalid.";
         throw ApiError.validation(reason);
       }
+      if (error instanceof DailyProviderRequestError && error.code === "unsupported_media") {
+        throw ApiError.unsupportedMedia("Fun-ASR 仅支持 WAV 或 MP3 音频。请重新录音后重试。");
+      }
       throw ApiError.processingUnavailable("Daily Story provider is temporarily unavailable.");
     }
     throw ApiError.processingUnavailable("Daily Story provider is temporarily unavailable.");

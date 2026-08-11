@@ -24,6 +24,12 @@ export const DASHSCOPE_FUN_ASR_HTTP_MODELS = [
   "fun-asr-realtime",
   "fun-asr-realtime-2026-02-28",
 ] as const;
+export const DASHSCOPE_FUN_ASR_HTTP_AUDIO_MIME_TYPES = [
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mpeg",
+  "audio/mp3",
+] as const;
 export const DASHSCOPE_FUN_ASR_NATIVE_PATH =
   "/api/v1/services/aigc/multimodal-generation/generation";
 

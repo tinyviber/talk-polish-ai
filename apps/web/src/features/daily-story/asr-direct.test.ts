@@ -21,6 +21,12 @@ describe("DashScope Fun-ASR direct browser helper", () => {
     expect(body.input.messages[0]?.content[0]?.audio).toBe("data:audio/wav;base64,AAEC");
   });
 
+  test("rejects Opus before building a Fun-ASR HTTP request", () => {
+    expect(() =>
+      createDashScopeFunAsrDirectBody("fun-asr-realtime", Uint8Array.from([0, 1, 2]), "audio/opus"),
+    ).toThrow("仅支持 WAV 或 MP3");
+  });
+
   test("parses both native output shapes without trimming the transcript", () => {
     expect(parseDashScopeFunAsrDirectTranscript({ output: { text: " hello " } })).toEqual({
       transcript: " hello ",

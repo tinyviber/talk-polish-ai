@@ -92,4 +92,33 @@ describe("DashScope native Fun-ASR HTTP adapter", () => {
     expect(observed?.headers.get("x-dashscope-sse")).toBe("disable");
     expect(observed?.body).toMatchObject({ model: "fun-asr-realtime", resources: [] });
   });
+
+  test("rejects unsupported browser MIME before contacting Fun-ASR", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = async () => {
+      throw new Error("provider must not be contacted");
+    };
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const { createDashScopeFunAsrSpeechToText } =
+        await import("./dashscope-fun-asr-speech-to-text");
+      const provider = createDashScopeFunAsrSpeechToText(
+        { ...env(), NODE_ENV: "test", DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS: true },
+        {
+          baseUrl: "https://ws-1ojsn1omateq5fkp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+          apiKey: "secret-key",
+          model: "fun-asr-realtime",
+        },
+      );
+      await expect(
+        provider.transcribe({
+          audio: Uint8Array.from([0, 1, 2]),
+          mimeType: "audio/mp4",
+          requestId: "unsupported-audio-request",
+        }),
+      ).rejects.toMatchObject({ code: "unsupported_media", status: 415 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DASHSCOPE_COMPATIBLE_DEFAULT_BASE_URL,
   DASHSCOPE_DIRECT_CONNECT_SOURCES,
+  DASHSCOPE_FUN_ASR_HTTP_AUDIO_MIME_TYPES,
   DASHSCOPE_FUN_ASR_NATIVE_PATH,
   DEEPSEEK_DEFAULT_BASE_URL,
   OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
@@ -28,6 +29,12 @@ describe("provider preset catalog", () => {
     expect(DASHSCOPE_DIRECT_CONNECT_SOURCES).toEqual([
       "https://dashscope.aliyuncs.com",
       "https://dashscope-intl.aliyuncs.com",
+    ]);
+    expect(DASHSCOPE_FUN_ASR_HTTP_AUDIO_MIME_TYPES).toEqual([
+      "audio/wav",
+      "audio/x-wav",
+      "audio/mpeg",
+      "audio/mp3",
     ]);
   });
 

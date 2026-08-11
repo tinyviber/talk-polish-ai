@@ -10,7 +10,7 @@ import {
 } from "./outbound-url-policy";
 
 export class DailyProviderRequestError extends Error {
-  readonly code: "timeout" | "network" | "http" | "redirect" | "response";
+  readonly code: "timeout" | "network" | "http" | "redirect" | "response" | "unsupported_media";
   readonly status?: number;
   readonly reason?: string;
   constructor(code: DailyProviderRequestError["code"], status?: number, reason?: string) {

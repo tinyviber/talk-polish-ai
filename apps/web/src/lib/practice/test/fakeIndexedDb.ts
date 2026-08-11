@@ -165,15 +165,6 @@ function createDatabase(data: DatabaseData) {
   let closed = false;
   const activeTransactions = new Set<{ forceAbort(error: Error): void }>();
   let closeNextTransaction = false;
-  let database: {
-    onclose: ((event: Event) => void) | null;
-    onversionchange: ((event: Event) => void) | null;
-    close(): void;
-    __closeNextTransaction(): void;
-    readonly objectStoreNames: DOMStringList;
-    createObjectStore(name: string, options?: IDBObjectStoreParameters): IDBObjectStore;
-    transaction(storeNames: string | string[], mode?: IDBTransactionMode): IDBTransaction;
-  };
   const forceClose = () => {
     if (closed) return;
     closed = true;
@@ -181,7 +172,7 @@ function createDatabase(data: DatabaseData) {
     for (const transaction of activeTransactions) transaction.forceAbort(error);
     database.onclose?.(new Event("close"));
   };
-  database = {
+  const database = {
     onclose: null as ((event: Event) => void) | null,
     onversionchange: null as ((event: Event) => void) | null,
     close() {

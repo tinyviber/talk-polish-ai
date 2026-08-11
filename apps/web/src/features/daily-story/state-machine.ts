@@ -1,4 +1,10 @@
-import type { DailyMessage, DailyReview, StorySession, TurnSource } from "./types";
+import type {
+  DailyMessage,
+  DailyReview,
+  StorySession,
+  StorySessionSnapshot,
+  TurnSource,
+} from "./types";
 
 export type DailyPhase =
   | "loading"
@@ -134,7 +140,8 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
           ...base,
           phase: state.pendingTranscript?.source === "asr" ? "transcriptReady" : "chatting",
         };
-      if (state.phase === "reviewing") return { ...base, phase: "chatting" };
+      if (state.phase === "reviewing")
+        return { ...base, phase: state.review ? "review" : "chatting" };
       if (state.phase === "readingAloudTranscribing") return { ...base, phase: "review" };
       return base;
     }
@@ -262,7 +269,7 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
           }
         : state;
     case "reviewRequest":
-      return state.phase === "chatting" || state.phase === "error"
+      return state.phase === "chatting" || state.phase === "review" || state.phase === "error"
         ? {
             ...state,
             phase: "reviewing",
@@ -276,7 +283,7 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         : state;
     case "reviewCancelled":
       return state.phase === "reviewing"
-        ? { ...state, phase: "chatting", operation: null, error: null }
+        ? { ...state, phase: state.review ? "review" : "chatting", operation: null, error: null }
         : state;
     case "readAloudRecording":
       return state.phase === "review"
@@ -301,6 +308,18 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
       return { ...initialDailyState, phase: "compose" };
     case "failure": {
       if (action.operationId && !sameOperation(state, action as Operation)) return state;
+      if (action.kind === "review" && state.review && action.resumePhase === "review") {
+        return {
+          ...state,
+          phase: "review",
+          operation: null,
+          error: {
+            message: action.message,
+            resumePhase: "review",
+            kind: "review",
+          },
+        };
+      }
       return {
         ...state,
         phase: "error",
@@ -336,9 +355,7 @@ export function isDailyBusy(phase: DailyPhase) {
 }
 
 /** Strip every unstable/secrets-bearing field before IndexedDB persistence. */
-export function snapshotDailyState(
-  state: DailyState,
-): Omit<StorySession, "schemaVersion" | "revision" | "updatedAt"> | null {
+export function snapshotDailyState(state: DailyState): StorySessionSnapshot | null {
   if (state.phase !== "chatting" && state.phase !== "transcriptReady" && state.phase !== "review")
     return null;
   if (!state.storyZh) return null;

@@ -48,7 +48,14 @@ type ProviderFactory = (
 type Guard = typeof withDailyStoryRequestGuard;
 
 const DAILY_STORY_REPLY_MAX_TOKENS = 512;
-const DAILY_STORY_REVIEW_MAX_TOKENS = 768;
+export const DAILY_STORY_REVIEW_MAX_TOKENS = 1024;
+
+export function dailyStoryReviewComment(score: number) {
+  if (score >= 90) return "本次表达整体清晰自然，可继续扩大表达范围。";
+  if (score >= 75) return "本次表达整体稳定，针对细节继续打磨会更自然。";
+  if (score >= 60) return "本次表达基本清楚，继续针对分项薄弱处练习。";
+  return "本次表达基础仍需加强，建议优先结合四项分项反馈练习。";
+}
 
 export function createDailyStoryService(
   config: Env,
@@ -195,7 +202,7 @@ export function createDailyStoryService(
             createStructuredGenerator(chat).generate({
               schema: reviewResultSchema,
               repairInstruction:
-                'Return only JSON with this exact shape: {"suggestions":[{"sourceTurnId":"string","improved":"string","category":"clarity|grammar|naturalness","explanationZh":"string"}]}. Each suggestion must contain exactly those four string fields; return an empty suggestions array when there is no useful improvement.',
+                "Return only JSON with the exact rubric and suggestions shape from the system instruction. Do not return a total score or top-level comment. Each evidence quote must be an exact continuous substring of its referenced user turn.",
               messages: [
                 { role: "system", content: reviewSystemPrompt },
                 {
@@ -226,7 +233,29 @@ export function createDailyStoryService(
             explanationZh: suggestion.explanationZh,
           });
         }
-        return { suggestions };
+        for (const item of Object.values(generated.value.rubric)) {
+          for (const evidence of item.evidence) {
+            const source = sourceTurns.get(evidence.sourceTurnId);
+            if (source === undefined || !source.includes(evidence.quote)) {
+              throw ApiError.processingUnavailable(
+                "Daily Story review could not be validated. Please retry.",
+              );
+            }
+          }
+        }
+        const score = Math.round(
+          (generated.value.rubric.fluency.score +
+            generated.value.rubric.grammar.score +
+            generated.value.rubric.vocabulary.score +
+            generated.value.rubric.naturalness.score) /
+            4,
+        );
+        return {
+          score,
+          comment: dailyStoryReviewComment(score),
+          rubric: generated.value.rubric,
+          suggestions,
+        };
       });
     },
 

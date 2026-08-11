@@ -3,6 +3,7 @@ import {
   DAILY_STORY_LIMITS,
   dailyStoryAsrConfigSchema,
   dailyStoryChatConfigSchema,
+  dailyStoryReviewRubricSchema,
   dailyStoryTtsConfigSchema,
   identifyProviderPreset,
   normalizeProviderBaseUrl,
@@ -13,8 +14,11 @@ import type {
   AsrProvider,
   ChatProvider,
   DailyCapability,
+  DailyReview,
   ProviderSettings,
+  ReviewRubric,
   StorySession,
+  StorySessionSnapshot,
   StorySessionSummary,
   TtsProvider,
 } from "./types";
@@ -28,9 +32,13 @@ const LEASE_STORE = "storyLeases";
 const CURRENT = "current";
 const LEASE_MS = 15_000;
 const STORY_EXPORT_FORMAT = "kotoba-daily-story" as const;
-const STORY_EXPORT_VERSION = 1 as const;
+const STORY_EXPORT_VERSION = 2 as const;
+const STORY_EXPORT_LEGACY_VERSION = 1 as const;
 const MAX_STORY_TRANSFER_BYTES = 10 * 1024 * 1024;
 const MAX_STORY_TRANSFER_SESSIONS = 200;
+const REVIEW_DB_NAME = "kotoba-daily-story-review-v2";
+const REVIEW_DB_VERSION = 1;
+const REVIEW_STORE = "reviews";
 
 const providerSchema = z
   .object({
@@ -149,6 +157,14 @@ const storyExportReviewSchema = z
   })
   .strict();
 
+const storyExportReviewV2Schema = storyExportReviewSchema
+  .extend({
+    score: z.number().int().min(0).max(100).nullable().optional(),
+    comment: z.string().min(1).max(300).nullable().optional(),
+    rubric: dailyStoryReviewRubricSchema.nullable().optional(),
+  })
+  .strict();
+
 const storyExportSessionSchema = z
   .object({
     id: safeTransferId(160).refine((value) => value !== CURRENT, {
@@ -165,7 +181,7 @@ const storyExportSessionSchema = z
       })
       .strict()
       .optional(),
-    review: storyExportReviewSchema.optional(),
+    review: storyExportReviewV2Schema.optional(),
   })
   .strict()
   .superRefine((session, ctx) => {
@@ -217,12 +233,22 @@ const storyExportSessionSchema = z
   });
 
 const storyExportEnvelopeSchema = z
-  .object({
-    format: z.literal(STORY_EXPORT_FORMAT),
-    version: z.literal(STORY_EXPORT_VERSION),
-    sessions: z.array(storyExportSessionSchema).max(MAX_STORY_TRANSFER_SESSIONS),
-  })
-  .strict()
+  .union([
+    z
+      .object({
+        format: z.literal(STORY_EXPORT_FORMAT),
+        version: z.literal(STORY_EXPORT_LEGACY_VERSION),
+        sessions: z.array(storyExportSessionSchema).max(MAX_STORY_TRANSFER_SESSIONS),
+      })
+      .strict(),
+    z
+      .object({
+        format: z.literal(STORY_EXPORT_FORMAT),
+        version: z.literal(STORY_EXPORT_VERSION),
+        sessions: z.array(storyExportSessionSchema).max(MAX_STORY_TRANSFER_SESSIONS),
+      })
+      .strict(),
+  ])
   .superRefine((envelope, ctx) => {
     const ids = new Set<string>();
     for (const [index, session] of envelope.sessions.entries()) {
@@ -237,10 +263,25 @@ const storyExportEnvelopeSchema = z
     }
   });
 
+const storedReviewSidecarSchema = z
+  .object({
+    conversationId: z.string().trim().min(1).max(160),
+    score: z.number().int().min(0).max(100).nullable(),
+    comment: z.string().min(1).max(300).nullable(),
+    rubric: dailyStoryReviewRubricSchema.nullable(),
+  })
+  .strict();
+
 type StoredSettings = z.infer<typeof settingsSchema>;
 type StoredSession = z.infer<typeof sessionSchema>;
 type StoryExportEnvelope = z.infer<typeof storyExportEnvelopeSchema>;
 type StoryExportSession = z.infer<typeof storyExportSessionSchema>;
+type StoredReviewSidecar = {
+  conversationId: string;
+  score: number | null;
+  comment: string | null;
+  rubric: ReviewRubric | null;
+};
 type DailyStorageEvent =
   | { kind: "settings"; revision: number }
   | { kind: "session"; conversationId: string; revision: number }
@@ -269,6 +310,8 @@ export class StoryImportError extends Error {
 
 let openPromise: Promise<IDBDatabase> | undefined;
 let cachedDatabase: IDBDatabase | undefined;
+let reviewOpenPromise: Promise<IDBDatabase> | undefined;
+let cachedReviewDatabase: IDBDatabase | undefined;
 let channel: BroadcastChannel | undefined;
 const listeners = new Set<(event: DailyStorageEvent) => void>();
 
@@ -312,6 +355,17 @@ function resetCachedConnection() {
   const db = cachedDatabase;
   cachedDatabase = undefined;
   openPromise = undefined;
+  try {
+    db?.close();
+  } catch {
+    // The connection is already unusable; the next operation will reopen it.
+  }
+}
+
+function resetCachedReviewConnection() {
+  const db = cachedReviewDatabase;
+  cachedReviewDatabase = undefined;
+  reviewOpenPromise = undefined;
   try {
     db?.close();
   } catch {
@@ -376,6 +430,48 @@ function database() {
   return openPromise;
 }
 
+function reviewDatabase() {
+  if (typeof indexedDB === "undefined") return Promise.reject(new DailyStorageError());
+  if (!reviewOpenPromise) {
+    const pendingPromise = new Promise<IDBDatabase>((resolve, reject) => {
+      let request: IDBOpenDBRequest;
+      try {
+        request = indexedDB.open(REVIEW_DB_NAME, REVIEW_DB_VERSION);
+      } catch {
+        reject(new DailyStorageError());
+        return;
+      }
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(REVIEW_STORE))
+          db.createObjectStore(REVIEW_STORE, { keyPath: "conversationId" });
+      };
+      request.onerror = () => reject(new DailyStorageError());
+      request.onsuccess = () => {
+        const db = request.result;
+        cachedReviewDatabase = db;
+        const clearIfCached = () => {
+          if (cachedReviewDatabase !== db) return;
+          cachedReviewDatabase = undefined;
+          reviewOpenPromise = undefined;
+        };
+        db.onclose = clearIfCached;
+        db.onversionchange = () => {
+          db.close();
+          clearIfCached();
+        };
+        resolve(db);
+      };
+    });
+    const trackedPromise = pendingPromise.catch((error: unknown) => {
+      if (reviewOpenPromise === trackedPromise) reviewOpenPromise = undefined;
+      throw normalizeStorageError(error);
+    });
+    reviewOpenPromise = trackedPromise;
+  }
+  return reviewOpenPromise;
+}
+
 function runTransaction<T>(
   stores: string | string[],
   mode: IDBTransactionMode,
@@ -424,6 +520,59 @@ function transaction<T>(
     runTransaction<T>(stores, mode, run).catch((error: unknown) => {
       if (canRecover && isRecoverableDatabaseError(error)) {
         resetCachedConnection();
+        return attempt(false);
+      }
+      throw normalizeStorageError(error);
+    });
+  return attempt(true);
+}
+
+function runReviewTransaction<T>(
+  mode: IDBTransactionMode,
+  run: (tx: IDBTransaction, abort: (error: unknown) => void) => void,
+) {
+  return reviewDatabase().then(
+    (db) =>
+      new Promise<T>((resolve, reject) => {
+        let result: T;
+        let tx: IDBTransaction;
+        let failure: unknown;
+        let aborted = false;
+        const abort = (error: unknown) => {
+          failure = error;
+          if (aborted) return;
+          aborted = true;
+          try {
+            tx.abort();
+          } catch {
+            reject(error);
+          }
+        };
+        try {
+          tx = db.transaction(REVIEW_STORE, mode);
+          tx.oncomplete = () => resolve(result!);
+          tx.onerror = tx.onabort = () => reject(failure ?? tx.error ?? new DailyStorageError());
+          (tx as IDBTransaction & { __dailyResult?: (value: T) => void }).__dailyResult = (
+            value,
+          ) => {
+            result = value;
+          };
+          run(tx, abort);
+        } catch (error) {
+          abort(error);
+        }
+      }),
+  );
+}
+
+function reviewTransaction<T>(
+  mode: IDBTransactionMode,
+  run: (tx: IDBTransaction, abort: (error: unknown) => void) => void,
+) {
+  const attempt = (canRecover: boolean): Promise<T> =>
+    runReviewTransaction<T>(mode, run).catch((error: unknown) => {
+      if (canRecover && isRecoverableDatabaseError(error)) {
+        resetCachedReviewConnection();
         return attempt(false);
       }
       throw normalizeStorageError(error);
@@ -586,7 +735,88 @@ function fromStoredSession(value: StoredSession): StorySession {
       ...(item.source ? { source: item.source } : {}),
     })),
     ...(value.pendingAsrTranscript ? { pendingAsrTranscript: value.pendingAsrTranscript } : {}),
-    ...(value.review ? { review: value.review } : {}),
+    ...(value.review
+      ? {
+          review: {
+            score: null,
+            comment: null,
+            rubric: null,
+            suggestions: value.review.suggestions,
+          },
+        }
+      : {}),
+  };
+}
+
+export type DailyReviewSidecar = Pick<DailyReview, "score" | "comment" | "rubric">;
+
+function sidecarRecord(conversationId: string, review: DailyReviewSidecar): StoredReviewSidecar {
+  return storedReviewSidecarSchema.parse({ conversationId, ...review });
+}
+
+export async function readDailyStoryReview(
+  conversationId: string,
+): Promise<DailyReviewSidecar | null> {
+  const result = await reviewTransaction<DailyReviewSidecar | null>("readonly", (tx) => {
+    const request = tx.objectStore(REVIEW_STORE).get(conversationId);
+    request.onsuccess = () => {
+      const record = request.result as unknown;
+      if (record === undefined) {
+        setResult(tx, null);
+        return;
+      }
+      const parsed = storedReviewSidecarSchema.parse(record);
+      setResult(tx, {
+        score: parsed.score,
+        comment: parsed.comment,
+        rubric: parsed.rubric,
+      });
+    };
+  });
+  return result;
+}
+
+export async function writeDailyStoryReview(
+  conversationId: string,
+  review: DailyReviewSidecar,
+): Promise<DailyReviewSidecar> {
+  const normalized = {
+    score: review.score ?? null,
+    comment: review.comment ?? null,
+    rubric: review.rubric ?? null,
+  } satisfies DailyReviewSidecar;
+  if (normalized.score === null && normalized.comment === null && normalized.rubric === null) {
+    await deleteDailyStoryReview(conversationId);
+    return normalized;
+  }
+  await reviewTransaction<void>("readwrite", (tx, abort) => {
+    try {
+      const request = tx.objectStore(REVIEW_STORE).put(sidecarRecord(conversationId, normalized));
+      request.onsuccess = () => setResult(tx, undefined);
+    } catch (error) {
+      abort(error);
+    }
+  });
+  return normalized;
+}
+
+export async function deleteDailyStoryReview(conversationId: string): Promise<void> {
+  await reviewTransaction<void>("readwrite", (tx) => {
+    const request = tx.objectStore(REVIEW_STORE).delete(conversationId);
+    request.onsuccess = () => setResult(tx, undefined);
+  });
+}
+
+function mergeReview(session: StorySession, sidecar: DailyReviewSidecar | null): StorySession {
+  if (!session.review) return session;
+  return {
+    ...session,
+    review: {
+      score: sidecar?.score ?? null,
+      comment: sidecar?.comment ?? null,
+      rubric: sidecar?.rubric ?? null,
+      suggestions: session.review.suggestions,
+    },
   };
 }
 
@@ -616,10 +846,18 @@ function sameValue(left: unknown, right: unknown): boolean {
 }
 
 function sessionRecord(session: StorySession, conversationId: string): StoredSession {
-  return sessionSchema.parse({ id: conversationId, ...session });
+  const { review, ...withoutReview } = session;
+  return sessionSchema.parse({
+    id: conversationId,
+    ...withoutReview,
+    ...(review ? { review: { suggestions: review.suggestions } } : {}),
+  });
 }
 
-function exportSessionRecord(value: unknown): StoryExportSession {
+function exportSessionRecord(
+  value: unknown,
+  reviewSidecar: DailyReviewSidecar | null,
+): StoryExportSession {
   const parsed = sessionSchema.parse(value);
   const projected = {
     id: parsed.id,
@@ -633,7 +871,16 @@ function exportSessionRecord(value: unknown): StoryExportSession {
       ...(message.source ? { source: message.source } : {}),
     })),
     ...(parsed.pendingAsrTranscript ? { pendingAsrTranscript: parsed.pendingAsrTranscript } : {}),
-    ...(parsed.review ? { review: parsed.review } : {}),
+    ...(parsed.review
+      ? {
+          review: {
+            ...parsed.review,
+            score: reviewSidecar?.score ?? null,
+            comment: reviewSidecar?.comment ?? null,
+            rubric: reviewSidecar?.rubric ?? null,
+          },
+        }
+      : {}),
   };
   return storyExportSessionSchema.parse(projected);
 }
@@ -648,8 +895,17 @@ function importedSessionRecord(session: StoryExportSession): StoredSession {
     storyZh: session.storyZh,
     messages: session.messages,
     ...(session.pendingAsrTranscript ? { pendingAsrTranscript: session.pendingAsrTranscript } : {}),
-    ...(session.review ? { review: session.review } : {}),
+    ...(session.review ? { review: { suggestions: session.review.suggestions } } : {}),
   });
+}
+
+function importedReviewSidecar(session: StoryExportSession): DailyReviewSidecar | null {
+  if (!session.review) return null;
+  return {
+    score: session.review.score ?? null,
+    comment: session.review.comment ?? null,
+    rubric: session.review.rubric ?? null,
+  };
 }
 
 function transferBytes(value: string) {
@@ -706,12 +962,20 @@ export async function exportStorySessions(): Promise<string> {
     throw new StoryImportError("对话数量超过导出上限。");
   }
 
+  const sidecars = await Promise.all(
+    records.map(async (record) => {
+      const id = record && typeof record === "object" ? (record as { id?: unknown }).id : null;
+      return typeof id === "string" ? readDailyStoryReview(id) : null;
+    }),
+  );
   let envelope: StoryExportEnvelope;
   try {
     envelope = storyExportEnvelopeSchema.parse({
       format: STORY_EXPORT_FORMAT,
       version: STORY_EXPORT_VERSION,
-      sessions: records.map(exportSessionRecord),
+      sessions: records.map((record, index) =>
+        exportSessionRecord(record, sidecars[index] ?? null),
+      ),
     });
   } catch {
     throw new StoryImportError(
@@ -746,6 +1010,7 @@ export async function importStorySessions(jsonText: string): Promise<{
   if (parsed.data.sessions.length === 0) return { imported: 0, migratedLegacy: false };
 
   const imported = parsed.data.sessions.map(importedSessionRecord);
+  const importedSidecars = parsed.data.sessions.map(importedReviewSidecar);
   const result = await sessionImportTransaction<{
     importedIds: string[];
     migratedId?: string;
@@ -826,7 +1091,18 @@ export async function importStorySessions(jsonText: string): Promise<{
   if (result.migratedId && result.migratedRevision !== undefined) {
     notifySession(result.migratedId, result.migratedRevision);
   }
-  for (const id of result.importedIds) notifySession(id, 1);
+  for (const [index, id] of result.importedIds.entries()) {
+    const sidecar = importedSidecars[index];
+    if (
+      sidecar &&
+      (sidecar.score !== null || sidecar.comment !== null || sidecar.rubric !== null)
+    ) {
+      await writeDailyStoryReview(id, sidecar);
+    } else {
+      await deleteDailyStoryReview(id);
+    }
+    notifySession(id, 1);
+  }
   return { imported: result.importedIds.length, migratedLegacy: !!result.migratedId };
 }
 
@@ -985,40 +1261,42 @@ async function migrateLegacySession() {
 
 export async function listStorySessions(): Promise<StorySessionSummary[]> {
   await ensureDailyStorage();
-  return transaction<StorySessionSummary[]>(SESSION_STORE, "readonly", (tx) => {
+  const records = await transaction<unknown[]>(SESSION_STORE, "readonly", (tx) => {
     const request = tx.objectStore(SESSION_STORE).getAll();
     request.onsuccess = () => {
-      const sessions = (request.result as unknown[]).map((record) => {
-        const parsed = sessionSchema.parse(record);
-        return {
-          id: parsed.id,
-          revision: parsed.revision,
-          updatedAt: parsed.updatedAt,
-          phase: parsed.phase,
-          storyZh: parsed.storyZh,
-        } satisfies StorySessionSummary;
-      });
-      setResult(
-        tx,
-        sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-      );
+      setResult(tx, request.result as unknown[]);
     };
   });
+  const sessions = await Promise.all(
+    records.map(async (record) => {
+      const parsed = sessionSchema.parse(record);
+      const session = fromStoredSession(parsed);
+      const review = await readDailyStoryReview(parsed.id);
+      return {
+        id: parsed.id,
+        revision: parsed.revision,
+        updatedAt: parsed.updatedAt,
+        phase: parsed.phase,
+        storyZh: parsed.storyZh,
+        review: session.review ? (mergeReview(session, review).review ?? null) : null,
+      } satisfies StorySessionSummary;
+    }),
+  );
+  return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export async function readStorySession(conversationId = CURRENT): Promise<StorySession | null> {
-  return transaction<StorySession | null>(SESSION_STORE, "readonly", (tx) => {
+  const session = await transaction<StorySession | null>(SESSION_STORE, "readonly", (tx) => {
     const request = tx.objectStore(SESSION_STORE).get(conversationId);
     request.onsuccess = () => {
       const record = request.result as unknown;
       setResult(tx, record === undefined ? null : fromStoredSession(sessionSchema.parse(record)));
     };
   });
+  return session ? mergeReview(session, await readDailyStoryReview(conversationId)) : null;
 }
 
 /** CAS writes stop stale tabs from undoing newer turns. */
-type StorySessionSnapshot = Omit<StorySession, "schemaVersion" | "revision" | "updatedAt">;
-
 export function writeStorySession(
   session: StorySessionSnapshot,
   expectedRevision: number | null,
@@ -1075,8 +1353,22 @@ export async function writeStorySession(
             abort(new SessionConflictError());
             return;
           }
+          const { review: snapshotReview, ...sessionWithoutReview } = session;
           const next: StorySession = {
-            ...session,
+            ...sessionWithoutReview,
+            ...(snapshotReview
+              ? {
+                  review:
+                    "score" in snapshotReview
+                      ? snapshotReview
+                      : {
+                          score: null,
+                          comment: null,
+                          rubric: null,
+                          suggestions: snapshotReview.suggestions,
+                        },
+                }
+              : {}),
             schemaVersion: 1,
             revision: (previous?.revision ?? 0) + 1,
             updatedAt: new Date().toISOString(),
@@ -1109,6 +1401,11 @@ export async function writeStorySession(
       }
     },
   );
+  if (result.review) {
+    await writeDailyStoryReview(conversationId, result.review);
+  } else {
+    await deleteDailyStoryReview(conversationId);
+  }
   notifySession(conversationId, result.revision);
   return result;
 }
@@ -1149,6 +1446,7 @@ export async function deleteStorySession(
       }
     };
   });
+  await deleteDailyStoryReview(conversationId);
   notifySession(conversationId, (expectedRevision ?? 0) + 1);
   return result;
 }

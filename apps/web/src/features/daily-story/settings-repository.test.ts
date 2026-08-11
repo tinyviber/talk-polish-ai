@@ -445,6 +445,9 @@ describe("Daily Story IndexedDB", () => {
           },
         ],
         review: {
+          score: null,
+          comment: null,
+          rubric: null,
           suggestions: [
             {
               sourceTurnId: "user-roundtrip",
@@ -462,7 +465,7 @@ describe("Daily Story IndexedDB", () => {
     const exportedSession = (exported["sessions"] as Array<Record<string, unknown>>)[0]!;
     expect(exported).toEqual({
       format: "kotoba-daily-story",
-      version: 1,
+      version: 2,
       sessions: [
         {
           id: "conversation-roundtrip",
@@ -479,6 +482,9 @@ describe("Daily Story IndexedDB", () => {
             },
           ],
           review: {
+            score: null,
+            comment: null,
+            rubric: null,
             suggestions: [
               {
                 sourceTurnId: "user-roundtrip",
@@ -503,6 +509,42 @@ describe("Daily Story IndexedDB", () => {
     expect(restored?.revision).toBe(1);
     expect(restored?.updatedAt).toBe(saved.updatedAt);
     expect(restored?.review?.suggestions[0]?.category).toBe("naturalness");
+  });
+
+  test("imports legacy v1 exports and carries forward an unscored review", async () => {
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    const legacy = JSON.parse(exportFixture("legacy-v1")) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    legacy.sessions[0]!["phase"] = "review";
+    legacy.sessions[0]!["review"] = {
+      suggestions: [
+        {
+          sourceTurnId: "legacy-v1-user",
+          original: "I stayed home.",
+          improved: "I stayed at home.",
+          category: "naturalness",
+          explanationZh: "这里更自然。",
+        },
+      ],
+    };
+
+    await expect(importStorySessions(JSON.stringify(legacy))).resolves.toEqual({
+      imported: 1,
+      migratedLegacy: false,
+    });
+    await expect(readStorySession("legacy-v1")).resolves.toMatchObject({
+      phase: "review",
+      review: {
+        score: null,
+        comment: null,
+        rubric: null,
+        suggestions: [{ sourceTurnId: "legacy-v1-user" }],
+      },
+    });
+    await expect(exportStorySessions()).resolves.toContain('"version":2');
+    await deleteStorySession("legacy-v1", 1);
   });
 
   test("refuses to export a legacy record that cannot pass the import schema", async () => {

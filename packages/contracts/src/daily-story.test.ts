@@ -5,6 +5,7 @@ import {
   dailyStoryChatConfigSchema,
   dailyStoryProviderCheckRequestSchema,
   dailyStoryReplyRequestSchema,
+  dailyStoryReviewResponseSchema,
   dailyStoryReviewSuggestionSchema,
   dailyStoryTtsConfigSchema,
 } from "./daily-story";
@@ -188,5 +189,14 @@ describe("Daily Story contracts", () => {
     expect(dailyStoryReviewSuggestionSchema.parse(suggestion).sourceTurnId).toBe("u1");
     const { category: _category, ...withoutCategory } = suggestion;
     expect(dailyStoryReviewSuggestionSchema.safeParse(withoutCategory).success).toBe(false);
+  });
+
+  test("keeps new review fields optional for rolling API compatibility", () => {
+    expect(
+      dailyStoryReviewResponseSchema.parse({
+        suggestions: [],
+        requestId: "legacy-review",
+      }),
+    ).toEqual({ suggestions: [], requestId: "legacy-review" });
   });
 });

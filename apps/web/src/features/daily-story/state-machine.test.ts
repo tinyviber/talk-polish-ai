@@ -130,6 +130,9 @@ describe("Daily Story reducer", () => {
       phase: "review" as const,
       storyZh: "故事",
       review: {
+        score: null,
+        comment: null,
+        rubric: null,
         suggestions: [
           {
             sourceTurnId: "user-1",

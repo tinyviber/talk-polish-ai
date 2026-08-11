@@ -10,13 +10,34 @@ import {
   conversationSystemPrompt,
   openingUserPrompt,
 } from "./policy";
-import { createDailyStoryService } from "./service";
+import { createDailyStoryService, DAILY_STORY_REVIEW_MAX_TOKENS } from "./service";
 
 const chatConfig = {
   baseUrl: "https://api.example.com",
   apiKey: "secret-test-key",
   model: "fixture",
 };
+
+function rubric(scores = { fluency: 70, grammar: 70, vocabulary: 70, naturalness: 70 }) {
+  return Object.fromEntries(
+    Object.entries(scores).map(([key, score]) => [
+      key,
+      { score, comment: `${key} 客观短评`, evidence: [] },
+    ]),
+  );
+}
+
+function reviewInput() {
+  return {
+    learnerId: "learner",
+    requestId: "review-request",
+    storyZh: "今天开会。",
+    history: [
+      { id: "u1", role: "user" as const, source: "typed" as const, text: "The meeting was long." },
+    ],
+    chat: chatConfig,
+  };
+}
 
 function fixtureModel(values: unknown[], requests: TextModelRequest[] = []): TextModel {
   return {
@@ -239,7 +260,7 @@ describe("Daily Story policy service", () => {
       [
         { reply: "That sounds like a long day. What happened next?" },
         { understanding: "understood", reply: "That sounds tiring." },
-        { suggestions: [] },
+        { rubric: rubric(), suggestions: [] },
       ],
       requests,
     );
@@ -274,7 +295,7 @@ describe("Daily Story policy service", () => {
     ).toEqual([
       { responseFormat: "json", maxTokens: DAILY_STORY_OPENING_MAX_TOKENS },
       { responseFormat: "json", maxTokens: 512 },
-      { responseFormat: "json", maxTokens: 768 },
+      { responseFormat: "json", maxTokens: DAILY_STORY_REVIEW_MAX_TOKENS },
     ]);
     expect(requests[0]?.messages).toEqual([
       { role: "system", content: conversationSystemPrompt },
@@ -285,10 +306,10 @@ describe("Daily Story policy service", () => {
   test("restores review originals from submitted history", async () => {
     const service = serviceFor([
       {
+        rubric: rubric(),
         suggestions: [
           {
             sourceTurnId: "u1",
-            original: "The model repeated this inaccurately.",
             improved: "The meeting took too long.",
             category: "naturalness",
             explanationZh: "更自然。",
@@ -316,6 +337,51 @@ describe("Daily Story policy service", () => {
     ]);
   });
 
+  test("calculates the overall score server-side and preserves valid evidence", async () => {
+    const service = serviceFor([
+      {
+        rubric: {
+          ...rubric({ fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 }),
+          fluency: {
+            score: 91,
+            comment: "表达连贯。",
+            evidence: [{ sourceTurnId: "u1", quote: "meeting was long" }],
+          },
+        },
+        suggestions: [],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 75,
+      comment: "本次表达整体稳定，针对细节继续打磨会更自然。",
+      rubric: {
+        fluency: {
+          score: 91,
+          evidence: [{ sourceTurnId: "u1", quote: "meeting was long" }],
+        },
+      },
+    });
+  });
+
+  test("rejects rubric evidence whose quote is not in the submitted user turn", async () => {
+    const service = serviceFor([
+      {
+        rubric: {
+          ...rubric(),
+          grammar: {
+            score: 70,
+            comment: "需要继续练习。",
+            evidence: [{ sourceTurnId: "u1", quote: "model-invented wording" }],
+          },
+        },
+        suggestions: [],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).rejects.toBeInstanceOf(ApiError);
+  });
+
   test("keeps ASR text verbatim, including trailing whitespace", async () => {
     const service = serviceFor([]);
     const result = await service.transcribe({
@@ -331,6 +397,7 @@ describe("Daily Story policy service", () => {
   test("rejects review suggestions with an unknown source turn", async () => {
     const service = serviceFor([
       {
+        rubric: rubric(),
         suggestions: [
           {
             sourceTurnId: "unknown",
@@ -357,6 +424,7 @@ describe("Daily Story policy service", () => {
   test("rejects duplicate review source turns", async () => {
     const service = serviceFor([
       {
+        rubric: rubric(),
         suggestions: [
           {
             sourceTurnId: "u1",

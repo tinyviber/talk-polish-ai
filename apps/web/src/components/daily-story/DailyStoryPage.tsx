@@ -42,7 +42,12 @@ import {
   type RecordingDraft,
 } from "@/features/daily-story/recording-drafts";
 import type { DailyStoryAudioPurpose } from "@/features/daily-story/audio-outbox";
-import { createConversationId, type ReviewSuggestion } from "@/features/daily-story/types";
+import {
+  createConversationId,
+  type DailyReview,
+  type ReviewRubric,
+  type ReviewSuggestion,
+} from "@/features/daily-story/types";
 import { DailyStoryHeader } from "./AppHeader";
 import { finishConfirmationReducer, initialFinishConfirmationState } from "./finish-confirmation";
 import { resolveRecordingDraftPurpose } from "./recording-draft-purpose";
@@ -91,7 +96,9 @@ export function DailyStoryPage({
   const [transcriptDraft, setTranscriptDraft] = useState("");
   const [cachedAudioUrl, setCachedAudioUrl] = useState<string | null>(null);
   const [conversationAudioUrls, setConversationAudioUrls] = useState<Record<string, string>>({});
-  const [reviewTab, setReviewTab] = useState<"conversation" | "suggestions">("conversation");
+  const [reviewTab, setReviewTab] = useState<"conversation" | "suggestions" | "score">(
+    "conversation",
+  );
   const [recordingDrafts, setRecordingDrafts] = useState<
     Record<DailyStoryAudioPurpose, RecordingDraft | null>
   >({ conversation: null, readAloud: null });
@@ -391,7 +398,13 @@ export function DailyStoryPage({
   };
 
   const reviewProps: ReviewProps = {
+    review: story.state.review,
     suggestions: story.state.review?.suggestions ?? [],
+    reviewBusy: phase === "reviewing",
+    reviewError: story.state.error?.kind === "review" ? story.state.error.message : null,
+    onReReview: () => void story.finish(),
+    onCancelReview: story.cancelReview,
+    onRetryReview: story.retry,
     ttsEnabled: story.capabilities.tts,
     asrEnabled: story.capabilities.asr,
     readAloudRecording:
@@ -508,7 +521,6 @@ export function DailyStoryPage({
             {phase === "starting" ||
             phase === "transcribing" ||
             phase === "waitingForAi" ||
-            phase === "reviewing" ||
             phase === "readingAloudTranscribing" ? (
               <Loading label={statusLabel(phase)} />
             ) : null}
@@ -610,22 +622,24 @@ export function DailyStoryPage({
                 </div>
               </section>
             ) : null}
-            {showReadAloudDraft ? (
-              phase === "review" ? (
-                <ReviewTabs
-                  value={reviewTab}
-                  onValueChange={setReviewTab}
-                  messages={story.state.messages}
-                  conversationAudios={story.conversationAudios}
-                  conversationAudiosLoading={story.conversationAudiosLoading}
-                  conversationAudioUrls={conversationAudioUrls}
-                  reviewProps={reviewProps}
-                />
-              ) : (
-                // Keep the operation panel mounted while read-aloud recording is active so
-                // stopping or cancelling never depends on which review tab was last selected.
-                <Review {...reviewProps} />
-              )
+            {phase === "review" || (phase === "reviewing" && story.state.review) ? (
+              <ReviewTabs
+                value={reviewTab}
+                onValueChange={setReviewTab}
+                messages={story.state.messages}
+                conversationAudios={story.conversationAudios}
+                conversationAudiosLoading={story.conversationAudiosLoading}
+                conversationAudioUrls={conversationAudioUrls}
+                reviewProps={reviewProps}
+              />
+            ) : null}
+            {phase === "reviewing" && !story.state.review ? (
+              <ReviewProgress onCancel={story.cancelReview} />
+            ) : null}
+            {showReadAloudDraft && phase !== "review" ? (
+              // Keep the operation panel mounted while read-aloud recording is active so
+              // stopping or cancelling never depends on which review tab was last selected.
+              <Review {...reviewProps} />
             ) : null}
             {phase === "error" ? (
               <section className="mx-auto max-w-xl rounded-3xl border border-destructive/30 bg-card p-6 text-center shadow-lift">
@@ -1159,7 +1173,13 @@ function MicProblem({ error, onRetry }: { error: string | null; onRetry: () => v
 }
 
 type ReviewProps = {
+  review: DailyReview | null;
   suggestions: ReviewSuggestion[];
+  reviewBusy: boolean;
+  reviewError: string | null;
+  onReReview: () => void;
+  onCancelReview: () => void;
+  onRetryReview: () => void;
   ttsEnabled: boolean;
   asrEnabled: boolean;
   readAloudRecording: boolean;
@@ -1193,8 +1213,8 @@ function ReviewTabs({
   conversationAudioUrls,
   reviewProps,
 }: {
-  value: "conversation" | "suggestions";
-  onValueChange: (value: "conversation" | "suggestions") => void;
+  value: "conversation" | "suggestions" | "score";
+  onValueChange: (value: "conversation" | "suggestions" | "score") => void;
   messages: { id: string; role: "assistant" | "user"; text: string }[];
   conversationAudios: DailyStoryCachedAudio[];
   conversationAudiosLoading: boolean;
@@ -1204,15 +1224,20 @@ function ReviewTabs({
   return (
     <Tabs
       value={value}
-      onValueChange={(nextValue) => onValueChange(nextValue as "conversation" | "suggestions")}
+      onValueChange={(nextValue) =>
+        onValueChange(nextValue as "conversation" | "suggestions" | "score")
+      }
       className="mx-auto max-w-2xl"
     >
-      <TabsList className="grid h-auto w-full grid-cols-2 rounded-2xl p-1">
+      <TabsList className="grid h-auto w-full grid-cols-3 rounded-2xl p-1">
         <TabsTrigger value="conversation" className="rounded-xl py-2.5">
           原始对话
         </TabsTrigger>
         <TabsTrigger value="suggestions" className="rounded-xl py-2.5">
           修改建议
+        </TabsTrigger>
+        <TabsTrigger value="score" className="rounded-xl py-2.5">
+          水平评分
         </TabsTrigger>
       </TabsList>
       <TabsContent value="conversation">
@@ -1221,10 +1246,14 @@ function ReviewTabs({
           audios={conversationAudios}
           audiosLoading={conversationAudiosLoading}
           audioUrls={conversationAudioUrls}
+          reviewProps={reviewProps}
         />
       </TabsContent>
       <TabsContent value="suggestions">
         <Review {...reviewProps} />
+      </TabsContent>
+      <TabsContent value="score">
+        <ScoreReview {...reviewProps} />
       </TabsContent>
     </Tabs>
   );
@@ -1235,11 +1264,13 @@ function OriginalConversation({
   audios,
   audiosLoading,
   audioUrls,
+  reviewProps,
 }: {
   messages: { id: string; role: "assistant" | "user"; text: string }[];
   audios: DailyStoryCachedAudio[];
   audiosLoading: boolean;
   audioUrls: Record<string, string>;
+  reviewProps: ReviewProps;
 }) {
   return (
     <section className="mx-auto max-w-2xl">
@@ -1276,6 +1307,7 @@ function OriginalConversation({
           <p className="mt-2 text-sm text-muted-foreground">暂无本地录音。</p>
         )}
       </section>
+      <ReviewActionBar {...reviewProps} />
     </section>
   );
 }
@@ -1305,7 +1337,13 @@ function MessageList({
 }
 
 function Review({
+  review,
   suggestions,
+  reviewBusy,
+  reviewError,
+  onReReview,
+  onCancelReview,
+  onRetryReview,
   ttsEnabled,
   asrEnabled,
   readAloudRecording,
@@ -1446,8 +1484,148 @@ function Review({
           </p>
         ) : null}
       </div>
+      <ReviewActionBar
+        review={review}
+        reviewBusy={reviewBusy}
+        reviewError={reviewError}
+        onReReview={onReReview}
+        onCancelReview={onCancelReview}
+        onRetryReview={onRetryReview}
+        canEdit={canEdit && !readAloudRecording}
+      />
       <Button className="mt-6 rounded-full shadow-tactile" onClick={onNewStory}>
         开始新故事
+      </Button>
+    </section>
+  );
+}
+
+type ReviewActionProps = Pick<
+  ReviewProps,
+  "review" | "reviewBusy" | "reviewError" | "onReReview" | "onCancelReview" | "onRetryReview"
+> & { canEdit: boolean };
+
+function ReviewActionBar({
+  reviewBusy,
+  reviewError,
+  onReReview,
+  onCancelReview,
+  onRetryReview,
+  canEdit,
+}: ReviewActionProps) {
+  return (
+    <div className="mt-6 rounded-3xl border border-border bg-card p-5 text-center shadow-lift">
+      {reviewError ? (
+        <p role="alert" className="text-sm text-destructive">
+          {reviewError}
+        </p>
+      ) : null}
+      {reviewBusy ? (
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" aria-hidden />
+            正在重新复盘…
+          </span>
+          <Button variant="outline" className="rounded-full" onClick={onCancelReview}>
+            取消
+          </Button>
+        </div>
+      ) : (
+        <Button
+          variant="outline"
+          className="rounded-full"
+          onClick={reviewError ? onRetryReview : onReReview}
+          disabled={!canEdit}
+        >
+          <RotateCcw className="size-4" aria-hidden />
+          {reviewError ? "重试复盘" : "重新复盘"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function ScoreReview({
+  review,
+  reviewBusy,
+  reviewError,
+  onReReview,
+  onCancelReview,
+  onRetryReview,
+  canEdit,
+}: ReviewProps) {
+  return (
+    <section className="mx-auto max-w-2xl">
+      <p className="text-sm font-semibold text-primary">水平评分</p>
+      <h1 className="mt-2 font-display text-3xl">这次表达的整体表现</h1>
+      {review?.score === null || !review?.rubric ? (
+        <div className="mt-6 rounded-3xl border border-dashed border-border bg-card p-6 text-center shadow-lift">
+          <p className="font-medium">暂无评分/评论</p>
+          <p className="mt-2 text-sm text-muted-foreground">点击重新复盘后生成。</p>
+        </div>
+      ) : (
+        <>
+          <div className="mt-6 rounded-3xl border border-border bg-card p-6 text-center shadow-lift">
+            <p className="text-sm text-muted-foreground">总分</p>
+            <p className="mt-1 font-display text-6xl leading-none text-primary">
+              {review.score}
+              <span className="text-2xl text-muted-foreground">/100</span>
+            </p>
+            {review.comment ? <p className="mt-4 text-sm leading-7">{review.comment}</p> : null}
+          </div>
+          <div className="mt-4 space-y-3">
+            <RubricCard label="流利度" item={review.rubric.fluency} />
+            <RubricCard label="语法" item={review.rubric.grammar} />
+            <RubricCard label="词汇" item={review.rubric.vocabulary} />
+            <RubricCard label="自然度" item={review.rubric.naturalness} />
+          </div>
+        </>
+      )}
+      <ReviewActionBar
+        review={review}
+        reviewBusy={reviewBusy}
+        reviewError={reviewError}
+        onReReview={onReReview}
+        onCancelReview={onCancelReview}
+        onRetryReview={onRetryReview}
+        canEdit={canEdit}
+      />
+    </section>
+  );
+}
+
+function RubricCard({ label, item }: { label: string; item: ReviewRubric["fluency"] }) {
+  return (
+    <article className="rounded-3xl border border-border bg-card p-5 shadow-lift">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="font-medium">{label}</h2>
+        <p className="font-display text-2xl text-primary">{item.score}/100</p>
+      </div>
+      <p className="mt-2 text-sm leading-7 text-muted-foreground">{item.comment}</p>
+      {item.evidence.length ? (
+        <div className="mt-4 space-y-2">
+          <p className="text-xs font-semibold text-primary">对话依据</p>
+          {item.evidence.map((evidence) => (
+            <blockquote
+              key={`${evidence.sourceTurnId}:${evidence.quote}`}
+              className="rounded-2xl bg-secondary/70 px-3 py-2 text-sm"
+            >
+              “{evidence.quote}”
+            </blockquote>
+          ))}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function ReviewProgress({ onCancel }: { onCancel: () => void }) {
+  return (
+    <section className="mx-auto flex min-h-64 max-w-xl flex-col items-center justify-center text-center text-muted-foreground">
+      <Loader2 className="size-6 animate-spin" aria-hidden />
+      <p className="mt-3 text-sm">正在生成复盘…</p>
+      <Button variant="outline" className="mt-5 rounded-full" onClick={onCancel}>
+        取消
       </Button>
     </section>
   );

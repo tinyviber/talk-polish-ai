@@ -239,6 +239,43 @@ export const dailyStoryReviewSuggestionSchema = z
   .strict();
 export type DailyStoryReviewSuggestion = z.infer<typeof dailyStoryReviewSuggestionSchema>;
 
+export const dailyStoryReviewEvidenceSchema = z
+  .object({
+    sourceTurnId: z.string().min(1).max(128),
+    quote: boundedText(DAILY_STORY_LIMITS.turnChars),
+  })
+  .strict();
+export type DailyStoryReviewEvidence = z.infer<typeof dailyStoryReviewEvidenceSchema>;
+
+export const dailyStoryReviewRubricItemSchema = z
+  .object({
+    score: z.number().int().min(0).max(100),
+    comment: boundedText(300),
+    evidence: z.array(dailyStoryReviewEvidenceSchema).max(2),
+  })
+  .strict();
+export type DailyStoryReviewRubricItem = z.infer<typeof dailyStoryReviewRubricItemSchema>;
+
+export const dailyStoryReviewRubricSchema = z
+  .object({
+    fluency: dailyStoryReviewRubricItemSchema,
+    grammar: dailyStoryReviewRubricItemSchema,
+    vocabulary: dailyStoryReviewRubricItemSchema,
+    naturalness: dailyStoryReviewRubricItemSchema,
+  })
+  .strict();
+export type DailyStoryReviewRubric = z.infer<typeof dailyStoryReviewRubricSchema>;
+
+export const dailyStoryReviewSchema = z
+  .object({
+    score: z.number().int().min(0).max(100),
+    comment: boundedText(300),
+    rubric: dailyStoryReviewRubricSchema,
+    suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
+  })
+  .strict();
+export type DailyStoryReview = z.infer<typeof dailyStoryReviewSchema>;
+
 export const dailyStoryReviewRequestSchema = z
   .object({
     storyZh: boundedText(DAILY_STORY_LIMITS.storyZhChars),
@@ -260,6 +297,9 @@ export type DailyStoryReviewRequest = z.infer<typeof dailyStoryReviewRequestSche
 export const dailyStoryReviewResponseSchema = z
   .object({
     suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
+    score: dailyStoryReviewSchema.shape.score.optional(),
+    comment: dailyStoryReviewSchema.shape.comment.optional(),
+    rubric: dailyStoryReviewSchema.shape.rubric.optional(),
     requestId: z.string().min(1),
   })
   .strict();

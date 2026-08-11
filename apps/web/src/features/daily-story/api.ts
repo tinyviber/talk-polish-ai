@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { isDashScopeBaseUrl, isDashScopeFunAsrHttpModel } from "@kotoba/contracts";
+import {
+  dailyStoryReviewResponseSchema,
+  isDashScopeBaseUrl,
+  isDashScopeFunAsrHttpModel,
+} from "@kotoba/contracts";
 import { authenticatedApiFetch } from "@/lib/practice/api";
 import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practice/audio-format";
 import { apiBaseUrl } from "@/lib/practice/mode";
@@ -37,19 +41,8 @@ const replySchema = z.object({
   reply: z.string().min(1),
 });
 const transcriptSchema = z.object({ transcript: z.string() });
-const reviewSchema = z.object({
-  suggestions: z
-    .array(
-      z.object({
-        sourceTurnId: z.string(),
-        original: z.string(),
-        improved: z.string(),
-        category: z.enum(["clarity", "grammar", "naturalness"]),
-        explanationZh: z.string(),
-      }),
-    )
-    .max(3),
-});
+// New scoring fields stay optional while old API instances roll forward.
+const reviewSchema = dailyStoryReviewResponseSchema;
 const checkSchema = z.object({
   capability: z.enum(["chat", "asr", "tts"]),
   status: z.literal("connected"),
@@ -183,7 +176,13 @@ export async function reviewDailyStory(input: {
   signal?: AbortSignal;
 }): Promise<DailyReview> {
   const { signal, ...body } = input;
-  return request("/api/daily-story/review", reviewSchema, json(body), signal);
+  const result = await request("/api/daily-story/review", reviewSchema, json(body), signal);
+  return {
+    score: result.score ?? null,
+    comment: result.comment ?? null,
+    rubric: result.rubric ?? null,
+    suggestions: result.suggestions,
+  };
 }
 
 export async function checkDailyProvider(input: {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { authenticatedApiFetch } from "@/lib/practice/api";
-import { checkDailyProvider, transcribeDailyStory } from "./api";
+import { checkDailyProvider, reviewDailyStory, transcribeDailyStory } from "./api";
 
 vi.mock("@/lib/practice/api", () => ({
   authenticatedApiFetch: vi.fn(),
@@ -33,6 +33,31 @@ describe("Daily Story transcription audio compatibility", () => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  test("accepts a legacy review response while leaving scoring empty", async () => {
+    const fetchMock = vi.mocked(authenticatedApiFetch);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ suggestions: [], requestId: "legacy-review" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("window", {
+      location: { origin: "http://localhost" },
+      localStorage: {
+        getItem: () => null,
+        setItem: () => undefined,
+      },
+    });
+
+    await expect(
+      reviewDailyStory({
+        storyZh: "今天很忙。",
+        history: [{ id: "u1", role: "user", source: "typed", text: "I was busy." }],
+        chat: { baseUrl: "https://api.example.com", apiKey: "test-key", model: "fixture" },
+      }),
+    ).resolves.toEqual({ score: null, comment: null, rubric: null, suggestions: [] });
   });
 
   test("keeps mp4 for an ordinary provider when no WAV conversion capability exists", async () => {

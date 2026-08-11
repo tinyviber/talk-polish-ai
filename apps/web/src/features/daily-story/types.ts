@@ -1,4 +1,9 @@
-import type { ProviderPresetId } from "@kotoba/contracts";
+import type {
+  DailyStoryReviewEvidence,
+  DailyStoryReviewRubric,
+  DailyStoryReviewRubricItem,
+  ProviderPresetId,
+} from "@kotoba/contracts";
 
 export type DailyCapability = "chat" | "asr" | "tts";
 
@@ -49,7 +54,14 @@ export type ReviewSuggestion = {
   explanationZh: string;
 };
 
+export type ReviewEvidence = DailyStoryReviewEvidence;
+export type ReviewRubricItem = DailyStoryReviewRubricItem;
+export type ReviewRubric = DailyStoryReviewRubric;
+
 export type DailyReview = {
+  score: number | null;
+  comment: string | null;
+  rubric: ReviewRubric | null;
   suggestions: ReviewSuggestion[];
 };
 
@@ -65,10 +77,19 @@ export type StorySession = {
   review?: DailyReview;
 };
 
+export type StorySessionReviewSnapshot = {
+  suggestions: ReviewSuggestion[];
+};
+
+export type StorySessionSnapshot = Omit<
+  StorySession,
+  "schemaVersion" | "revision" | "updatedAt" | "review"
+> & { review?: DailyReview | StorySessionReviewSnapshot };
+
 export type StorySessionSummary = Pick<
   StorySession,
   "revision" | "updatedAt" | "phase" | "storyZh"
-> & { id: string };
+> & { id: string; review: DailyReview | null };
 
 export type ConnectionState = "idle" | "checking" | "connected" | "failed";
 

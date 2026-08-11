@@ -737,7 +737,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       dispatch({
         type: "failure",
         message: message(error),
-        resumePhase: "chatting",
+        resumePhase: current.review ? "review" : "chatting",
         kind: "review",
         ...(operationId && operationSettingsRevision !== undefined
           ? { operationId, settingsRevision: operationSettingsRevision }
@@ -748,6 +748,12 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       reviewInFlightRef.current = false;
     }
   }, [abortCurrent, currentSettings, guard]);
+
+  const cancelReview = useCallback(() => {
+    if (stateRef.current.phase !== "reviewing") return;
+    invalidateCurrent();
+    dispatch({ type: "reviewCancelled" });
+  }, [invalidateCurrent]);
 
   const checkProvider = useCallback(
     async (
@@ -881,6 +887,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     sendTyped: (text: string) => send("typed", text),
     reRecord: () => dispatch({ type: "reRecord" }),
     finish,
+    cancelReview,
     beginReadAloud,
     resetReadAloud: () => dispatch({ type: "resetReadAloud" }),
     playTts: (text: string) => void playTts(text),

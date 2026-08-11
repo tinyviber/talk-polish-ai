@@ -6,17 +6,20 @@ export type DailyPhase =
   | "starting"
   | "chatting"
   | "recording"
+  | "recordingDraftReady"
   | "transcribing"
   | "transcriptReady"
   | "waitingForAi"
   | "reviewing"
   | "review"
   | "readingAloudRecording"
+  | "readingAloudDraftReady"
   | "readingAloudTranscribing"
   | "error";
 
 type StablePhase = "chatting" | "transcriptReady" | "review";
 type PendingTurn = { id: string; source: TurnSource; text: string };
+export type DailyErrorKind = "start" | "transcribe" | "reply" | "review";
 
 export type DailyState = {
   phase: DailyPhase;
@@ -28,7 +31,7 @@ export type DailyState = {
   revision: number | null;
   settingsRevision: number;
   operation: { id: string; settingsRevision: number } | null;
-  error: { message: string; resumePhase: StablePhase } | null;
+  error: { message: string; resumePhase: StablePhase; kind?: DailyErrorKind } | null;
   readAloudTranscript: string | null;
   readAloudTarget: string | null;
 };
@@ -58,6 +61,8 @@ export type DailyAction =
   | ({ type: "startRequest"; storyZh: string } & Operation)
   | ({ type: "startSuccess"; opening: DailyMessage } & Operation)
   | { type: "recording" }
+  | { type: "recordingDraftReady"; readAloud?: boolean }
+  | { type: "continueRecording"; readAloud?: boolean }
   | { type: "recordingCancelled" }
   | ({
       type: "transcribeRequest";
@@ -75,7 +80,12 @@ export type DailyAction =
   | { type: "resetReadAloud" }
   | { type: "reRecord" }
   | { type: "newStory" }
-  | ({ type: "failure"; message: string; resumePhase: StablePhase } & Partial<Operation>)
+  | ({
+      type: "failure";
+      message: string;
+      resumePhase: StablePhase;
+      kind?: DailyErrorKind;
+    } & Partial<Operation>)
   | { type: "retry" };
 
 function sameOperation(state: DailyState, action: Operation) {
@@ -147,16 +157,33 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         : state;
     case "recording":
       return state.phase === "chatting" ? { ...state, phase: "recording", error: null } : state;
+    case "recordingDraftReady":
+      return action.readAloud
+        ? state.phase === "readingAloudRecording"
+          ? { ...state, phase: "readingAloudDraftReady", error: null }
+          : state
+        : state.phase === "recording"
+          ? { ...state, phase: "recordingDraftReady", error: null }
+          : state;
+    case "continueRecording":
+      return action.readAloud
+        ? state.phase === "readingAloudDraftReady"
+          ? { ...state, phase: "readingAloudRecording", error: null }
+          : state
+        : state.phase === "recordingDraftReady"
+          ? { ...state, phase: "recording", error: null }
+          : state;
     case "recordingCancelled":
-      return state.phase === "recording"
+      return state.phase === "recording" || state.phase === "recordingDraftReady"
         ? { ...state, phase: "chatting", error: null }
-        : state.phase === "readingAloudRecording"
+        : state.phase === "readingAloudRecording" || state.phase === "readingAloudDraftReady"
           ? { ...state, phase: "review", operation: null, error: null }
           : state;
     case "transcribeRequest":
       if (action.readAloud) {
         const canRetryReadAloud =
           state.phase === "readingAloudRecording" ||
+          state.phase === "readingAloudDraftReady" ||
           state.phase === "review" ||
           (state.phase === "error" && state.error?.resumePhase === "review");
         return canRetryReadAloud
@@ -171,6 +198,7 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
           : state;
       }
       return state.phase === "recording" ||
+        state.phase === "recordingDraftReady" ||
         state.phase === "error" ||
         (action.cached === true && state.phase === "chatting")
         ? {
@@ -255,7 +283,9 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
           }
         : state;
     case "resetReadAloud":
-      return state.phase === "readingAloudRecording" || state.phase === "readingAloudTranscribing"
+      return state.phase === "readingAloudRecording" ||
+        state.phase === "readingAloudDraftReady" ||
+        state.phase === "readingAloudTranscribing"
         ? { ...state, phase: "review", operation: null }
         : state;
     case "reRecord":
@@ -270,7 +300,11 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         ...state,
         phase: "error",
         operation: null,
-        error: { message: action.message, resumePhase: action.resumePhase },
+        error: {
+          message: action.message,
+          resumePhase: action.resumePhase,
+          ...(action.kind ? { kind: action.kind } : {}),
+        },
       };
     }
     case "retry":
@@ -286,10 +320,12 @@ export function isDailyBusy(phase: DailyPhase) {
   return [
     "starting",
     "recording",
+    "recordingDraftReady",
     "transcribing",
     "waitingForAi",
     "reviewing",
     "readingAloudRecording",
+    "readingAloudDraftReady",
     "readingAloudTranscribing",
   ].includes(phase);
 }

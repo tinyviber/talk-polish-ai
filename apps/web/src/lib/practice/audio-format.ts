@@ -6,6 +6,7 @@ type DecodedAudio = Pick<
 type AudioContextConstructor = new () => AudioContext;
 
 export const MAX_NORMALIZED_AUDIO_BYTES = 25 * 1024 * 1024;
+export const TARGET_RECORDING_SAMPLE_RATE = 16_000;
 
 const NORMALIZABLE_AUDIO_MIME_TYPES = new Set([
   "audio/webm",
@@ -107,6 +108,70 @@ export async function normalizeRecordedAudio(
     return chooseNormalizedAudio(blob, mimeType, decoded, maxBytes);
   } catch {
     return { blob, mimeType };
+  } finally {
+    if (context) await context.close().catch(() => {});
+  }
+}
+
+/** Decode, downmix, resample, and concatenate recording segments into one WAV. */
+export async function mergeRecordedAudio(
+  segments: readonly Blob[],
+  maxBytes = MAX_NORMALIZED_AUDIO_BYTES,
+): Promise<{ blob: Blob; mimeType: "audio/wav"; durationSec: number }> {
+  if (!segments.length) throw new Error("没有可合并的录音片段。");
+  const AudioContextCtor = audioContextConstructor();
+  if (!AudioContextCtor) throw new Error("当前浏览器不支持音频合并，请改用单次录音。");
+  let context: AudioContext | undefined;
+  try {
+    context = new AudioContextCtor();
+    const decoded = await Promise.all(
+      segments.map(async (segment) => context!.decodeAudioData(await segment.arrayBuffer())),
+    );
+    const totalFrames = decoded.reduce(
+      (sum, audio) =>
+        sum +
+        Math.max(0, Math.round((audio.length / audio.sampleRate) * TARGET_RECORDING_SAMPLE_RATE)),
+      0,
+    );
+    if (!totalFrames) throw new Error("录音片段没有有效音频数据。");
+    const samples = new Float32Array(totalFrames);
+    let offset = 0;
+    for (const audio of decoded) {
+      const source = Array.from({ length: audio.numberOfChannels }, (_, channel) =>
+        audio.getChannelData(channel),
+      );
+      const frames = Math.max(
+        0,
+        Math.round((audio.length / audio.sampleRate) * TARGET_RECORDING_SAMPLE_RATE),
+      );
+      for (let frame = 0; frame < frames; frame += 1) {
+        const sourceFrame = Math.min(
+          audio.length - 1,
+          (frame * audio.sampleRate) / TARGET_RECORDING_SAMPLE_RATE,
+        );
+        const low = Math.floor(sourceFrame);
+        const high = Math.min(audio.length - 1, low + 1);
+        const fraction = sourceFrame - low;
+        let value = 0;
+        for (const channel of source) {
+          value += (channel[low] ?? 0) * (1 - fraction) + (channel[high] ?? 0) * fraction;
+        }
+        samples[offset + frame] = Math.max(-1, Math.min(1, value / Math.max(1, source.length)));
+      }
+      offset += frames;
+    }
+    const wav = encodePcmWav({
+      length: samples.length,
+      numberOfChannels: 1,
+      sampleRate: TARGET_RECORDING_SAMPLE_RATE,
+      getChannelData: () => samples,
+    });
+    if (wav.size > maxBytes) throw new Error("合并后的录音超过 25 MiB 限制，请缩短录音后重试。");
+    return {
+      blob: wav,
+      mimeType: "audio/wav",
+      durationSec: samples.length / TARGET_RECORDING_SAMPLE_RATE,
+    };
   } finally {
     if (context) await context.close().catch(() => {});
   }

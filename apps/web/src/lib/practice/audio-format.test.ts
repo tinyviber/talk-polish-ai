@@ -3,6 +3,7 @@ import {
   chooseNormalizedAudio,
   encodePcmWav,
   isNormalizableAudioMimeType,
+  mergeRecordedAudio,
   normalizeRecordedAudio,
 } from "./audio-format";
 
@@ -95,6 +96,38 @@ describe("audio format", () => {
 
     expect(normalized.blob).toBe(original);
     expect(normalized.mimeType).toBe("audio/mp4");
+  });
+
+  test("merges segments into mono 16 kHz WAV in order", async () => {
+    const decoded = [
+      {
+        length: 2,
+        numberOfChannels: 2,
+        sampleRate: 8_000,
+        getChannelData: (channel: number) => new Float32Array(channel === 0 ? [0, 1] : [0, 1]),
+      },
+      {
+        length: 2,
+        numberOfChannels: 1,
+        sampleRate: 16_000,
+        getChannelData: () => new Float32Array([-1, 0]),
+      },
+    ];
+    class FakeAudioContext {
+      private index = 0;
+      decodeAudioData = vi.fn(async () => decoded[this.index++]);
+      close = vi.fn(async () => undefined);
+    }
+    vi.stubGlobal("window", { AudioContext: FakeAudioContext });
+    const merged = await mergeRecordedAudio([
+      new Blob(["first"], { type: "audio/webm" }),
+      new Blob(["second"], { type: "audio/mp4" }),
+    ]);
+    const bytes = new Uint8Array(await merged.blob.arrayBuffer());
+    expect(merged.mimeType).toBe("audio/wav");
+    expect(merged.durationSec).toBe(6 / 16_000);
+    expect(new DataView(bytes.buffer).getUint16(22, true)).toBe(1);
+    expect(new DataView(bytes.buffer).getUint32(24, true)).toBe(16_000);
   });
 
   afterEach(() => {

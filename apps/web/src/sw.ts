@@ -45,8 +45,8 @@ registerRoute(
 
 // Authenticated reads, all mutations, audio, diagnostics, provider and realtime
 // endpoints are never replayed or stored by this worker.
-registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly());
-registerRoute(({ url }) => isNetworkOnlyPath(url), new NetworkOnly(), "POST");
+registerRoute(({ url }) => isNetworkOnlyPath(url, self.location.origin), new NetworkOnly());
+registerRoute(({ url }) => isNetworkOnlyPath(url, self.location.origin), new NetworkOnly(), "POST");
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(

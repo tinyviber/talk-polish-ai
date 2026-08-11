@@ -14,6 +14,10 @@ export type AsrProvider = ChatProvider & {
   responseFormat?: string;
 };
 
+export type DailyStoryLocalSettings = {
+  asrDirect?: boolean;
+};
+
 export type TtsProvider = ChatProvider & {
   voice: string;
 };
@@ -24,6 +28,7 @@ export type ProviderSettings = {
   updatedAt: string;
   chat?: ChatProvider;
   asr?: AsrProvider;
+  local?: DailyStoryLocalSettings;
   tts?: TtsProvider;
 };
 

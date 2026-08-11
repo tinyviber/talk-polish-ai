@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, Eye, EyeOff, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -11,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { DailyStoryHeader } from "./AppHeader";
 import { checkDailyProvider } from "@/features/daily-story/api";
+import { getDashScopeFunAsrDirectSupport } from "@/features/daily-story/asr-direct";
 import {
   CAPABILITY_LABELS,
   CUSTOM_PROVIDER,
@@ -25,6 +27,7 @@ import {
   clearAllProviders,
   clearProvider,
   readProviderSettings,
+  saveAsrDirectPreference,
   saveProvider,
 } from "@/features/daily-story/settings-repository";
 import {
@@ -109,6 +112,7 @@ export function SettingsPage() {
     asr: "idle",
     tts: "idle",
   });
+  const [asrDirectEnabled, setAsrDirectEnabled] = useState(false);
   const [visible, setVisible] = useState<Record<DailyCapability, boolean>>({
     chat: false,
     asr: false,
@@ -146,6 +150,7 @@ export function SettingsPage() {
         asr: toDraft("asr", loaded.asr),
         tts: toDraft("tts", loaded.tts),
       });
+      setAsrDirectEnabled(loaded.local?.asrDirect ?? false);
       setProviderIds({
         chat: loaded.chat?.preset ?? providerIdForEndpoint("chat", loaded.chat?.baseUrl ?? ""),
         asr: loaded.asr?.preset ?? providerIdForEndpoint("asr", loaded.asr?.baseUrl ?? ""),
@@ -232,13 +237,43 @@ export function SettingsPage() {
       }));
       setStatus((current) => ({ ...current, [capability]: checkAfter ? "checking" : "idle" }));
       if (!checkAfter) return;
-      await checkDailyProvider({ capability, provider });
+      await checkDailyProvider({
+        capability,
+        provider,
+        ...(capability === "asr" ? { directAsr: asrDirectEnabled } : {}),
+      });
       if (isCurrentOperation(capability, operation))
         setStatus((current) => ({ ...current, [capability]: "connected" }));
     } catch (cause) {
       if (!isCurrentOperation(capability, operation)) return;
       setStatus((current) => ({ ...current, [capability]: "failed" }));
       setError(cause instanceof Error ? cause.message : "配置保存或连接检查失败。请重试。");
+    }
+  };
+  const updateAsrDirect = async (enabled: boolean) => {
+    invalidateOperations("asr");
+    const support = getDashScopeFunAsrDirectSupport(
+      {
+        baseUrl: drafts.asr.baseUrl,
+        model: drafts.asr.model,
+      },
+      enabled,
+    );
+    if (enabled && !support.supported) {
+      setStatus((current) => ({ ...current, asr: "idle" }));
+      setError(support.message);
+      return;
+    }
+    const previous = asrDirectEnabled;
+    setAsrDirectEnabled(enabled);
+    setStatus((current) => ({ ...current, asr: "idle" }));
+    try {
+      const saved = await saveAsrDirectPreference(enabled);
+      setSettings((current) => (current && current.revision > saved.revision ? current : saved));
+      setError(null);
+    } catch (cause) {
+      setAsrDirectEnabled(previous);
+      setError(cause instanceof Error ? cause.message : "无法保存 ASR 本地直连设置。");
     }
   };
   const clear = async (capability: DailyCapability) => {
@@ -274,6 +309,7 @@ export function SettingsPage() {
         asr: "openai-compatible",
         tts: "openai-compatible",
       });
+      setAsrDirectEnabled(false);
       setStatus({ chat: "idle", asr: "idle", tts: "idle" });
       setError(null);
     } catch (cause) {
@@ -337,6 +373,12 @@ export function SettingsPage() {
                 onSave={() => void save("asr")}
                 onClear={() => void clear("asr")}
                 onToggleVisible={() => setVisible((value) => ({ ...value, asr: !value.asr }))}
+                asrDirectEnabled={asrDirectEnabled}
+                asrDirectSupport={getDashScopeFunAsrDirectSupport({
+                  baseUrl: drafts.asr.baseUrl,
+                  model: drafts.asr.model,
+                })}
+                onAsrDirectToggle={(enabled) => void updateAsrDirect(enabled)}
               />
               <ProviderCard
                 capability="tts"
@@ -444,6 +486,9 @@ function ProviderCard({
   onSave,
   onClear,
   onToggleVisible,
+  asrDirectEnabled = false,
+  asrDirectSupport,
+  onAsrDirectToggle,
 }: {
   capability: DailyCapability;
   title: string;
@@ -458,6 +503,9 @@ function ProviderCard({
   onSave: () => void;
   onClear: () => void;
   onToggleVisible: () => void;
+  asrDirectEnabled?: boolean;
+  asrDirectSupport?: ReturnType<typeof getDashScopeFunAsrDirectSupport>;
+  onAsrDirectToggle?: (enabled: boolean) => void;
 }) {
   const busy = status === "saving" || status === "checking";
   const provider = getProvider(providerId);
@@ -551,14 +599,50 @@ function ProviderCard({
           autoComplete="off"
         />
         {capability === "asr" ? (
-          <Field
-            id={`${capability}-response-format`}
-            label="Response format（可选）"
-            value={draft.responseFormat}
-            onChange={(value) => onChange(capability, "responseFormat", value)}
-            placeholder="json"
-            autoComplete="off"
-          />
+          <>
+            <Field
+              id={`${capability}-response-format`}
+              label="Response format（可选）"
+              value={draft.responseFormat}
+              onChange={(value) => onChange(capability, "responseFormat", value)}
+              placeholder="json"
+              autoComplete="off"
+            />
+            <div className="rounded-2xl border border-warn/30 bg-warn/5 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium">浏览器直连 DashScope Fun-ASR（本机 opt-in）</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    默认关闭。开启后，API Key 会从当前浏览器直接发送到 DashScope
+                    provider，不再只走本站同源 proxy。仅支持公共 DashScope HTTPS endpoint
+                    （dashscope.aliyuncs.com / dashscope-intl.aliyuncs.com）+ Fun-ASR HTTP
+                    model；失败不会自动回退，必须手动关闭此开关后再改走 proxy。
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    保存并检查时，若此开关开启，会向 DashScope
+                    发送一段小型测试音频，以验证实际浏览器直连 HTTP
+                    能力（含网络/CORS）；这可能消耗一次 provider 请求或配额，且不会自动回退到
+                    proxy。
+                  </p>
+                  {asrDirectSupport && !asrDirectSupport.supported ? (
+                    <p
+                      role="status"
+                      className="mt-2 rounded-xl bg-warn/10 px-3 py-2 text-xs leading-5"
+                    >
+                      {asrDirectEnabled
+                        ? `当前已保存的直连偏好不会生效。${asrDirectSupport.message}`
+                        : asrDirectSupport.message}
+                    </p>
+                  ) : null}
+                </div>
+                <Switch
+                  checked={asrDirectEnabled}
+                  onCheckedChange={(checked) => onAsrDirectToggle?.(checked)}
+                  aria-label="开启浏览器直连 DashScope Fun-ASR"
+                />
+              </div>
+            </div>
+          </>
         ) : null}
         {capability === "tts" ? (
           <Field

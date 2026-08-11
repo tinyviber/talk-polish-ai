@@ -9,8 +9,11 @@ export function isPublicPromptsRequest(url: URL, request: Request, origin = url.
   );
 }
 
-export function isNetworkOnlyPath(url: URL) {
-  return url.pathname.startsWith("/api/") || url.pathname.startsWith("/realtime/");
+export function isNetworkOnlyPath(url: URL, origin = url.origin) {
+  return (
+    url.origin === origin &&
+    (url.pathname.startsWith("/api/") || url.pathname.startsWith("/realtime/"))
+  );
 }
 
 export function isPublicNavigationRequest(request: Request, url: URL, origin = url.origin) {
@@ -19,6 +22,6 @@ export function isPublicNavigationRequest(request: Request, url: URL, origin = u
     !request.headers.has("authorization") &&
     !request.headers.has("cookie") &&
     url.origin === origin &&
-    !isNetworkOnlyPath(url)
+    !isNetworkOnlyPath(url, origin)
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Loader2, Mic, RotateCcw, Send, Square, Volume2 } from "lucide-react";
 import {
@@ -16,15 +16,33 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   useRecorder,
   type MicrophoneTestStatus,
+  type RecorderDraft,
   type RecorderInputDevice,
 } from "@/lib/practice/useRecorder";
 import { cn } from "@/lib/utils";
+import { mergeRecordedAudio } from "@/lib/practice/audio-format";
 import { DAILY_STORY_TURN_MAX, useDailyStoryController } from "@/features/daily-story/controller";
+import {
+  canCompleteRecordingDraft,
+  submitRecordingDraft,
+} from "@/features/daily-story/recording-draft-submit";
+import {
+  appendRecordingDraftSegment,
+  getRecordingDrafts,
+  markRecordingDraftCleanupFailed,
+  markRecordingDraftCompleted,
+  markRecordingDraftSubmitting,
+  markRecordingDraftFailed,
+  removeRecordingDraft,
+  type RecordingDraft,
+} from "@/features/daily-story/recording-drafts";
+import type { DailyStoryAudioPurpose } from "@/features/daily-story/audio-outbox";
 import { createConversationId, type ReviewSuggestion } from "@/features/daily-story/types";
 import { DailyStoryHeader } from "./AppHeader";
 import { finishConfirmationReducer, initialFinishConfirmationState } from "./finish-confirmation";
+import { resolveRecordingDraftPurpose } from "./recording-draft-purpose";
 
-export const REVIEW_RETRY_LABEL = "再说一次";
+const REVIEW_RETRY_LABEL = "再说一次";
 
 function statusLabel(phase: string) {
   if (phase === "starting") return "正在开始对话…";
@@ -32,6 +50,27 @@ function statusLabel(phase: string) {
   if (phase === "waitingForAi") return "正在回复…";
   if (phase === "reviewing") return "正在生成复盘…";
   return "处理中…";
+}
+
+export function resolveDailyStoryErrorRetryUi({
+  errorKind,
+  activeDraft,
+  cachedAudioFailed,
+}: {
+  errorKind?: "start" | "transcribe" | "reply" | "review";
+  activeDraft: RecordingDraft | null;
+  cachedAudioFailed: boolean;
+}) {
+  const useDraftRetryEntry =
+    errorKind === "transcribe" &&
+    !!activeDraft &&
+    activeDraft.status === "failed" &&
+    canCompleteRecordingDraft(activeDraft);
+  return {
+    useDraftRetryEntry,
+    showCachedAudioRetry: cachedAudioFailed && !useDraftRetryEntry,
+    showGenericRetry: !cachedAudioFailed && !useDraftRetryEntry,
+  };
 }
 
 export function DailyStoryPage({
@@ -42,11 +81,16 @@ export function DailyStoryPage({
   isNew?: boolean;
 }) {
   const story = useDailyStoryController(conversationId, isNew);
-  const recorder = useRecorder({ mode: "api" });
   const navigate = useNavigate();
   const [typed, setTyped] = useState("");
   const [transcriptDraft, setTranscriptDraft] = useState("");
   const [cachedAudioUrl, setCachedAudioUrl] = useState<string | null>(null);
+  const [recordingDrafts, setRecordingDrafts] = useState<
+    Record<DailyStoryAudioPurpose, RecordingDraft | null>
+  >({ conversation: null, readAloud: null });
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [pendingSegment, setPendingSegment] = useState<RecorderDraft | null>(null);
   const [finishConfirmation, dispatchFinishConfirmation] = useReducer(
     finishConfirmationReducer,
     initialFinishConfirmationState,
@@ -56,6 +100,111 @@ export function DailyStoryPage({
   const phase = story.state.phase;
   const transcribe = story.transcribe;
   const cancelRecording = story.cancelRecording;
+  const draftAppendRef = useRef<Blob | null>(null);
+  const draftActionRef = useRef(false);
+  const recordingPurposeRef = useRef<DailyStoryAudioPurpose | null>(null);
+  const phaseRef = useRef(phase);
+  const mountedRef = useRef(true);
+  phaseRef.current = phase;
+
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
+
+  const appendDraftSegment = useCallback(
+    async (segment: RecorderDraft) => {
+      const purpose = resolveRecordingDraftPurpose(recordingPurposeRef.current, phaseRef.current);
+      if (!purpose) {
+        throw new Error("录音目的不明确，未保存录音片段。");
+      }
+      sentRecordingRef.current = segment.blob;
+      draftAppendRef.current = segment.blob;
+      if (mountedRef.current) {
+        setDraftSaving(true);
+        setDraftError(null);
+      }
+      try {
+        const draft = await appendRecordingDraftSegment({
+          conversationId,
+          purpose,
+          ...(purpose === "readAloud" && story.state.readAloudTarget
+            ? { readAloudTarget: story.state.readAloudTarget }
+            : {}),
+          blob: segment.blob,
+          mimeType: segment.mimeType || segment.blob.type || "audio/webm",
+          durationSec: Math.max(0.01, segment.durationSec),
+          segmentId: `${purpose}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        });
+        if (mountedRef.current) {
+          setRecordingDrafts((current) => ({ ...current, [purpose]: draft }));
+          setPendingSegment(null);
+          setDraftError(null);
+          story.recordingDraftReady(purpose === "readAloud");
+        }
+      } catch (error: unknown) {
+        if (mountedRef.current) {
+          setPendingSegment(segment);
+          const message = error instanceof Error ? error.message : "录音未能保存到本机。";
+          setDraftError(message);
+        }
+        throw error;
+      } finally {
+        if (mountedRef.current) setDraftSaving(false);
+      }
+    },
+    [conversationId, story],
+  );
+
+  const recorder = useRecorder({ mode: "api", onInterruptedRecording: appendDraftSegment });
+
+  const conversationDraft = recordingDrafts.conversation;
+  const readAloudDraft = recordingDrafts.readAloud;
+  const showConversationDraft =
+    phase === "chatting" ||
+    phase === "recording" ||
+    phase === "recordingDraftReady" ||
+    (phase === "error" && story.state.error?.resumePhase === "chatting");
+  const showReadAloudDraft =
+    phase === "review" ||
+    phase === "readingAloudRecording" ||
+    phase === "readingAloudDraftReady" ||
+    (phase === "error" && story.state.error?.resumePhase === "review");
+  const activeDraft =
+    showReadAloudDraft && readAloudDraft
+      ? readAloudDraft
+      : showConversationDraft
+        ? conversationDraft
+        : null;
+  const errorPanelNeedsOwnDraftActions =
+    phase === "error" &&
+    Boolean(activeDraft) &&
+    !(
+      (activeDraft?.purpose === "conversation" && showConversationDraft) ||
+      (activeDraft?.purpose === "readAloud" && showReadAloudDraft)
+    );
+  const errorRetryUi = resolveDailyStoryErrorRetryUi({
+    ...(story.state.error?.kind ? { errorKind: story.state.error.kind } : {}),
+    activeDraft,
+    cachedAudioFailed: story.cachedAudio?.status === "failed",
+  });
+
+  useEffect(() => {
+    let alive = true;
+    setRecordingDrafts({ conversation: null, readAloud: null });
+    void getRecordingDrafts(conversationId)
+      .then((drafts) => {
+        if (alive) setRecordingDrafts(drafts);
+      })
+      .catch((error: unknown) => {
+        if (alive) setDraftError(error instanceof Error ? error.message : "录音草稿读取失败。");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [conversationId]);
 
   useEffect(() => {
     if (phase === "transcriptReady") {
@@ -78,15 +227,19 @@ export function DailyStoryPage({
     if (
       recorder.status !== "recorded" ||
       !recorder.audioBlob ||
-      sentRecordingRef.current === recorder.audioBlob
+      sentRecordingRef.current === recorder.audioBlob ||
+      draftAppendRef.current === recorder.audioBlob
     )
       return;
-    const isConversation = phase === "recording";
-    const isReadAloud = phase === "readingAloudRecording";
-    if (!isConversation && !isReadAloud) return;
-    sentRecordingRef.current = recorder.audioBlob;
-    void transcribe(recorder.audioBlob, isReadAloud, recorder.seconds);
-  }, [phase, recorder.audioBlob, recorder.seconds, recorder.status, transcribe]);
+    if (phase !== "recording" && phase !== "readingAloudRecording") return;
+    recordingPurposeRef.current = phase === "readingAloudRecording" ? "readAloud" : "conversation";
+    void appendDraftSegment({
+      blob: recorder.audioBlob,
+      durationSec: recorder.seconds,
+      mimeType: recorder.audioBlob.type || "audio/webm",
+      reason: "manual",
+    }).catch(() => {});
+  }, [appendDraftSegment, phase, recorder.audioBlob, recorder.seconds, recorder.status]);
 
   useEffect(() => {
     if (
@@ -98,13 +251,93 @@ export function DailyStoryPage({
 
   const beginConversationRecording = () => {
     sentRecordingRef.current = null;
+    draftAppendRef.current = null;
+    recordingPurposeRef.current = "conversation";
     story.beginRecording();
     void recorder.start();
   };
   const beginReadAloud = (target: string) => {
     sentRecordingRef.current = null;
+    draftAppendRef.current = null;
+    recordingPurposeRef.current = "readAloud";
     story.beginReadAloud(target);
     void recorder.start();
+  };
+  const continueDraftRecording = (readAloud = false) => {
+    sentRecordingRef.current = null;
+    draftAppendRef.current = null;
+    recordingPurposeRef.current = readAloud ? "readAloud" : "conversation";
+    story.continueRecording(readAloud);
+    void recorder.start();
+  };
+  const retryPendingSegment = () => {
+    if (draftActionRef.current || !pendingSegment) return;
+    void appendDraftSegment(pendingSegment).catch(() => {});
+  };
+  const discardPendingSegment = () => {
+    if (draftActionRef.current) return;
+    setPendingSegment(null);
+    setDraftError(null);
+    sentRecordingRef.current = null;
+    draftAppendRef.current = null;
+    story.cancelRecording();
+    recorder.reset();
+  };
+  const discardDraft = async (readAloud = false) => {
+    if (draftActionRef.current) return;
+    draftActionRef.current = true;
+    const purpose: DailyStoryAudioPurpose = readAloud ? "readAloud" : "conversation";
+    try {
+      await removeRecordingDraft(conversationId, purpose);
+      setRecordingDrafts((current) => ({ ...current, [purpose]: null }));
+      setDraftError(null);
+      story.cancelRecording();
+      recorder.reset();
+      recordingPurposeRef.current = null;
+    } catch (error) {
+      const text = error instanceof Error ? error.message : "录音清理失败，请重试。";
+      await markRecordingDraftCleanupFailed(conversationId, purpose, text).catch(() => {});
+      setRecordingDrafts((current) => ({
+        ...current,
+        [purpose]: current[purpose]
+          ? { ...current[purpose]!, cleanupError: text }
+          : current[purpose],
+      }));
+      setDraftError(`录音已处理，清理本机副本失败：${text}`);
+    } finally {
+      draftActionRef.current = false;
+    }
+  };
+  const completeDraft = async (readAloud = false) => {
+    const purpose: DailyStoryAudioPurpose = readAloud ? "readAloud" : "conversation";
+    const draft = recordingDrafts[purpose];
+    if (draftActionRef.current || !canCompleteRecordingDraft(draft)) return;
+    if (!draft) return;
+    draftActionRef.current = true;
+    try {
+      const result = await submitRecordingDraft({
+        conversationId,
+        draft,
+        phase,
+        mergeRecordedAudio,
+        transcribe,
+        markSubmitting: markRecordingDraftSubmitting,
+        markFailed: markRecordingDraftFailed,
+        markCompleted: markRecordingDraftCompleted,
+        markCleanupFailed: markRecordingDraftCleanupFailed,
+        removeDraft: removeRecordingDraft,
+        onDraftChange: (next) => setRecordingDrafts((current) => ({ ...current, [purpose]: next })),
+      });
+      if (result.outcome === "completed") {
+        setDraftError(
+          result.cleanupError ? `转写已完成，录音副本清理失败：${result.cleanupError}` : null,
+        );
+      } else if (result.outcome === "failed") {
+        setDraftError(result.error);
+      }
+    } finally {
+      draftActionRef.current = false;
+    }
   };
   const submitTyped = async () => {
     if (!typed.trim()) return;
@@ -147,6 +380,14 @@ export function DailyStoryPage({
             className="mb-4 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive"
           >
             {story.storageError}
+          </p>
+        ) : null}
+        {draftError ? (
+          <p
+            role="alert"
+            className="mb-4 rounded-2xl bg-destructive/10 px-4 py-3 text-sm text-destructive"
+          >
+            {draftError}
           </p>
         ) : null}
         {story.cachedAudio?.status === "failed" && phase !== "error" ? (
@@ -219,7 +460,7 @@ export function DailyStoryPage({
             phase === "readingAloudTranscribing" ? (
               <Loading label={statusLabel(phase)} />
             ) : null}
-            {phase === "chatting" || phase === "recording" ? (
+            {showConversationDraft ? (
               <Conversation
                 messages={story.state.messages}
                 typed={typed}
@@ -227,7 +468,15 @@ export function DailyStoryPage({
                 onSendTyped={() => void submitTyped()}
                 canType={story.capabilities.chat && story.canEdit && phase === "chatting"}
                 voiceEnabled={story.capabilities.asr}
-                recording={phase === "recording"}
+                recording={
+                  phase === "recording" ||
+                  phase === "recordingDraftReady" ||
+                  Boolean(conversationDraft)
+                }
+                recordingDraft={conversationDraft}
+                pendingSegment={pendingSegment}
+                draftError={draftError}
+                draftSaving={draftSaving}
                 recorderStatus={recorder.status}
                 recorderError={recorder.error}
                 recorderLevel={recorder.level}
@@ -241,6 +490,11 @@ export function DailyStoryPage({
                 seconds={recorder.seconds}
                 onStartRecording={beginConversationRecording}
                 onStopRecording={() => void recorder.stop()}
+                onContinueRecording={() => continueDraftRecording(false)}
+                onCompleteRecording={() => void completeDraft(false)}
+                onDiscardRecording={() => void discardDraft(false)}
+                onRetrySave={retryPendingSegment}
+                onDiscardPending={discardPendingSegment}
                 onCancelRecording={() => {
                   story.cancelRecording();
                   void recorder.stop();
@@ -304,19 +558,32 @@ export function DailyStoryPage({
                 </div>
               </section>
             ) : null}
-            {phase === "review" || phase === "readingAloudRecording" ? (
+            {showReadAloudDraft ? (
               <Review
                 suggestions={story.state.review?.suggestions ?? []}
                 ttsEnabled={story.capabilities.tts}
                 asrEnabled={story.capabilities.asr}
-                readAloudRecording={phase === "readingAloudRecording"}
+                readAloudRecording={
+                  phase === "readingAloudRecording" ||
+                  phase === "readingAloudDraftReady" ||
+                  Boolean(readAloudDraft)
+                }
+                recordingDraft={readAloudDraft}
+                pendingSegment={pendingSegment}
+                draftError={draftError}
+                draftSaving={draftSaving}
                 recorderStatus={recorder.status}
                 recorderError={recorder.error}
                 readAloudTranscript={story.state.readAloudTranscript}
-                readAloudTarget={story.state.readAloudTarget}
+                readAloudTarget={readAloudDraft?.readAloudTarget ?? story.state.readAloudTarget}
                 onPlay={story.playTts}
                 onReadAloud={beginReadAloud}
                 onStop={() => void recorder.stop()}
+                onContinueRecording={() => continueDraftRecording(true)}
+                onCompleteRecording={() => void completeDraft(true)}
+                onDiscardRecording={() => void discardDraft(true)}
+                onRetrySave={retryPendingSegment}
+                onDiscardPending={discardPendingSegment}
                 onCancel={() => {
                   story.resetReadAloud();
                   recorder.reset();
@@ -329,7 +596,7 @@ export function DailyStoryPage({
               <section className="mx-auto max-w-xl rounded-3xl border border-destructive/30 bg-card p-6 text-center shadow-lift">
                 <h1 className="font-display text-2xl">操作没有完成</h1>
                 <p className="mt-3 text-sm text-muted-foreground">{story.state.error?.message}</p>
-                {story.cachedAudio?.status === "failed" ? (
+                {errorRetryUi.showCachedAudioRetry ? (
                   <>
                     {cachedAudioUrl ? (
                       <audio className="mt-5 w-full" controls src={cachedAudioUrl} />
@@ -344,6 +611,19 @@ export function DailyStoryPage({
                   </>
                 ) : null}
                 <div className="mt-5 flex flex-wrap justify-center gap-3">
+                  {errorPanelNeedsOwnDraftActions && activeDraft ? (
+                    <DraftActions
+                      draft={activeDraft}
+                      saving={draftSaving}
+                      pendingSegment={pendingSegment}
+                      draftError={draftError}
+                      onContinue={() => continueDraftRecording(activeDraft.purpose === "readAloud")}
+                      onComplete={() => void completeDraft(activeDraft.purpose === "readAloud")}
+                      onDiscard={() => void discardDraft(activeDraft.purpose === "readAloud")}
+                      onRetrySave={retryPendingSegment}
+                      onDiscardPending={discardPendingSegment}
+                    />
+                  ) : null}
                   {story.state.pendingTranscript?.source === "asr" ? (
                     <Button
                       className="rounded-full"
@@ -353,7 +633,7 @@ export function DailyStoryPage({
                       保存英文转写
                     </Button>
                   ) : null}
-                  {story.cachedAudio?.status !== "failed" ? (
+                  {errorRetryUi.showGenericRetry ? (
                     <Button
                       className="rounded-full"
                       onClick={story.retry}
@@ -361,6 +641,11 @@ export function DailyStoryPage({
                     >
                       重试
                     </Button>
+                  ) : null}
+                  {errorRetryUi.useDraftRetryEntry ? (
+                    <p className="text-sm text-muted-foreground">
+                      请使用上方录音草稿入口手动再次转写或重新提交。
+                    </p>
                   ) : null}
                   <Button variant="outline" className="rounded-full" onClick={startNewConversation}>
                     新故事
@@ -423,6 +708,10 @@ function Conversation({
   canType,
   voiceEnabled,
   recording,
+  recordingDraft,
+  pendingSegment,
+  draftError,
+  draftSaving,
   recorderStatus,
   recorderError,
   recorderLevel,
@@ -436,6 +725,11 @@ function Conversation({
   seconds,
   onStartRecording,
   onStopRecording,
+  onContinueRecording,
+  onCompleteRecording,
+  onDiscardRecording,
+  onRetrySave,
+  onDiscardPending,
   onCancelRecording,
   onResetRecorder,
   onFinish,
@@ -449,6 +743,10 @@ function Conversation({
   canType: boolean;
   voiceEnabled: boolean;
   recording: boolean;
+  recordingDraft: RecordingDraft | null;
+  pendingSegment: RecorderDraft | null;
+  draftError: string | null;
+  draftSaving: boolean;
   recorderStatus: string;
   recorderError: string | null;
   recorderLevel: number;
@@ -462,6 +760,11 @@ function Conversation({
   seconds: number;
   onStartRecording: () => void;
   onStopRecording: () => void;
+  onContinueRecording: () => void;
+  onCompleteRecording: () => void;
+  onDiscardRecording: () => void;
+  onRetrySave: () => void;
+  onDiscardPending: () => void;
   onCancelRecording: () => void;
   onResetRecorder: () => void;
   onFinish: () => void;
@@ -518,7 +821,7 @@ function Conversation({
                   onClick={onStopRecording}
                 >
                   <Square className="size-5" aria-hidden />
-                  停止并转写
+                  停止录音
                 </Button>
               </>
             ) : recorderStatus === "requesting" ? (
@@ -528,6 +831,19 @@ function Conversation({
                   取消
                 </Button>
               </div>
+            ) : null}
+            {recorderStatus === "recorded" || recordingDraft ? (
+              <DraftActions
+                draft={recordingDraft}
+                saving={draftSaving}
+                pendingSegment={pendingSegment}
+                draftError={draftError}
+                onContinue={onContinueRecording}
+                onComplete={onCompleteRecording}
+                onDiscard={onDiscardRecording}
+                onRetrySave={onRetrySave}
+                onDiscardPending={onDiscardPending}
+              />
             ) : null}
             {recorderStatus === "denied" ? (
               <MicProblem error={recorderError} onRetry={onStartRecording} />
@@ -715,6 +1031,98 @@ function MicrophoneTestButton({
   );
 }
 
+function DraftActions({
+  draft,
+  saving,
+  pendingSegment,
+  draftError,
+  onContinue,
+  onComplete,
+  onDiscard,
+  onRetrySave,
+  onDiscardPending,
+}: {
+  draft: RecordingDraft | null;
+  saving: boolean;
+  pendingSegment: RecorderDraft | null;
+  draftError: string | null;
+  onContinue: () => void;
+  onComplete: () => void;
+  onDiscard: () => void;
+  onRetrySave: () => void;
+  onDiscardPending: () => void;
+}) {
+  if (saving) {
+    return <p className="mt-4 text-sm text-muted-foreground">正在保存录音片段…</p>;
+  }
+  if (!draft && !pendingSegment) return null;
+  return (
+    <div className="mt-4 rounded-2xl bg-secondary/70 p-4 text-left">
+      {draft ? (
+        <>
+          <p className="font-medium">
+            {draft.status === "completed" ? "转写已完成" : `已保存 ${draft.segments.length} 段录音`}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {draft.status === "completed"
+              ? `转写结果：${draft.transcript ?? "已保存"}`
+              : draft.status === "failed" && draft.failureKind === "unknown"
+                ? "上次提交结果未知。不会自动再次提交；如仍要重试，会发起新的 provider 请求。"
+                : draft.status === "failed"
+                  ? "上次提交明确失败。修正配置后可手动再试；再次提交会发起新的 provider 请求。"
+                  : draft.status === "submitting" || draft.clientAttemptId
+                    ? "录音提交状态已保存。为避免重复计费，不会再次自动发送。"
+                    : `共 ${Math.round(draft.totalDurationSec)} 秒。可以继续录音，或合并后一次转写。`}
+          </p>
+          {draft.error ? <p className="mt-2 text-sm text-destructive">{draft.error}</p> : null}
+          {draft.cleanupError ? (
+            <p className="mt-2 text-sm text-destructive">本机副本清理失败：{draft.cleanupError}</p>
+          ) : null}
+        </>
+      ) : null}
+      {pendingSegment ? (
+        <p className="mt-2 text-sm text-destructive">
+          这一段录音尚未保存。请重试保存，或清空这一段；已有草稿不会被覆盖。
+        </p>
+      ) : null}
+      {draftError && !pendingSegment && !draft?.error && !draft?.cleanupError ? (
+        <p className="mt-2 text-sm text-destructive">{draftError}</p>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {pendingSegment ? (
+          <>
+            <Button variant="outline" className="rounded-full" onClick={onRetrySave}>
+              重试保存
+            </Button>
+            <Button variant="ghost" className="rounded-full" onClick={onDiscardPending}>
+              清空这一段
+            </Button>
+          </>
+        ) : null}
+        {draft && draft.status !== "completed" && canCompleteRecordingDraft(draft) ? (
+          <>
+            <Button variant="outline" className="rounded-full" onClick={onContinue}>
+              继续录音
+            </Button>
+            <Button className="rounded-full" onClick={onComplete}>
+              {draft.status === "failed"
+                ? draft.failureKind === "unknown"
+                  ? "仍要重新提交"
+                  : "再次转写"
+                : "完成并转写"}
+            </Button>
+          </>
+        ) : null}
+        {draft ? (
+          <Button variant="ghost" className="rounded-full" onClick={onDiscard}>
+            清理本机录音
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function MicProblem({ error, onRetry }: { error: string | null; onRetry: () => void }) {
   return (
     <div className="mt-4 rounded-2xl bg-secondary p-3 text-left text-sm text-muted-foreground">
@@ -732,6 +1140,10 @@ function Review({
   ttsEnabled,
   asrEnabled,
   readAloudRecording,
+  recordingDraft,
+  pendingSegment,
+  draftError,
+  draftSaving,
   recorderStatus,
   recorderError,
   readAloudTranscript,
@@ -739,6 +1151,11 @@ function Review({
   onPlay,
   onReadAloud,
   onStop,
+  onContinueRecording,
+  onCompleteRecording,
+  onDiscardRecording,
+  onRetrySave,
+  onDiscardPending,
   onCancel,
   onNewStory,
   canEdit,
@@ -747,6 +1164,10 @@ function Review({
   ttsEnabled: boolean;
   asrEnabled: boolean;
   readAloudRecording: boolean;
+  recordingDraft: RecordingDraft | null;
+  pendingSegment: RecorderDraft | null;
+  draftError: string | null;
+  draftSaving: boolean;
   recorderStatus: string;
   recorderError: string | null;
   readAloudTranscript: string | null;
@@ -754,6 +1175,11 @@ function Review({
   onPlay: (text: string) => void;
   onReadAloud: (target: string) => void;
   onStop: () => void;
+  onContinueRecording: () => void;
+  onCompleteRecording: () => void;
+  onDiscardRecording: () => void;
+  onRetrySave: () => void;
+  onDiscardPending: () => void;
   onCancel: () => void;
   onNewStory: () => void;
   canEdit: boolean;
@@ -830,10 +1256,23 @@ function Review({
                 onClick={onStop}
               >
                 <Square className="size-4" />
-                停止并转写
+                停止录音
               </Button>
             ) : recorderStatus === "requesting" ? (
               <p className="mt-4 text-sm text-muted-foreground">正在打开麦克风…</p>
+            ) : null}
+            {recorderStatus === "recorded" || recordingDraft ? (
+              <DraftActions
+                draft={recordingDraft}
+                saving={draftSaving}
+                pendingSegment={pendingSegment}
+                draftError={draftError}
+                onContinue={onContinueRecording}
+                onComplete={onCompleteRecording}
+                onDiscard={onDiscardRecording}
+                onRetrySave={onRetrySave}
+                onDiscardPending={onDiscardPending}
+              />
             ) : null}
             <Button variant="ghost" size="sm" className="mt-3" onClick={onCancel}>
               取消

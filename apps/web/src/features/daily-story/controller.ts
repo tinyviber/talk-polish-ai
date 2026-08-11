@@ -33,6 +33,7 @@ import {
   update as updateDailyStoryAudio,
   type DailyStoryAudioPurpose,
 } from "./audio-outbox";
+import { runSingleFlight } from "./single-flight";
 
 const MAX_STORY = 4_000;
 export const DAILY_STORY_TURN_MAX = DAILY_STORY_LIMITS.turnChars;
@@ -48,6 +49,19 @@ export type DailyStoryCachedAudio = {
   readAloudTarget?: string;
   error?: string;
 };
+
+export type DailyStoryTranscribeResult =
+  | {
+      succeeded: true;
+      clientAttemptId: string;
+      transcript: string;
+      transcriptId: string;
+    }
+  | {
+      succeeded: false;
+      clientAttemptId: string;
+      error?: string;
+    };
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
@@ -108,6 +122,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const generationRef = useRef(0);
   const retryRef = useRef<(() => void) | null>(null);
   const reviewInFlightRef = useRef(false);
+  const transcribeInFlightRef = useRef<Promise<DailyStoryTranscribeResult> | null>(null);
   const blobRef = useRef<Blob | null>(null);
   const audioOutboxAttemptRef = useRef<string | null>(null);
   const ttsPlaybackRef = useRef<TransientTtsPlayback | null>(null);
@@ -395,6 +410,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         type: "failure",
         message: message(error),
         resumePhase: "chatting",
+        kind: "start",
         ...(operationId && operationSettingsRevision !== undefined
           ? { operationId, settingsRevision: operationSettingsRevision }
           : {}),
@@ -410,132 +426,164 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       durationSec = 0,
       fromCache = false,
       readAloudTarget?: string,
-    ) => {
-      const target = readAloudTarget ?? stateRef.current.readAloudTarget ?? undefined;
-      if (
-        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current) ||
-        !canEdit ||
-        !(
-          ["recording", "readingAloudRecording", "error"].includes(stateRef.current.phase) ||
-          (fromCache &&
-            (stateRef.current.phase === "chatting" ||
-              stateRef.current.phase === "review" ||
-              stateRef.current.phase === "error"))
-        )
-      )
-        return;
-      blobRef.current = audio;
-      const clientAttemptId = audioOutboxAttemptRef.current ?? createId("asr");
-      audioOutboxAttemptRef.current = clientAttemptId;
-      const controller = abortCurrent();
-      let operationId: string | undefined;
-      let operationSettingsRevision: number | undefined;
-      try {
-        try {
-          await putDailyStoryAudio({
-            clientAttemptId,
-            conversationId,
-            blob: audio,
-            mimeType: audio.type || "application/octet-stream",
-            durationSec: Math.max(0, durationSec),
-            createdAt: Date.now(),
-            purpose: readAloud ? "readAloud" : "conversation",
-            ...(readAloud && target ? { readAloudTarget: target } : {}),
-          });
-          await updateDailyStoryAudio(clientAttemptId, { status: "uploading", error: null });
-          await refreshCachedAudio();
-        } catch (error) {
-          // IndexedDB is a reliability enhancement. If browser storage is
-          // unavailable, keep the direct upload path usable.
-          setStorageError(`录音未能写入本地缓存，将直接上传：${message(error)}`);
-        }
+      clientAttemptIdOverride?: string,
+    ): Promise<DailyStoryTranscribeResult> => {
+      return runSingleFlight(transcribeInFlightRef, async () => {
+        const target = readAloudTarget ?? stateRef.current.readAloudTarget ?? undefined;
         if (
-          controller.signal.aborted ||
-          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-        ) {
-          await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
-            () => {},
-          );
-          return;
-        }
-        const settings = await currentSettings();
-        if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) {
-          await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
-            () => {},
-          );
-          return;
-        }
-        if (!settings.asr) {
+          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current) ||
+          !canEdit ||
+          !(
+            [
+              "recording",
+              "recordingDraftReady",
+              "readingAloudRecording",
+              "readingAloudDraftReady",
+              "error",
+            ].includes(stateRef.current.phase) ||
+            (fromCache &&
+              (stateRef.current.phase === "chatting" ||
+                stateRef.current.phase === "review" ||
+                stateRef.current.phase === "error"))
+          )
+        )
+          return {
+            succeeded: false,
+            clientAttemptId:
+              clientAttemptIdOverride ?? audioOutboxAttemptRef.current ?? createId("asr"),
+          };
+        blobRef.current = audio;
+        const clientAttemptId =
+          clientAttemptIdOverride ?? audioOutboxAttemptRef.current ?? createId("asr");
+        audioOutboxAttemptRef.current = clientAttemptId;
+        const controller = abortCurrent();
+        let operationId: string | undefined;
+        let operationSettingsRevision: number | undefined;
+        let transcriptId: string | undefined;
+        try {
+          try {
+            await putDailyStoryAudio({
+              clientAttemptId,
+              conversationId,
+              blob: audio,
+              mimeType: audio.type || "application/octet-stream",
+              durationSec: Math.max(0, durationSec),
+              createdAt: Date.now(),
+              purpose: readAloud ? "readAloud" : "conversation",
+              ...(readAloud && target ? { readAloudTarget: target } : {}),
+            });
+            await updateDailyStoryAudio(clientAttemptId, { status: "uploading", error: null });
+            await refreshCachedAudio();
+          } catch (error) {
+            // IndexedDB is a reliability enhancement. If browser storage is
+            // unavailable, keep the direct upload path usable.
+            setStorageError(`录音未能写入本地缓存，将直接上传：${message(error)}`);
+          }
+          if (
+            controller.signal.aborted ||
+            !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+          ) {
+            await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
+              () => {},
+            );
+            return { succeeded: false, clientAttemptId };
+          }
+          const settings = await currentSettings();
+          if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) {
+            await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
+              () => {},
+            );
+            return { succeeded: false, clientAttemptId };
+          }
+          if (!settings.asr) {
+            await updateDailyStoryAudio(clientAttemptId, {
+              status: "queued",
+              error: "语音聊天需配置 ASR。",
+            }).catch(() => {});
+            await refreshCachedAudio();
+            setStorageError("语音聊天需配置 ASR。可继续使用文字输入（备用，不是语音转写）。");
+            dispatch({ type: readAloud ? "resetReadAloud" : "reRecord" });
+            return {
+              succeeded: false,
+              clientAttemptId,
+              error: "语音聊天需配置 ASR。",
+            };
+          }
+          operationId = createId(readAloud ? "read" : "asr");
+          operationSettingsRevision = settings.revision;
+          transcriptId = createId(readAloud ? "read" : "asr");
+          dispatch({
+            type: "transcribeRequest",
+            operationId,
+            settingsRevision: settings.revision,
+            readAloud,
+            cached: fromCache,
+            ...(target ? { readAloudTarget: target } : {}),
+          });
+          const result = await transcribeDailyStory({
+            audio,
+            asr: settings.asr,
+            directAsr: settings.local?.asrDirect ?? false,
+            signal: controller.signal,
+          });
+          const text = result.transcript;
+          if (!text.trim()) throw new Error("没有识别到语音。请重录后再试。");
+          // Keep the successful recording in the seven-day outbox as well. This
+          // lets us inspect/retry the exact bytes when an upstream ASR model
+          // returns a clearly wrong language instead of deleting the evidence.
           await updateDailyStoryAudio(clientAttemptId, {
-            status: "queued",
-            error: "语音聊天需配置 ASR。",
+            status: "completed",
+            error: null,
           }).catch(() => {});
           await refreshCachedAudio();
-          setStorageError("语音聊天需配置 ASR。可继续使用文字输入（备用，不是语音转写）。");
-          dispatch({ type: readAloud ? "resetReadAloud" : "reRecord" });
-          return;
+          audioOutboxAttemptRef.current = null;
+          dispatch({
+            type: "transcribeSuccess",
+            operationId,
+            settingsRevision: settings.revision,
+            readAloud,
+            transcript: { id: transcriptId, source: "asr", text },
+          });
+          return { succeeded: true, clientAttemptId, transcript: text, transcriptId };
+        } catch (error) {
+          if (
+            isDailyStoryAbortError(error) ||
+            !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+          ) {
+            await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
+              () => {},
+            );
+            return { succeeded: false, clientAttemptId };
+          }
+          const errorMessage = message(error);
+          await updateDailyStoryAudio(clientAttemptId, {
+            status: "failed",
+            error: errorMessage,
+          }).catch(() => {});
+          await refreshCachedAudio();
+          dispatch({
+            type: "failure",
+            message: errorMessage,
+            resumePhase: readAloud ? "review" : "chatting",
+            kind: "transcribe",
+            ...(operationId && operationSettingsRevision !== undefined
+              ? { operationId, settingsRevision: operationSettingsRevision }
+              : {}),
+          });
+          retryRef.current = () => {
+            if (blobRef.current)
+              void transcribe(
+                blobRef.current,
+                readAloud,
+                durationSec,
+                false,
+                target,
+                clientAttemptId,
+              );
+          };
+          return { succeeded: false, clientAttemptId, error: errorMessage };
         }
-        operationId = createId(readAloud ? "read" : "asr");
-        operationSettingsRevision = settings.revision;
-        dispatch({
-          type: "transcribeRequest",
-          operationId,
-          settingsRevision: settings.revision,
-          readAloud,
-          cached: fromCache,
-          ...(target ? { readAloudTarget: target } : {}),
-        });
-        const result = await transcribeDailyStory({
-          audio,
-          asr: settings.asr,
-          signal: controller.signal,
-        });
-        const text = result.transcript;
-        if (!text.trim()) throw new Error("没有识别到语音。请重录后再试。");
-        // Keep the successful recording in the seven-day outbox as well. This
-        // lets us inspect/retry the exact bytes when an upstream ASR model
-        // returns a clearly wrong language instead of deleting the evidence.
-        await updateDailyStoryAudio(clientAttemptId, {
-          status: "completed",
-          error: null,
-        }).catch(() => {});
-        await refreshCachedAudio();
-        audioOutboxAttemptRef.current = null;
-        dispatch({
-          type: "transcribeSuccess",
-          operationId,
-          settingsRevision: settings.revision,
-          readAloud,
-          transcript: { id: createId(readAloud ? "read" : "asr"), source: "asr", text },
-        });
-      } catch (error) {
-        if (
-          isDailyStoryAbortError(error) ||
-          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-        ) {
-          await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
-            () => {},
-          );
-          return;
-        }
-        await updateDailyStoryAudio(clientAttemptId, {
-          status: "failed",
-          error: message(error),
-        }).catch(() => {});
-        await refreshCachedAudio();
-        dispatch({
-          type: "failure",
-          message: message(error),
-          resumePhase: readAloud ? "review" : "chatting",
-          ...(operationId && operationSettingsRevision !== undefined
-            ? { operationId, settingsRevision: operationSettingsRevision }
-            : {}),
-        });
-        retryRef.current = () => {
-          if (blobRef.current)
-            void transcribe(blobRef.current, readAloud, durationSec, false, target);
-        };
-      }
+      });
     },
     [abortCurrent, canEdit, conversationId, currentSettings, refreshCachedAudio],
   );
@@ -626,6 +674,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           type: "failure",
           message: message(error),
           resumePhase: "chatting",
+          kind: "reply",
           ...(operationId && operationSettingsRevision !== undefined
             ? { operationId, settingsRevision: operationSettingsRevision }
             : {}),
@@ -670,6 +719,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         type: "failure",
         message: message(error),
         resumePhase: "chatting",
+        kind: "review",
         ...(operationId && operationSettingsRevision !== undefined
           ? { operationId, settingsRevision: operationSettingsRevision }
           : {}),
@@ -687,7 +737,12 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     ) => {
       setConnection((current) => ({ ...current, [capability]: "checking" }));
       try {
-        await checkDailyProvider({ capability, provider });
+        const settings = await currentSettings();
+        await checkDailyProvider({
+          capability,
+          provider,
+          ...(capability === "asr" ? { directAsr: settings.local?.asrDirect ?? false } : {}),
+        });
         setConnection((current) => ({ ...current, [capability]: "connected" }));
         return true;
       } catch {
@@ -695,7 +750,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         return false;
       }
     },
-    [],
+    [currentSettings],
   );
 
   const playTts = useCallback(
@@ -746,6 +801,12 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     audioOutboxAttemptRef.current = null;
     dispatch({ type: "recording" });
   }, []);
+  const recordingDraftReady = useCallback((readAloud = false) => {
+    dispatch({ type: "recordingDraftReady", readAloud });
+  }, []);
+  const continueRecording = useCallback((readAloud = false) => {
+    dispatch({ type: "continueRecording", readAloud });
+  }, []);
   const cancelRecording = useCallback(() => dispatch({ type: "recordingCancelled" }), []);
   const saveAsrDraft = useCallback(
     (rawText: string) => {
@@ -789,6 +850,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     setDraft: (draft: string) => dispatch({ type: "draft", draft }),
     start,
     beginRecording,
+    recordingDraftReady,
+    continueRecording,
     transcribe,
     cancelRecording,
     saveAsrDraft,

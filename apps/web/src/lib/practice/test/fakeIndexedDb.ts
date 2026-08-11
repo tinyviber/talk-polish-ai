@@ -85,10 +85,21 @@ function createObjectStoreHandle(store: StoreData, tx: ReturnType<typeof createT
   };
 }
 
-function createTransaction(data: DatabaseData, storeNames: string[]) {
+function createTransaction(
+  data: DatabaseData,
+  storeNames: string[],
+  onFinish?: (transaction: { forceAbort(error: Error): void }) => void,
+) {
   let pending = 0;
   let completed = false;
   let aborted = false;
+  let finished = false;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    onFinish?.(tx);
+  };
 
   const tx = {
     error: null as Error | null,
@@ -98,6 +109,14 @@ function createTransaction(data: DatabaseData, storeNames: string[]) {
     abort() {
       if (completed || aborted) return;
       aborted = true;
+      finish();
+      tx.onabort?.(new Event("abort"));
+    },
+    forceAbort(error: Error) {
+      if (completed || aborted) return;
+      tx.error = error;
+      aborted = true;
+      finish();
       tx.onabort?.(new Event("abort"));
     },
     begin() {
@@ -108,6 +127,7 @@ function createTransaction(data: DatabaseData, storeNames: string[]) {
       queueMicrotask(() => {
         if (completed || aborted || pending > 0 || tx.error) return;
         completed = true;
+        finish();
         tx.oncomplete?.(new Event("complete"));
       });
     },
@@ -123,7 +143,7 @@ function createTransaction(data: DatabaseData, storeNames: string[]) {
           request.error = error as Error;
           tx.error = request.error;
           tx.onerror?.(new Event("error"));
-          tx.onabort?.(new Event("abort"));
+          tx.forceAbort(request.error);
         } finally {
           tx.end();
         }
@@ -142,9 +162,25 @@ function createTransaction(data: DatabaseData, storeNames: string[]) {
 }
 
 function createDatabase(data: DatabaseData) {
-  return {
+  let closed = false;
+  const activeTransactions = new Set<{ forceAbort(error: Error): void }>();
+  let closeNextTransaction = false;
+  const forceClose = () => {
+    if (closed) return;
+    closed = true;
+    const error = new DOMException("The database connection was closed.", "AbortError");
+    for (const transaction of activeTransactions) transaction.forceAbort(error);
+    database.onclose?.(new Event("close"));
+  };
+  const database = {
+    onclose: null as ((event: Event) => void) | null,
     onversionchange: null as ((event: Event) => void) | null,
-    close() {},
+    close() {
+      closed = true;
+    },
+    __closeNextTransaction() {
+      closeNextTransaction = true;
+    },
     get objectStoreNames() {
       const names = Array.from(data.stores.keys());
       return {
@@ -163,16 +199,28 @@ function createDatabase(data: DatabaseData) {
       ) as unknown as IDBObjectStore;
     },
     transaction(storeNames: string | string[], _mode?: IDBTransactionMode) {
-      return createTransaction(
+      if (closed) {
+        throw new DOMException("The database connection is closed.", "InvalidStateError");
+      }
+      const transaction = createTransaction(
         data,
         Array.isArray(storeNames) ? storeNames : [storeNames],
-      ) as unknown as IDBTransaction;
+        (finished) => activeTransactions.delete(finished),
+      );
+      activeTransactions.add(transaction);
+      if (closeNextTransaction) {
+        closeNextTransaction = false;
+        queueMicrotask(forceClose);
+      }
+      return transaction as unknown as IDBTransaction;
     },
   };
+  return database;
 }
 
 export function installFakeIndexedDb() {
   const databases = new Map<string, DatabaseData>();
+  const databaseHandles = new Set<{ __closeNextTransaction(): void }>();
   const original = globalThis.indexedDB;
 
   const indexedDb = {
@@ -191,7 +239,11 @@ export function installFakeIndexedDb() {
         const data = current ?? { version: nextVersion, stores: new Map<string, StoreData>() };
         data.version = nextVersion;
         databases.set(name, data);
-        request.result = createDatabase(data) as IDBDatabase;
+        const database = createDatabase(data) as IDBDatabase & {
+          __closeNextTransaction(): void;
+        };
+        databaseHandles.add(database);
+        request.result = database;
         if (needsUpgrade) {
           request.transaction = createTransaction(
             data,
@@ -214,7 +266,10 @@ export function installFakeIndexedDb() {
       });
       return request as unknown as IDBOpenDBRequest;
     },
-  } as IDBFactory;
+    __closeNextTransaction() {
+      for (const database of databaseHandles) database.__closeNextTransaction();
+    },
+  } as unknown as IDBFactory;
 
   Object.defineProperty(globalThis, "indexedDB", {
     configurable: true,
@@ -222,9 +277,17 @@ export function installFakeIndexedDb() {
   });
 
   return () => {
+    databaseHandles.clear();
     Object.defineProperty(globalThis, "indexedDB", {
       configurable: true,
       value: original,
     });
   };
+}
+
+/** Test-only seam: force the next active fake transaction to abort as AbortError. */
+export function closeNextFakeIndexedDbTransaction() {
+  (
+    globalThis.indexedDB as IDBFactory & { __closeNextTransaction?: () => void }
+  ).__closeNextTransaction?.();
 }

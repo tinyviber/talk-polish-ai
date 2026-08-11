@@ -76,6 +76,7 @@ export type DailyAction =
   | { type: "editTranscript"; text: string }
   | ({ type: "reviewRequest" } & Operation)
   | ({ type: "reviewSuccess"; review: DailyReview } & Operation)
+  | { type: "reviewCancelled" }
   | { type: "readAloudRecording"; target: string }
   | { type: "resetReadAloud" }
   | { type: "reRecord" }
@@ -272,6 +273,10 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
     case "reviewSuccess":
       return sameOperation(state, action)
         ? { ...state, phase: "review", review: action.review, operation: null, error: null }
+        : state;
+    case "reviewCancelled":
+      return state.phase === "reviewing"
+        ? { ...state, phase: "chatting", operation: null, error: null }
         : state;
     case "readAloudRecording":
       return state.phase === "review"

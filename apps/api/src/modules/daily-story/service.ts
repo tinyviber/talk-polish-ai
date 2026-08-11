@@ -84,16 +84,19 @@ export function createDailyStoryService(
     }) {
       return guarded(input.learnerId, input.ip, "chat", async () => {
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
-        const generated = await safeProviderCall(config, () =>
-          createStructuredGenerator(chat).generate({
-            schema: openingResultSchema,
-            messages: [
-              { role: "system", content: conversationSystemPrompt },
-              { role: "user", content: openingUserPrompt(input.storyZh) },
-            ],
-            requestId: input.requestId,
-            maxTokens: DAILY_STORY_OPENING_MAX_TOKENS,
-          }),
+        const generated = await safeProviderCall(
+          config,
+          () =>
+            createStructuredGenerator(chat).generate({
+              schema: openingResultSchema,
+              messages: [
+                { role: "system", content: conversationSystemPrompt },
+                { role: "user", content: openingUserPrompt(input.storyZh) },
+              ],
+              requestId: input.requestId,
+              maxTokens: DAILY_STORY_OPENING_MAX_TOKENS,
+            }),
+          input.requestId,
         );
         return {
           opening: { id: randomUUID(), role: "assistant" as const, text: generated.value.reply },
@@ -111,14 +114,17 @@ export function createDailyStoryService(
     }) {
       return guarded(input.learnerId, input.ip, "asr", async () => {
         const asr = required(providerFactory(config, { asr: input.asr }).asr);
-        const transcript = await safeProviderCall(config, () =>
-          asr.transcribe({
-            audio: input.audio,
-            mimeType: input.mimeType,
-            locale: "en",
-            granularity: "text",
-            requestId: input.requestId,
-          }),
+        const transcript = await safeProviderCall(
+          config,
+          () =>
+            asr.transcribe({
+              audio: input.audio,
+              mimeType: input.mimeType,
+              locale: "en",
+              granularity: "text",
+              requestId: input.requestId,
+            }),
+          input.requestId,
         );
         return { transcript: transcript.text };
       });
@@ -138,23 +144,26 @@ export function createDailyStoryService(
           throw ApiError.validation("Conversation turn id must be new.");
         }
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
-        const generated = await safeProviderCall(config, () =>
-          createStructuredGenerator(chat).generate({
-            schema: conversationResultSchema,
-            messages: [
-              { role: "system", content: conversationSystemPrompt },
-              {
-                role: "user",
-                content: replyUserPrompt({
-                  storyZh: input.storyZh,
-                  history: input.history,
-                  turn: { ...input.turn, role: "user" },
-                }),
-              },
-            ],
-            requestId: input.requestId,
-            maxTokens: DAILY_STORY_REPLY_MAX_TOKENS,
-          }),
+        const generated = await safeProviderCall(
+          config,
+          () =>
+            createStructuredGenerator(chat).generate({
+              schema: conversationResultSchema,
+              messages: [
+                { role: "system", content: conversationSystemPrompt },
+                {
+                  role: "user",
+                  content: replyUserPrompt({
+                    storyZh: input.storyZh,
+                    history: input.history,
+                    turn: { ...input.turn, role: "user" },
+                  }),
+                },
+              ],
+              requestId: input.requestId,
+              maxTokens: DAILY_STORY_REPLY_MAX_TOKENS,
+            }),
+          input.requestId,
         );
         return generated.value;
       });
@@ -180,35 +189,44 @@ export function createDailyStoryService(
         if (sourceTurns.size === 0)
           throw ApiError.validation("Conversation needs a user turn before review.");
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
-        const generated = await safeProviderCall(config, () =>
-          createStructuredGenerator(chat).generate({
-            schema: reviewResultSchema,
-            repairInstruction:
-              'Return only JSON with this exact shape: {"suggestions":[{"sourceTurnId":"string","original":"string","improved":"string","category":"clarity|grammar|naturalness","explanationZh":"string"}]}. Each suggestion must contain exactly those five string fields; return an empty suggestions array when there is no useful improvement.',
-            messages: [
-              { role: "system", content: reviewSystemPrompt },
-              {
-                role: "user",
-                content: reviewUserPrompt({ storyZh: input.storyZh, history: input.history }),
-              },
-            ],
-            requestId: input.requestId,
-            maxTokens: DAILY_STORY_REVIEW_MAX_TOKENS,
-          }),
+        const generated = await safeProviderCall(
+          config,
+          () =>
+            createStructuredGenerator(chat).generate({
+              schema: reviewResultSchema,
+              repairInstruction:
+                'Return only JSON with this exact shape: {"suggestions":[{"sourceTurnId":"string","improved":"string","category":"clarity|grammar|naturalness","explanationZh":"string"}]}. Each suggestion must contain exactly those four string fields; return an empty suggestions array when there is no useful improvement.',
+              messages: [
+                { role: "system", content: reviewSystemPrompt },
+                {
+                  role: "user",
+                  content: reviewUserPrompt({ storyZh: input.storyZh, history: input.history }),
+                },
+              ],
+              requestId: input.requestId,
+              maxTokens: DAILY_STORY_REVIEW_MAX_TOKENS,
+            }),
+          input.requestId,
         );
         const seenSourceIds = new Set<string>();
+        const suggestions = [];
         for (const suggestion of generated.value.suggestions) {
-          if (
-            sourceTurns.get(suggestion.sourceTurnId) !== suggestion.original ||
-            seenSourceIds.has(suggestion.sourceTurnId)
-          ) {
+          const original = sourceTurns.get(suggestion.sourceTurnId);
+          if (original === undefined || seenSourceIds.has(suggestion.sourceTurnId)) {
             throw ApiError.processingUnavailable(
               "Daily Story review could not be validated. Please retry.",
             );
           }
           seenSourceIds.add(suggestion.sourceTurnId);
+          suggestions.push({
+            sourceTurnId: suggestion.sourceTurnId,
+            original,
+            improved: suggestion.improved,
+            category: suggestion.category,
+            explanationZh: suggestion.explanationZh,
+          });
         }
-        return generated.value;
+        return { suggestions };
       });
     },
 
@@ -221,13 +239,16 @@ export function createDailyStoryService(
     }) {
       return guarded(input.learnerId, input.ip, "tts", async () => {
         const tts = required(providerFactory(config, { tts: input.tts }).tts);
-        return safeProviderCall(config, () =>
-          tts.synthesize({
-            text: input.text,
-            voice: input.tts.voice,
-            locale: "en",
-            requestId: input.requestId,
-          }),
+        return safeProviderCall(
+          config,
+          () =>
+            tts.synthesize({
+              text: input.text,
+              voice: input.tts.voice,
+              locale: "en",
+              requestId: input.requestId,
+            }),
+          input.requestId,
         );
       });
     },
@@ -243,19 +264,23 @@ export function createDailyStoryService(
         input.ip,
         `check:${input.request.capability}`,
         async () =>
-          safeProviderCall(config, async () => {
-            const providers = providerFactory(config, {
-              [input.request.capability]: input.request.provider,
-            });
-            const provider =
-              input.request.capability === "chat"
-                ? providers.chat
-                : input.request.capability === "asr"
-                  ? providers.asr
-                  : providers.tts;
-            await required(provider).check?.(input.requestId);
-            return { capability: input.request.capability, status: "connected" as const };
-          }),
+          safeProviderCall(
+            config,
+            async () => {
+              const providers = providerFactory(config, {
+                [input.request.capability]: input.request.provider,
+              });
+              const provider =
+                input.request.capability === "chat"
+                  ? providers.chat
+                  : input.request.capability === "asr"
+                    ? providers.asr
+                    : providers.tts;
+              await required(provider).check?.(input.requestId);
+              return { capability: input.request.capability, status: "connected" as const };
+            },
+            input.requestId,
+          ),
         true,
       );
     },
@@ -267,13 +292,14 @@ function required<T>(value: T | undefined) {
   return value;
 }
 
-async function safeProviderCall<T>(config: Env, run: () => Promise<T>) {
+async function safeProviderCall<T>(config: Env, run: () => Promise<T>, requestId?: string) {
   try {
     return await run();
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    if (config.NODE_ENV !== "production" && error instanceof Error) {
+    if (error instanceof Error) {
       console.warn("[daily-story provider error]", {
+        ...(requestId ? { requestId } : {}),
         name: error.constructor.name,
         message: error.message,
         ...(error instanceof DailyProviderRequestError || error instanceof ProviderRequestError

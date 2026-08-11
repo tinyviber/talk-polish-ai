@@ -1,9 +1,20 @@
+import { DASHSCOPE_FUN_ASR_HTTP_AUDIO_MIME_TYPES } from "@kotoba/contracts";
+
 type DecodedAudio = Pick<
   AudioBuffer,
   "length" | "numberOfChannels" | "sampleRate" | "getChannelData"
 >;
 
 type AudioContextConstructor = new () => AudioContext;
+
+export class RecordedAudioFormatError extends Error {
+  readonly code = "recorded_audio_format" as const;
+
+  constructor(message = "当前浏览器无法将录音转换为 WAV。请更新 iOS/浏览器后重试。") {
+    super(message);
+    this.name = "RecordedAudioFormatError";
+  }
+}
 
 export const MAX_NORMALIZED_AUDIO_BYTES = 25 * 1024 * 1024;
 export const TARGET_RECORDING_SAMPLE_RATE = 16_000;
@@ -14,6 +25,7 @@ const NORMALIZABLE_AUDIO_MIME_TYPES = new Set([
   "audio/mp4",
   "audio/m4a",
 ]);
+const FUN_ASR_AUDIO_MIME_TYPES = new Set<string>(DASHSCOPE_FUN_ASR_HTTP_AUDIO_MIME_TYPES);
 
 /** Return whether browser-recorded audio should be decoded and normalized to WAV. */
 export function isNormalizableAudioMimeType(mimeType: string) {
@@ -73,44 +85,154 @@ export function encodePcmWav(audio: DecodedAudio) {
 }
 
 export function chooseNormalizedAudio(
-  original: Blob,
-  mimeType: string,
+  _original: Blob,
+  _mimeType: string,
   decoded: DecodedAudio,
   maxBytes = MAX_NORMALIZED_AUDIO_BYTES,
+  strict = true,
 ) {
   const wav = encodePcmWav(decoded);
-  return wav.size > maxBytes ? { blob: original, mimeType } : { blob: wav, mimeType: "audio/wav" };
+  if (wav.size > maxBytes) {
+    if (strict) {
+      throw new RecordedAudioFormatError("录音转换后的 WAV 超过 25 MiB 限制，请缩短录音后重试。");
+    }
+    return { blob: _original, mimeType: _mimeType };
+  }
+  return { blob: wav, mimeType: "audio/wav" };
 }
 
 /**
  * WebM, Ogg, MP4, and M4A are valid browser recording formats, but some
  * OpenAI-compatible ASR gateways cannot parse their duration. Normalize them
- * to WAV before upload while retaining the original Blob if this browser
- * cannot decode them.
+ * to WAV before upload. Strict callers (Fun-ASR) reject decode failures;
+ * ordinary providers retain their original compatible browser recording.
  */
 export async function normalizeRecordedAudio(
   blob: Blob,
-  maxBytes = MAX_NORMALIZED_AUDIO_BYTES,
+  maxBytesOrOptions: number | NormalizeRecordedAudioOptions = MAX_NORMALIZED_AUDIO_BYTES,
+  maybeOptions: NormalizeRecordedAudioOptions = {},
 ): Promise<{ blob: Blob; mimeType: string }> {
+  const maxBytes =
+    typeof maxBytesOrOptions === "number" ? maxBytesOrOptions : MAX_NORMALIZED_AUDIO_BYTES;
+  const options = typeof maxBytesOrOptions === "number" ? maybeOptions : maxBytesOrOptions;
+  const strict = options.strict ?? options.requireWav ?? false;
   const mimeType = blob.type.split(";", 1)[0]?.trim().toLowerCase() || "audio/webm";
+  if (strict && !FUN_ASR_AUDIO_MIME_TYPES.has(mimeType)) {
+    throw new RecordedAudioFormatError("Fun-ASR 仅支持 WAV 或 MP3 音频。请重新录音后重试。");
+  }
   if (!isNormalizableAudioMimeType(mimeType)) {
     return { blob, mimeType };
   }
   const AudioContextCtor = audioContextConstructor();
-  if (!AudioContextCtor) return { blob, mimeType };
+  if (!AudioContextCtor) {
+    if (strict) throw new RecordedAudioFormatError();
+    return { blob, mimeType };
+  }
 
   let context: AudioContext | undefined;
   try {
     context = new AudioContextCtor();
+    if (typeof context.resume === "function") await context.resume().catch(() => {});
     const decoded = await context.decodeAudioData(await blob.arrayBuffer());
-    // PCM can be much larger than the compressed browser recording. Never
-    // replace a manageable original with an oversized normalized payload.
-    return chooseNormalizedAudio(blob, mimeType, decoded, maxBytes);
-  } catch {
+    return chooseNormalizedAudio(blob, mimeType, decoded, maxBytes, strict);
+  } catch (error) {
+    if (error instanceof RecordedAudioFormatError && strict) throw error;
+    if (strict) throw new RecordedAudioFormatError();
     return { blob, mimeType };
   } finally {
     if (context) await context.close().catch(() => {});
   }
+}
+
+export type PcmWavCapture = {
+  stop: () => Blob | null;
+  dispose: () => void;
+};
+
+export type NormalizeRecordedAudioOptions = {
+  /** Reject compressed browser formats when WAV conversion is unavailable. */
+  strict?: boolean;
+  /** Alias for strict mode, kept explicit for provider call sites. */
+  requireWav?: boolean;
+};
+
+/**
+ * Capture microphone PCM through Web Audio while MediaRecorder runs.
+ * ScriptProcessor is deprecated, but remains the smallest Safari-compatible
+ * fallback when iOS cannot decode its own MP4 recording afterward.
+ */
+export function createPcmWavCapture(
+  context: AudioContext,
+  source: MediaStreamAudioSourceNode,
+): PcmWavCapture | null {
+  if (typeof context.createScriptProcessor !== "function") return null;
+  let processor: ScriptProcessorNode;
+  let silentGain: GainNode;
+  try {
+    processor = context.createScriptProcessor(4096, 1, 1);
+    silentGain = context.createGain();
+  } catch {
+    return null;
+  }
+  const chunks: Float32Array[] = [];
+  let active = true;
+  const disconnect = () => {
+    if (!active) return;
+    active = false;
+    processor.onaudioprocess = null;
+    try {
+      source.disconnect(processor);
+    } catch {
+      // Already disconnected by browser lifecycle.
+    }
+    try {
+      processor.disconnect();
+      silentGain.disconnect();
+    } catch {
+      // Already disconnected by browser lifecycle.
+    }
+  };
+  processor.onaudioprocess = (event) => {
+    if (!active) return;
+    const input = event.inputBuffer.getChannelData(0);
+    if (input.length) chunks.push(new Float32Array(input));
+  };
+  silentGain.gain.value = 0;
+  try {
+    source.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(context.destination);
+  } catch {
+    disconnect();
+    return null;
+  }
+
+  return {
+    stop() {
+      disconnect();
+      if (!chunks.length) return null;
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const samples = new Float32Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        samples.set(chunk, offset);
+        offset += chunk.length;
+      }
+      chunks.length = 0;
+      const wav = encodePcmWav({
+        length: samples.length,
+        numberOfChannels: 1,
+        sampleRate: context.sampleRate,
+        getChannelData: () => samples,
+      });
+      if (wav.size > MAX_NORMALIZED_AUDIO_BYTES) return null;
+      return wav;
+    },
+    dispose() {
+      disconnect();
+      chunks.length = 0;
+    },
+  };
 }
 
 /** Decode, downmix, resample, and concatenate recording segments into one WAV. */
@@ -124,9 +246,17 @@ export async function mergeRecordedAudio(
   let context: AudioContext | undefined;
   try {
     context = new AudioContextCtor();
-    const decoded = await Promise.all(
-      segments.map(async (segment) => context!.decodeAudioData(await segment.arrayBuffer())),
-    );
+    if (typeof context.resume === "function") await context.resume().catch(() => {});
+    let decoded: DecodedAudio[];
+    try {
+      decoded = await Promise.all(
+        segments.map(async (segment) => context!.decodeAudioData(await segment.arrayBuffer())),
+      );
+    } catch {
+      throw new RecordedAudioFormatError(
+        "当前浏览器无法读取录音片段。请重新录音，或更新 iOS/浏览器后重试。",
+      );
+    }
     const totalFrames = decoded.reduce(
       (sum, audio) =>
         sum +

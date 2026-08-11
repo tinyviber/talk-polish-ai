@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppMode } from "./mode";
-import { normalizeRecordedAudio } from "./audio-format";
+import {
+  createPcmWavCapture,
+  isNormalizableAudioMimeType,
+  normalizeRecordedAudio,
+  RecordedAudioFormatError,
+} from "./audio-format";
 
 const MICROPHONE_REQUEST_TIMEOUT_MS = 10_000;
 const INPUT_DEVICE_STORAGE_KEY = "kotoba-microphone-device-id";
@@ -22,6 +27,57 @@ function saveInputDeviceId(deviceId: string | null) {
   } catch {
     // Persisting the preference is optional.
   }
+}
+
+function detachRecorder(recorder: MediaRecorder) {
+  recorder.ondataavailable = null;
+  recorder.onerror = null;
+}
+
+function waitForMediaRecorderStop(recorder: MediaRecorder, discard = false) {
+  return new Promise<void>((resolve) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (timeout) clearTimeout(timeout);
+      recorder.removeEventListener("stop", finish);
+      resolve();
+    };
+    if (recorder.state !== "inactive") {
+      recorder.addEventListener("stop", finish, { once: true });
+      timeout = setTimeout(finish, discard ? 250 : 1_500);
+      if (!discard) {
+        try {
+          recorder.requestData();
+        } catch {
+          // requestData is optional after a MediaRecorder error.
+        }
+      }
+      try {
+        recorder.stop();
+      } catch {
+        finish();
+      }
+    } else {
+      timeout = setTimeout(finish, 0);
+    }
+  });
+}
+
+export function ownsRecorderGeneration<T>(
+  generation: number,
+  currentGeneration: number,
+  recorder: T,
+  activeRecorder: T | null,
+) {
+  return generation === currentGeneration && activeRecorder === recorder;
+}
+
+export function ownsDiscardGeneration(
+  generation: number,
+  currentGeneration: number,
+  discardOwner: number | null,
+) {
+  return generation === currentGeneration && discardOwner === generation;
 }
 
 async function microphonePermissionState(): Promise<PermissionState | "unknown"> {
@@ -86,9 +142,12 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
+  const pcmCaptureRef = useRef<ReturnType<typeof createPcmWavCapture>>(null);
   const rafRef = useRef<number | null>(null);
   const audioUrlRef = useRef<string | null>(null);
-  const stopRef = useRef<(reason: string, saveDraft: boolean) => Promise<void>>(async () => {});
+  const stopRef = useRef<
+    (reason: string, saveDraft: boolean, discard?: boolean, ownership?: number) => Promise<void>
+  >(async () => {});
   const stoppingRef = useRef(false);
   const trackCleanupRef = useRef<(() => void)[]>([]);
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
@@ -100,6 +159,8 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
   const microphoneTestRafRef = useRef<number | null>(null);
   const startRequestRef = useRef(0);
   const startPendingRef = useRef<number | null>(null);
+  const recordingGenerationRef = useRef(0);
+  const discardOwnershipRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
   const update = useCallback(
@@ -226,6 +287,8 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     analyserRef.current = null;
+    pcmCaptureRef.current?.dispose();
+    pcmCaptureRef.current = null;
     if (ctxRef.current) {
       ctxRef.current.onstatechange = null;
       void ctxRef.current.close().catch(() => {});
@@ -308,10 +371,33 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
   }, []);
 
   const stop = useCallback(
-    async (reason = "manual", saveDraft = false) => {
+    async (reason = "manual", saveDraft = false, discard = false, ownership?: number) => {
+      if (discard) {
+        const discardGeneration = ownership ?? recordingGenerationRef.current;
+        const recorder = recorderRef.current;
+        recorderRef.current = null;
+        if (recorder) {
+          detachRecorder(recorder);
+          await waitForMediaRecorderStop(recorder, true);
+        }
+        if (
+          !ownsDiscardGeneration(
+            discardGeneration,
+            recordingGenerationRef.current,
+            discardOwnershipRef.current,
+          )
+        ) {
+          return;
+        }
+        cleanup();
+        discardOwnershipRef.current = null;
+        stoppingRef.current = false;
+        return;
+      }
       if (stoppingRef.current) return;
       stoppingRef.current = true;
       const recorder = recorderRef.current;
+      const generation = recordingGenerationRef.current;
       // Do not turn an idle/requesting recorder into a fake completed take
       // when iOS sends a lifecycle event during the permission prompt.
       if (!recorder && startPendingRef.current !== null) {
@@ -342,63 +428,89 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
         Math.floor((startedAt ? Date.now() - startedAt : stateRef.current.seconds * 1000) / 1000),
       );
       if (recorder) {
-        const stopped = new Promise<void>((resolve) => {
-          let timeout: ReturnType<typeof setTimeout> | null = null;
-          const finish = () => {
-            if (timeout) clearTimeout(timeout);
-            resolve();
-          };
-          if (recorder.state !== "inactive") {
-            recorder.addEventListener("stop", finish, { once: true });
-            // A broken recorder must not hold the UI forever, but MediaRecorder
-            // errors do not themselves mean the final chunk is ready.
-            timeout = setTimeout(finish, 1_500);
-            try {
-              // Ask for the current timeslice before stop. Some mobile
-              // implementations deliver this final data event asynchronously.
-              recorder.requestData();
-            } catch {
-              // requestData is optional after a MediaRecorder error.
-            }
-            try {
-              recorder.stop();
-            } catch {
-              finish();
-            }
-          } else {
-            // Let a queued dataavailable event run before composing the Blob.
-            timeout = setTimeout(finish, 0);
-          }
-        });
-        await stopped;
+        await waitForMediaRecorderStop(recorder);
+        if (
+          !ownsRecorderGeneration(
+            generation,
+            recordingGenerationRef.current,
+            recorder,
+            recorderRef.current,
+          )
+        ) {
+          if (discardOwnershipRef.current === null) stoppingRef.current = false;
+          return;
+        }
+        detachRecorder(recorder);
+        recordingGenerationRef.current += 1;
+        const finalizedGeneration = recordingGenerationRef.current;
+        recorderRef.current = null;
         const mimeType = recorder.mimeType || "audio/webm";
         const blob = new Blob(chunksRef.current, { type: mimeType });
-        const hasAudio = blob.size > 0;
-        const normalized = hasAudio ? await normalizeRecordedAudio(blob) : { blob, mimeType };
-        const uploadBlob = normalized.blob;
-        const uploadMimeType = normalized.mimeType;
-        const url = uploadBlob.size > 0 ? URL.createObjectURL(uploadBlob) : null;
+        const pcmFallback = pcmCaptureRef.current?.stop() ?? null;
+        pcmCaptureRef.current = null;
+        const hasMediaRecorderAudio = blob.size > 0;
+        let uploadBlob: Blob | null = null;
+        let uploadMimeType = mimeType;
+        let formatError: string | null = null;
+        if (hasMediaRecorderAudio) {
+          try {
+            const normalized = await normalizeRecordedAudio(blob, {
+              strict: Boolean(pcmFallback),
+            });
+            if (
+              pcmFallback &&
+              isNormalizableAudioMimeType(mimeType) &&
+              normalized.mimeType !== "audio/wav"
+            ) {
+              uploadBlob = pcmFallback;
+              uploadMimeType = "audio/wav";
+            } else {
+              uploadBlob = normalized.blob;
+              uploadMimeType = normalized.mimeType;
+            }
+          } catch (error) {
+            if (pcmFallback) {
+              uploadBlob = pcmFallback;
+              uploadMimeType = "audio/wav";
+            } else {
+              // Ordinary OpenAI-compatible providers may accept the original
+              // browser recording when WAV conversion is unavailable.
+              uploadBlob = blob;
+              uploadMimeType = mimeType;
+              formatError = error instanceof RecordedAudioFormatError ? error.message : null;
+            }
+          }
+        } else if (pcmFallback) {
+          uploadBlob = pcmFallback;
+          uploadMimeType = "audio/wav";
+        }
+        if (finalizedGeneration !== recordingGenerationRef.current) {
+          if (discardOwnershipRef.current === null) stoppingRef.current = false;
+          return;
+        }
+        const hasAudio = uploadBlob !== null && uploadBlob.size > 0;
+        const playableBlob = uploadBlob ?? blob;
+        const url = hasAudio ? URL.createObjectURL(playableBlob) : null;
         revokeAudioUrl();
         audioUrlRef.current = url;
         recorderRef.current = null;
         cleanup();
         update((current) => ({
           ...current,
-          // The analyser powers the input meter only. Some browsers expose a
-          // valid MediaRecorder payload while AudioContext remains suspended or
-          // reports zero samples, so it must not reject the recording.
           status: hasAudio ? "recorded" : "denied",
           seconds,
           level: 0,
           audioUrl: url,
           audioBlob: hasAudio ? uploadBlob : null,
           mocked: false,
-          error: hasAudio ? current.error : "没有录到音频数据。请检查麦克风权限后重试。",
+          error: hasAudio
+            ? current.error
+            : (formatError ?? "没有录到音频数据。请检查麦克风权限后重试。"),
         }));
         if (saveDraft && hasAudio) {
           try {
             await onInterruptedRecording?.({
-              blob: uploadBlob,
+              blob: uploadBlob!,
               durationSec: Math.max(1, seconds),
               mimeType: uploadMimeType,
               reason,
@@ -429,7 +541,9 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
 
   const start = useCallback(async () => {
     stopMicrophoneTest();
+    if (stoppingRef.current || discardOwnershipRef.current !== null || recorderRef.current) return;
     const startRequest = ++startRequestRef.current;
+    const generation = ++recordingGenerationRef.current;
     startPendingRef.current = startRequest;
     update({
       status: "requesting",
@@ -566,10 +680,29 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
       recorderRef.current = recorder;
       chunksRef.current = [];
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
+        if (
+          ownsRecorderGeneration(
+            generation,
+            recordingGenerationRef.current,
+            recorder,
+            recorderRef.current,
+          ) &&
+          event.data.size > 0
+        ) {
+          chunksRef.current.push(event.data);
+        }
       };
       recorder.onerror = () => {
-        void stopRef.current("media-recorder-error", true);
+        if (
+          ownsRecorderGeneration(
+            generation,
+            recordingGenerationRef.current,
+            recorder,
+            recorderRef.current,
+          )
+        ) {
+          void stopRef.current("media-recorder-error", true);
+        }
       };
       // A 1s timeslice bounds data loss when iOS suspends the page mid-take.
       recorder.start(1000);
@@ -577,7 +710,15 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
       // pending must never keep the recorder in the permission-pending UI.
       void requestWakeLock();
       const interrupt = () => {
-        if (recorderRef.current?.state === "recording")
+        if (
+          ownsRecorderGeneration(
+            generation,
+            recordingGenerationRef.current,
+            recorder,
+            recorderRef.current,
+          ) &&
+          recorder.state === "recording"
+        )
           void stopRef.current("track-interrupted", true);
       };
       stream.getTracks().forEach((track) => {
@@ -621,21 +762,26 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
         try {
           const ctx = new AudioCtor();
           ctxRef.current = ctx;
+          const source = ctx.createMediaStreamSource(stream);
+          const attachPcmCapture = () => {
+            // Safari can resolve resume() while still suspended. Do not create
+            // a capture that is guaranteed to produce an empty WAV; attach
+            // again when the context reports running.
+            if (ctx.state !== "running" || pcmCaptureRef.current) return;
+            pcmCaptureRef.current = createPcmWavCapture(ctx, source);
+          };
           ctx.onstatechange = () => {
             const audioState = ctx.state as string;
-            // `suspended` is a normal AudioContext state on mobile (autoplay
-            // policy, backgrounding) and does not stop the MediaRecorder, so
-            // it must not abort the take.
+            if (audioState === "running") attachPcmCapture();
+            // `suspended` is normal on mobile and must not stop MediaRecorder.
             if (audioState === "interrupted" || audioState === "closed") interrupt();
           };
-          // Analyser setup is only a level-meter enhancement. A suspended or
-          // unavailable AudioContext must never cancel a valid MediaRecorder.
-          void ctx.resume().catch(() => {});
-          const source = ctx.createMediaStreamSource(stream);
+          await ctx.resume().catch(() => {});
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 512;
           source.connect(analyser);
           analyserRef.current = analyser;
+          attachPcmCapture();
           const data = new Uint8Array(analyser.frequencyBinCount);
           const levelTick = () => {
             analyser.getByteTimeDomainData(data);
@@ -732,10 +878,11 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
   const reset = useCallback(() => {
     startRequestRef.current += 1;
     startPendingRef.current = null;
-    cleanup();
+    const ownership = ++recordingGenerationRef.current;
+    discardOwnershipRef.current = ownership;
+    stoppingRef.current = true;
+    void stopRef.current("reset", false, true, ownership);
     revokeAudioUrl();
-    recorderRef.current = null;
-    stoppingRef.current = false;
     update({
       status: "idle",
       seconds: 0,
@@ -745,7 +892,7 @@ export function useRecorder({ mode = "demo", onInterruptedRecording }: Options =
       mocked: false,
       error: null,
     });
-  }, [cleanup, revokeAudioUrl, update]);
+  }, [revokeAudioUrl, update]);
   return {
     ...state,
     inputDevices,

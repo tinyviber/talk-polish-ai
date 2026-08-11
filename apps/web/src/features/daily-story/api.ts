@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isDashScopeBaseUrl, isDashScopeFunAsrHttpModel } from "@kotoba/contracts";
 import { authenticatedApiFetch } from "@/lib/practice/api";
 import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practice/audio-format";
 import { apiBaseUrl } from "@/lib/practice/mode";
@@ -135,9 +136,13 @@ export async function transcribeDailyStory(input: {
   directAsr?: boolean;
   signal?: AbortSignal;
 }) {
-  // Normalize cached WebM recordings too. Some compatible gateways reject
-  // WebM while accepting the equivalent PCM WAV payload.
-  const normalized = await normalizeRecordedAudio(input.audio);
+  // Fun-ASR HTTP accepts only WAV/MP3. Ordinary compatible providers may
+  // accept the browser's original WebM/Ogg/MP4 when local decoding is absent.
+  const requireWav =
+    isDashScopeBaseUrl(input.asr.baseUrl) && isDashScopeFunAsrHttpModel(input.asr.model);
+  const normalized = await normalizeRecordedAudio(input.audio, {
+    strict: requireWav,
+  });
   if (normalized.blob.size > MAX_NORMALIZED_AUDIO_BYTES) {
     throw new Error("录音超过 25 MiB 限制，请缩短录音后重试。");
   }

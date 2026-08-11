@@ -21,6 +21,13 @@ const publicAsr = {
   baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 } as const;
 
+const ordinaryAsr = {
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "test-key",
+  model: "whisper-1",
+  responseFormat: "json",
+} as const;
+
 describe("Daily Story transcription audio compatibility", () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -28,7 +35,7 @@ describe("Daily Story transcription audio compatibility", () => {
     vi.restoreAllMocks();
   });
 
-  test("allows mp4 to reach the proxy transcription API when the browser cannot decode it", async () => {
+  test("keeps mp4 for an ordinary provider when no WAV conversion capability exists", async () => {
     const fetchMock = vi.mocked(authenticatedApiFetch);
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ transcript: "hello" }), {
@@ -47,18 +54,15 @@ describe("Daily Story transcription audio compatibility", () => {
     await expect(
       transcribeDailyStory({
         audio: new Blob(["mp4"], { type: "audio/mp4" }),
-        asr: workspaceAsr,
+        asr: ordinaryAsr,
       }),
     ).resolves.toEqual({ transcript: "hello" });
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    const body = fetchMock.mock.calls[0]?.[1]?.body as FormData;
-    const audio = body.get("audio") as File;
-    expect(audio.type).toBe("audio/mp4");
-    expect(audio.name).toBe("recording.m4a");
+    expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get("audio")).toBeInstanceOf(File);
   });
 
-  test("allows mp4 to reach the proxy transcription API when local normalization fails", async () => {
+  test("keeps mp4 for an ordinary provider when local normalization fails", async () => {
     const fetchMock = vi.mocked(authenticatedApiFetch);
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ transcript: "hello" }), {
@@ -85,14 +89,12 @@ describe("Daily Story transcription audio compatibility", () => {
     await expect(
       transcribeDailyStory({
         audio: new Blob(["mp4"], { type: "audio/mp4" }),
-        asr: workspaceAsr,
+        asr: ordinaryAsr,
       }),
     ).resolves.toEqual({ transcript: "hello" });
 
     expect(close).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledOnce();
-    const body = fetchMock.mock.calls[0]?.[1]?.body as FormData;
-    expect((body.get("audio") as File).type).toBe("audio/mp4");
   });
 
   test("still blocks unsupported direct Fun-ASR audio when normalization cannot make it compatible", async () => {
@@ -104,15 +106,41 @@ describe("Daily Story transcription audio compatibility", () => {
         asr: publicAsr,
         directAsr: true,
       }),
-    ).rejects.toMatchObject({
-      name: "DailyApiError",
-      status: 422,
-      message: expect.stringContaining("Fun-ASR-Realtime HTTP 接口仅支持 WAV、MP3 或 Opus"),
-    });
+    ).rejects.toMatchObject({ name: "RecordedAudioFormatError" });
     expect(authenticatedApiFetch).not.toHaveBeenCalled();
   });
 
-  test.each(["audio/webm", "audio/ogg", "audio/aac", "audio/mp3", "audio/x-wav", "audio/opus"])(
+  test("strictly blocks workspace Fun-ASR proxy audio when WAV conversion is unavailable", async () => {
+    vi.stubGlobal("window", {});
+
+    await expect(
+      transcribeDailyStory({
+        audio: new Blob(["mp4"], { type: "audio/mp4" }),
+        asr: workspaceAsr,
+      }),
+    ).rejects.toMatchObject({ name: "RecordedAudioFormatError" });
+    expect(authenticatedApiFetch).not.toHaveBeenCalled();
+  });
+
+  test.each(["audio/aac", "audio/opus"])(
+    "strictly blocks Fun-ASR %s instead of passing it through",
+    async (mimeType) => {
+      vi.stubGlobal("window", {});
+
+      await expect(
+        transcribeDailyStory({
+          audio: new Blob(["audio"], { type: mimeType }),
+          asr: workspaceAsr,
+        }),
+      ).rejects.toMatchObject({
+        name: "RecordedAudioFormatError",
+        message: "Fun-ASR 仅支持 WAV 或 MP3 音频。请重新录音后重试。",
+      });
+      expect(authenticatedApiFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each(["audio/aac", "audio/mp3", "audio/x-wav", "audio/opus"])(
     "allows %s to reach the transcription API",
     async (mimeType) => {
       const fetchMock = vi.mocked(authenticatedApiFetch);
@@ -133,7 +161,7 @@ describe("Daily Story transcription audio compatibility", () => {
       await expect(
         transcribeDailyStory({
           audio: new Blob(["audio"], { type: mimeType }),
-          asr: workspaceAsr,
+          asr: ordinaryAsr,
         }),
       ).resolves.toEqual({ transcript: "hello" });
       expect(fetchMock).toHaveBeenCalledOnce();

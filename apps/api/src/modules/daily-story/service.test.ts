@@ -144,6 +144,35 @@ describe("Daily Story policy service", () => {
     ).rejects.toMatchObject({ statusCode: 429, code: "rate_limited" });
   });
 
+  test("does not label a generic provider 415 as a Fun-ASR MIME error", async () => {
+    const service = createDailyStoryService(env(), {
+      providerFactory: () => ({
+        chat: {
+          name: "fixture-chat",
+          async generate() {
+            return { content: "", provider: "fixture" };
+          },
+          async check() {
+            throw new DailyProviderRequestError("http", 415);
+          },
+        },
+      }),
+      guard: async ({ run }) => run(),
+    });
+
+    await expect(
+      service.providerCheck({
+        learnerId: "learner",
+        requestId: "request",
+        request: { capability: "chat", provider: chatConfig },
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 503,
+      code: "processing_unavailable",
+      message: "Daily Story provider is temporarily unavailable.",
+    });
+  });
+
   test("preserves AI SDK provider auth failures as 401", async () => {
     const service = createDailyStoryService(env(), {
       providerFactory: () => ({

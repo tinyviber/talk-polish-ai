@@ -108,8 +108,34 @@ jobs:
                   throw new Error(`Expected exactly one CSP response header; got ${values.length}`);
                 }
                 const csp = values[0];
-                if (!/connect-src\s+'self'(?:\s*;|$)/.test(csp)) {
-                  throw new Error("Production CSP must restrict connect-src to self");
+                const connectSource = csp.match(/(?:^|;)\s*connect-src\s+([^;]+)/)?.[1];
+                if (!connectSource) {
+                  throw new Error("Production CSP must define connect-src");
+                }
+                const connectTokens = connectSource.trim().split(/\s+/).filter(Boolean);
+                const allowedConnectTokens = new Set([
+                  "'self'",
+                  "https://dashscope.aliyuncs.com",
+                  "https://dashscope-intl.aliyuncs.com",
+                ]);
+                for (const token of connectTokens) {
+                  if (token === "https:") {
+                    throw new Error("Production connect-src must not allow bare https:");
+                  }
+                  if (token === "wss:") {
+                    throw new Error("Production connect-src must not allow wss:");
+                  }
+                  if (token.includes("*")) {
+                    throw new Error(`Production connect-src must not allow wildcard sources: ${token}`);
+                  }
+                  if (!allowedConnectTokens.has(token)) {
+                    throw new Error(`Production connect-src contains an unexpected source: ${token}`);
+                  }
+                }
+                for (const token of allowedConnectTokens) {
+                  if (!connectTokens.includes(token)) {
+                    throw new Error(`Production connect-src is missing required source: ${token}`);
+                  }
                 }
                 const scriptSource = csp.match(/(?:^|;)\s*script-src\s+([^;]+)/)?.[1];
                 if (!scriptSource || scriptSource.includes("unsafe-inline")) {

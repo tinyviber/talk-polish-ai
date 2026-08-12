@@ -207,7 +207,7 @@ export function createDailyStoryService(
             createStructuredGenerator(chat).generate({
               schema: reviewResultSchema,
               repairInstruction:
-                "Return only JSON with the exact rubric and suggestions shape from the system instruction. Do not return a total score or top-level comment. Each evidence quote must be an exact continuous substring of its referenced user turn.",
+                "Return only JSON with the exact rubric and suggestions shape from the system instruction. Even when there are no useful improvements, include the complete rubric with fluency, grammar, vocabulary, and naturalness, and set only suggestions to []. Never omit rubric. Do not return a total score or top-level comment. Each evidence quote must be an exact continuous substring of its referenced user turn.",
               messages: [
                 { role: "system", content: reviewSystemPrompt },
                 {

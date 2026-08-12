@@ -8,6 +8,8 @@ import {
   DAILY_STORY_OPENING_MAX_TOKENS,
   conversationSystemPrompt,
   openingUserPrompt,
+  reviewResultSchema,
+  reviewSystemPrompt,
 } from "./policy";
 import { createDailyStoryService, DAILY_STORY_REVIEW_MAX_TOKENS } from "./service";
 
@@ -324,6 +326,38 @@ describe("Daily Story policy service", () => {
     expect(prompt).toContain('"id":"u7"');
     expect(prompt).not.toContain('"id":"u0"');
     expect(prompt).not.toContain("assistant-7");
+  });
+
+  test("requires a complete rubric when there are no suggestions", () => {
+    expect(reviewResultSchema.safeParse({ rubric: rubric(), suggestions: [] }).success).toBe(true);
+    expect(reviewResultSchema.safeParse({ suggestions: [] }).success).toBe(false);
+    expect(reviewSystemPrompt).toContain(
+      "still return the complete rubric with all four dimensions: fluency, grammar, vocabulary, and naturalness",
+    );
+  });
+
+  test("keeps an empty-suggestion review on the first model call", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor([{ rubric: rubric(), suggestions: [] }], requests);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
+
+    expect(requests).toHaveLength(1);
+  });
+
+  test("repairs an incomplete no-suggestion result with the complete rubric instruction", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ suggestions: [] }, { rubric: rubric(), suggestions: [] }],
+      requests,
+    );
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.messages.at(-1)?.content).toContain(
+      "Even when there are no useful improvements, include the complete rubric with fluency, grammar, vocabulary, and naturalness",
+    );
   });
 
   test("restores review originals from submitted history", async () => {

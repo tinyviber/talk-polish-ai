@@ -3,6 +3,7 @@ import {
   DAILY_STORY_LIMITS,
   dailyStoryAsrConfigSchema,
   dailyStoryChatConfigSchema,
+  dailyStoryReviewDiffSchema,
   dailyStoryReviewRubricSchema,
   dailyStoryTtsConfigSchema,
   identifyProviderPreset,
@@ -101,6 +102,7 @@ const sessionSchema = z
               .object({
                 sourceTurnId: z.string().min(1).max(128),
                 original: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+                diff: dailyStoryReviewDiffSchema.optional(),
                 improved: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
                 // Existing local review snapshots predate category. Defaulting
                 // keeps them recoverable; next write stores the explicit value.
@@ -147,6 +149,7 @@ const storyExportReviewSchema = z
           .object({
             sourceTurnId: safeTransferId(128),
             original: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+            diff: dailyStoryReviewDiffSchema.optional(),
             improved: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
             category: z.enum(["clarity", "grammar", "naturalness"]),
             explanationZh: z.string().min(1).max(600),
@@ -741,7 +744,14 @@ function fromStoredSession(value: StoredSession): StorySession {
             score: null,
             comment: null,
             rubric: null,
-            suggestions: value.review.suggestions,
+            suggestions: value.review.suggestions.map((suggestion) => ({
+              sourceTurnId: suggestion.sourceTurnId,
+              original: suggestion.original,
+              improved: suggestion.improved,
+              category: suggestion.category,
+              explanationZh: suggestion.explanationZh,
+              ...(suggestion.diff ? { diff: suggestion.diff } : {}),
+            })),
           },
         }
       : {}),

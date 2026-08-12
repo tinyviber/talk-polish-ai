@@ -5,6 +5,7 @@ import {
   dailyStoryChatConfigSchema,
   dailyStoryProviderCheckRequestSchema,
   dailyStoryReplyRequestSchema,
+  dailyStoryReviewDiffSchema,
   dailyStoryReviewResponseSchema,
   dailyStoryReviewSuggestionSchema,
   dailyStoryTtsConfigSchema,
@@ -198,5 +199,40 @@ describe("Daily Story contracts", () => {
         requestId: "legacy-review",
       }),
     ).toEqual({ suggestions: [], requestId: "legacy-review" });
+  });
+
+  test("bounds compact review diffs and rejects diffs without a deletion", () => {
+    expect(
+      dailyStoryReviewDiffSchema.parse([
+        ["=", "I "],
+        ["-", "go"],
+        ["=", " home."],
+      ]),
+    ).toHaveLength(3);
+    expect(dailyStoryReviewDiffSchema.safeParse([["=", "I go home."]]).success).toBe(false);
+    expect(
+      dailyStoryReviewDiffSchema.safeParse([
+        ["=", "I"],
+        ["=", " go"],
+        ["-", " home"],
+      ]).success,
+    ).toBe(false);
+  });
+
+  test("requires a compact diff to reconstruct the original exactly", () => {
+    expect(
+      dailyStoryReviewSuggestionSchema.safeParse({
+        sourceTurnId: "u1",
+        original: "I go home.",
+        diff: [
+          ["=", "I "],
+          ["-", "go"],
+          ["=", " there."],
+        ],
+        improved: "I went home.",
+        category: "grammar",
+        explanationZh: "动词形式需要调整。",
+      }).success,
+    ).toBe(false);
   });
 });

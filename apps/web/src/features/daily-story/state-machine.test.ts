@@ -31,6 +31,31 @@ describe("Daily Story reducer", () => {
     expect(ready.pendingTranscript?.text).toBe("I was nervous.");
   });
 
+  test("only allows re-recording after the transcript is ready", () => {
+    const phases = ["chatting", "recording", "transcribing", "waitingForAi", "review"] as const;
+    for (const phase of phases) {
+      const state = {
+        ...initialDailyState,
+        phase,
+        pendingTranscript:
+          phase === "chatting" || phase === "recording"
+            ? { id: "asr-1", source: "asr" as const, text: "I was nervous." }
+            : null,
+      };
+      expect(dailyReducer(state, { type: "reRecord" })).toBe(state);
+    }
+
+    const ready = {
+      ...initialDailyState,
+      phase: "transcriptReady" as const,
+      pendingTranscript: { id: "asr-1", source: "asr" as const, text: "I was nervous." },
+    };
+    expect(dailyReducer(ready, { type: "reRecord" })).toMatchObject({
+      phase: "chatting",
+      pendingTranscript: null,
+    });
+  });
+
   test("returns from denied or unsupported recording to text fallback", () => {
     const recording = { ...initialDailyState, phase: "recording" as const, storyZh: "故事" };
     expect(dailyReducer(recording, { type: "recordingCancelled" }).phase).toBe("chatting");

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dailyStoryReviewDiffSchema } from "@kotoba/contracts";
 
 function unwrapTextEnvelope(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -80,6 +81,7 @@ export const reviewResultSchema = z
         z
           .object({
             sourceTurnId: z.string().min(1).max(128),
+            diff: dailyStoryReviewDiffSchema,
             improved: z.string().min(1).max(2_000),
             category: z.enum(["clarity", "grammar", "naturalness"]),
             explanationZh: z.string().min(1).max(600),
@@ -109,8 +111,10 @@ Rules:
 - Score exactly these four dimensions from 0 to 100 as integers: fluency, grammar, vocabulary, naturalness. Add a short objective Chinese comment for each dimension.
 - Add at most two evidence items per dimension. Each evidence item must use a submitted user turn id and quote an exact continuous substring from that user turn. Use an empty evidence array when there is no useful evidence.
 - Return zero to three only high-value improvements for clarity, grammar, or natural daily expression. Do not pad or nitpick.
-- Return exactly this JSON shape: {"rubric":{"fluency":{"score":0,"comment":"中文短评","evidence":[{"sourceTurnId":"user turn id","quote":"exact user text substring"}]},"grammar":{"score":0,"comment":"中文短评","evidence":[]},"vocabulary":{"score":0,"comment":"中文短评","evidence":[]},"naturalness":{"score":0,"comment":"中文短评","evidence":[]}},"suggestions":[{"sourceTurnId":"user turn id","improved":"better English wording","category":"grammar","explanationZh":"简短中文解释"}]}.
-- Each suggestion object must contain exactly these four string fields: sourceTurnId, improved, category, explanationZh. Do not use alternative field names or nested objects. The server restores original wording from the submitted history.
+- Return exactly this JSON shape: {"rubric":{"fluency":{"score":0,"comment":"中文短评","evidence":[{"sourceTurnId":"user turn id","quote":"exact user text substring"}]},"grammar":{"score":0,"comment":"中文短评","evidence":[]},"vocabulary":{"score":0,"comment":"中文短评","evidence":[]},"naturalness":{"score":0,"comment":"中文短评","evidence":[]}},"suggestions":[{"sourceTurnId":"user turn id","diff":[["=","exact kept text"],["-","exact text to change"]],"improved":"better English wording","category":"grammar","explanationZh":"简短中文解释"}]}.
+- Each suggestion object must contain exactly these five fields: sourceTurnId, diff, improved, category, explanationZh. Do not return original, do not use alternative field names or nested objects. The server restores original wording from the submitted history.
+- In diff, the equals operation means an exact continuous source substring to keep and the minus operation means an exact continuous source substring to change. Concatenating every segment text, in order, must equal the referenced user turn exactly. Include at least one minus segment; every segment must be non-empty.
+- Use at most 32 alternating segments. Do not repeat, overlap, reorder, or split text into tiny pieces merely to mark individual characters. Keep the whole improved sentence in improved.
 - Each suggestion must include category exactly "clarity", "grammar", or "naturalness".
 - Every sourceTurnId must be copied exactly from a submitted user turn. Never invent an ID.
 - Do not return a total score or a top-level comment; the server calculates those.

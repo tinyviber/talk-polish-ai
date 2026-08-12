@@ -2,6 +2,7 @@ import type {
   DailyStoryReviewEvidence,
   DailyStoryReviewRubric,
   DailyStoryReviewRubricItem,
+  DailyStoryReviewDiffSegment,
   ProviderPresetId,
 } from "@kotoba/contracts";
 
@@ -49,6 +50,7 @@ export type DailyMessage = {
 export type ReviewSuggestion = {
   sourceTurnId: string;
   original: string;
+  diff?: DailyStoryReviewDiffSegment[];
   improved: string;
   category: "clarity" | "grammar" | "naturalness";
   explanationZh: string;

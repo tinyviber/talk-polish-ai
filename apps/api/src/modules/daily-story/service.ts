@@ -4,6 +4,7 @@ import type {
   DailyStoryChatConfig,
   DailyStoryHistoryMessage,
   DailyStoryProviderCheckRequest,
+  DailyStoryReviewDiffSegment,
   DailyStoryReviewRequest,
   DailyStoryTtsConfig,
 } from "@kotoba/contracts";
@@ -219,7 +220,11 @@ export function createDailyStoryService(
         const suggestions = [];
         for (const suggestion of generated.value.suggestions) {
           const original = sourceTurns.get(suggestion.sourceTurnId);
-          if (original === undefined || seenSourceIds.has(suggestion.sourceTurnId)) {
+          if (
+            original === undefined ||
+            seenSourceIds.has(suggestion.sourceTurnId) ||
+            reconstructReviewDiff(original, suggestion.diff) === null
+          ) {
             throw ApiError.processingUnavailable(
               "Daily Story review could not be validated. Please retry.",
             );
@@ -228,6 +233,7 @@ export function createDailyStoryService(
           suggestions.push({
             sourceTurnId: suggestion.sourceTurnId,
             original,
+            diff: suggestion.diff,
             improved: suggestion.improved,
             category: suggestion.category,
             explanationZh: suggestion.explanationZh,
@@ -319,6 +325,21 @@ export function createDailyStoryService(
 function required<T>(value: T | undefined) {
   if (!value) throw new DailyProviderConfigurationError();
   return value;
+}
+
+function reconstructReviewDiff(
+  original: string,
+  diff: DailyStoryReviewDiffSegment[],
+): string | null {
+  let reconstructed = "";
+  let hasDeletion = false;
+  for (const segment of diff) {
+    const [operation, text] = segment;
+    if ((operation !== "=" && operation !== "-") || !text) return null;
+    reconstructed += text;
+    if (operation === "-") hasDeletion = true;
+  }
+  return hasDeletion && reconstructed === original ? reconstructed : null;
 }
 
 async function safeProviderCall<T>(config: Env, run: () => Promise<T>, requestId?: string) {

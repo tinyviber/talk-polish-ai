@@ -209,6 +209,36 @@ export type DailyStoryUnderstanding = z.infer<typeof dailyStoryUnderstandingSche
 export const dailyStoryReviewCategorySchema = z.enum(["clarity", "grammar", "naturalness"]);
 export type DailyStoryReviewCategory = z.infer<typeof dailyStoryReviewCategorySchema>;
 
+/** Compact review diff: `=` keeps source text and `-` marks text to change. */
+export const dailyStoryReviewDiffSegmentSchema = z.tuple([
+  z.enum(["=", "-"]),
+  z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+]);
+export type DailyStoryReviewDiffSegment = z.infer<typeof dailyStoryReviewDiffSegmentSchema>;
+
+export const dailyStoryReviewDiffSchema = z
+  .array(dailyStoryReviewDiffSegmentSchema)
+  .min(1)
+  .max(32)
+  .superRefine((segments, ctx) => {
+    if (!segments.some(([operation]) => operation === "-")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Review diff must contain at least one deleted segment.",
+      });
+    }
+    for (let index = 1; index < segments.length; index += 1) {
+      if (segments[index - 1]?.[0] === segments[index]?.[0]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index],
+          message: "Review diff must merge adjacent segments with the same operation.",
+        });
+      }
+    }
+  });
+export type DailyStoryReviewDiff = z.infer<typeof dailyStoryReviewDiffSchema>;
+
 export const dailyStoryReplyRequestSchema = z
   .object({
     storyZh: boundedText(DAILY_STORY_LIMITS.storyZhChars),
@@ -232,11 +262,23 @@ export const dailyStoryReviewSuggestionSchema = z
   .object({
     sourceTurnId: z.string().min(1).max(128),
     original: boundedText(DAILY_STORY_LIMITS.turnChars),
+    diff: dailyStoryReviewDiffSchema.optional(),
     improved: boundedText(DAILY_STORY_LIMITS.turnChars),
     category: dailyStoryReviewCategorySchema,
     explanationZh: boundedText(600),
   })
-  .strict();
+  .strict()
+  .superRefine((suggestion, ctx) => {
+    if (!suggestion.diff) return;
+    const reconstructed = suggestion.diff.map(([, text]) => text).join("");
+    if (reconstructed !== suggestion.original) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["diff"],
+        message: "Review diff must reconstruct the original text exactly.",
+      });
+    }
+  });
 export type DailyStoryReviewSuggestion = z.infer<typeof dailyStoryReviewSuggestionSchema>;
 
 export const dailyStoryReviewEvidenceSchema = z

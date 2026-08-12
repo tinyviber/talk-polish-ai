@@ -181,7 +181,14 @@ export async function reviewDailyStory(input: {
     score: result.score ?? null,
     comment: result.comment ?? null,
     rubric: result.rubric ?? null,
-    suggestions: result.suggestions,
+    suggestions: result.suggestions.map((suggestion) => ({
+      sourceTurnId: suggestion.sourceTurnId,
+      original: suggestion.original,
+      improved: suggestion.improved,
+      category: suggestion.category,
+      explanationZh: suggestion.explanationZh,
+      ...(suggestion.diff ? { diff: suggestion.diff } : {}),
+    })),
   };
 }
 

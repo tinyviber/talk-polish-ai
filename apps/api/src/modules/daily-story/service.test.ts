@@ -310,6 +310,11 @@ describe("Daily Story policy service", () => {
         suggestions: [
           {
             sourceTurnId: "u1",
+            diff: [
+              ["=", "The meeting "],
+              ["-", "spend"],
+              ["=", " too much time."],
+            ],
             improved: "The meeting took too long.",
             category: "naturalness",
             explanationZh: "更自然。",
@@ -330,6 +335,11 @@ describe("Daily Story policy service", () => {
       {
         sourceTurnId: "u1",
         original: "The meeting spend too much time.",
+        diff: [
+          ["=", "The meeting "],
+          ["-", "spend"],
+          ["=", " too much time."],
+        ],
         improved: "The meeting took too long.",
         category: "naturalness",
         explanationZh: "更自然。",
@@ -362,6 +372,28 @@ describe("Daily Story policy service", () => {
         },
       },
     });
+  });
+
+  test("rejects a diff that does not reconstruct the submitted user turn", async () => {
+    const service = serviceFor([
+      {
+        rubric: rubric(),
+        suggestions: [
+          {
+            sourceTurnId: "u1",
+            diff: [
+              ["=", "The meeting "],
+              ["-", "spend"],
+            ],
+            improved: "The meeting took too long.",
+            category: "grammar",
+            explanationZh: "动词形式需要调整。",
+          },
+        ],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).rejects.toBeInstanceOf(ApiError);
   });
 
   test("rejects rubric evidence whose quote is not in the submitted user turn", async () => {
@@ -401,6 +433,7 @@ describe("Daily Story policy service", () => {
         suggestions: [
           {
             sourceTurnId: "unknown",
+            diff: [["-", "The meeting was too long."]],
             improved: "The meeting was too long.",
             category: "grammar",
             explanationZh: "更自然。",
@@ -428,12 +461,14 @@ describe("Daily Story policy service", () => {
         suggestions: [
           {
             sourceTurnId: "u1",
+            diff: [["-", "The meeting spend too much time."]],
             improved: "The meeting was too long.",
             category: "grammar",
             explanationZh: "更自然。",
           },
           {
             sourceTurnId: "u1",
+            diff: [["-", "The meeting spend too much time."]],
             improved: "The meeting took too long.",
             category: "naturalness",
             explanationZh: "更自然。",

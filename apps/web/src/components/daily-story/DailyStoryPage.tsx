@@ -42,6 +42,7 @@ import {
   type RecordingDraft,
 } from "@/features/daily-story/recording-drafts";
 import type { DailyStoryAudioPurpose } from "@/features/daily-story/audio-outbox";
+import { reviewOriginalDiffSegments } from "@/features/daily-story/review-diff";
 import {
   createConversationId,
   type DailyReview,
@@ -617,9 +618,12 @@ export function DailyStoryPage({
                     disabled={!story.canEdit}
                   >
                     <RotateCcw className="size-4" aria-hidden />
-                    重录
+                    重新录制
                   </Button>
                 </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  也可以重新录制，以补充或修正刚才的内容。
+                </p>
               </section>
             ) : null}
             {phase === "review" || (phase === "reviewing" && story.state.review) ? (
@@ -1380,12 +1384,23 @@ function Review({
       <p className="mt-2 text-sm text-muted-foreground">只保留高价值改进；没有也完全正常。</p>
       <div className="mt-6 space-y-3">
         {suggestions.length ? (
-          suggestions.map((item) => (
+          suggestions.map((item, index) => (
             <article
-              key={`${item.sourceTurnId}:${item.original}`}
+              key={`${item.sourceTurnId}:${item.original}:${item.improved}:${index}`}
               className="rounded-3xl border border-border bg-card p-5 shadow-lift"
             >
-              <p className="text-sm text-muted-foreground line-through">{item.original}</p>
+              <p className="text-sm text-muted-foreground">
+                <span className="sr-only">原句，需要修改的部分已标记：</span>
+                {reviewOriginalDiffSegments(item).map((segment) =>
+                  segment.deleted ? (
+                    <del key={segment.key} aria-label={`需修改：${segment.text}`}>
+                      {segment.text}
+                    </del>
+                  ) : (
+                    <span key={segment.key}>{segment.text}</span>
+                  ),
+                )}
+              </p>
               <p className="mt-2 text-lg font-medium">{item.improved}</p>
               <p className="mt-2 text-xs font-medium text-primary">
                 {categoryLabel[item.category]}

@@ -452,6 +452,10 @@ describe("Daily Story IndexedDB", () => {
             {
               sourceTurnId: "user-roundtrip",
               original: "I stayed home.",
+              diff: [
+                ["=", "I stayed"],
+                ["-", " home."],
+              ],
               improved: "I stayed at home.",
               category: "naturalness",
               explanationZh: "这里更自然。",
@@ -489,6 +493,10 @@ describe("Daily Story IndexedDB", () => {
               {
                 sourceTurnId: "user-roundtrip",
                 original: "I stayed home.",
+                diff: [
+                  ["=", "I stayed"],
+                  ["-", " home."],
+                ],
                 improved: "I stayed at home.",
                 category: "naturalness",
                 explanationZh: "这里更自然。",
@@ -509,6 +517,10 @@ describe("Daily Story IndexedDB", () => {
     expect(restored?.revision).toBe(1);
     expect(restored?.updatedAt).toBe(saved.updatedAt);
     expect(restored?.review?.suggestions[0]?.category).toBe("naturalness");
+    expect(restored?.review?.suggestions[0]?.diff).toEqual([
+      ["=", "I stayed"],
+      ["-", " home."],
+    ]);
   });
 
   test("imports legacy v1 exports and carries forward an unscored review", async () => {

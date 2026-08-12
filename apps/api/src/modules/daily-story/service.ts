@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type {
-  DailyStoryAsrConfig,
-  DailyStoryChatConfig,
-  DailyStoryHistoryMessage,
-  DailyStoryProviderCheckRequest,
-  DailyStoryReviewDiffSegment,
-  DailyStoryReviewRequest,
-  DailyStoryTtsConfig,
+import {
+  dailyStoryReviewDiffSchema,
+  type DailyStoryAsrConfig,
+  type DailyStoryChatConfig,
+  type DailyStoryHistoryMessage,
+  type DailyStoryProviderCheckRequest,
+  type DailyStoryReviewDiffSegment,
+  type DailyStoryReviewRequest,
+  type DailyStoryTtsConfig,
 } from "@kotoba/contracts";
 import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
@@ -49,7 +50,9 @@ type ProviderFactory = (
 type Guard = typeof withDailyStoryRequestGuard;
 
 const DAILY_STORY_REPLY_MAX_TOKENS = 512;
-export const DAILY_STORY_REVIEW_MAX_TOKENS = 1024;
+export const DAILY_STORY_REVIEW_MAX_TOKENS = 1536;
+const DAILY_STORY_REVIEW_HISTORY_CHARS = 12_000;
+const DAILY_STORY_REVIEW_MAX_SUGGESTIONS = 2;
 
 export function dailyStoryReviewComment(score: number) {
   if (score >= 90) return "本次表达整体清晰自然，可继续扩大表达范围。";
@@ -197,6 +200,7 @@ export function createDailyStoryService(
         if (sourceTurns.size === 0)
           throw ApiError.validation("Conversation needs a user turn before review.");
         const chat = required(providerFactory(config, { chat: input.chat }).chat);
+        const reviewHistory = selectReviewHistory(input.history);
         const generated = await safeProviderCall(
           config,
           () =>
@@ -208,7 +212,7 @@ export function createDailyStoryService(
                 { role: "system", content: reviewSystemPrompt },
                 {
                   role: "user",
-                  content: reviewUserPrompt({ storyZh: input.storyZh, history: input.history }),
+                  content: reviewUserPrompt({ storyZh: input.storyZh, history: reviewHistory }),
                 },
               ],
               requestId: input.requestId,
@@ -218,48 +222,56 @@ export function createDailyStoryService(
         );
         const seenSourceIds = new Set<string>();
         const suggestions = [];
-        for (const suggestion of generated.value.suggestions) {
+        for (const suggestion of generated.value.suggestions.slice(
+          0,
+          DAILY_STORY_REVIEW_MAX_SUGGESTIONS,
+        )) {
           const original = sourceTurns.get(suggestion.sourceTurnId);
-          if (
-            original === undefined ||
-            seenSourceIds.has(suggestion.sourceTurnId) ||
-            reconstructReviewDiff(original, suggestion.diff) === null
-          ) {
-            throw ApiError.processingUnavailable(
-              "Daily Story review could not be validated. Please retry.",
-            );
+          if (original === undefined) {
+            console.warn("[daily-story review suggestion skipped]", {
+              requestId: input.requestId,
+              reason: "unknown_source_turn",
+            });
+            continue;
+          }
+          if (seenSourceIds.has(suggestion.sourceTurnId)) {
+            console.warn("[daily-story review suggestion skipped]", {
+              requestId: input.requestId,
+              reason: "duplicate_source_turn",
+            });
+            continue;
           }
           seenSourceIds.add(suggestion.sourceTurnId);
+          const diff = reconstructReviewDiff(original, suggestion.diff);
+          if (diff === null) {
+            console.warn("[daily-story review diff fallback]", {
+              requestId: input.requestId,
+              sourceTurnId: suggestion.sourceTurnId,
+              originalChars: original.length,
+              diffSegments: Array.isArray(suggestion.diff) ? suggestion.diff.length : null,
+            });
+          }
           suggestions.push({
             sourceTurnId: suggestion.sourceTurnId,
             original,
-            diff: suggestion.diff,
             improved: suggestion.improved,
             category: suggestion.category,
             explanationZh: suggestion.explanationZh,
+            ...(diff ? { diff } : {}),
           });
         }
-        for (const item of Object.values(generated.value.rubric)) {
-          for (const evidence of item.evidence) {
-            const source = sourceTurns.get(evidence.sourceTurnId);
-            if (source === undefined || !source.includes(evidence.quote)) {
-              throw ApiError.processingUnavailable(
-                "Daily Story review could not be validated. Please retry.",
-              );
-            }
-          }
-        }
+        const rubric = normalizeReviewRubric(generated.value.rubric, sourceTurns, input.requestId);
         const score = Math.round(
-          (generated.value.rubric.fluency.score +
-            generated.value.rubric.grammar.score +
-            generated.value.rubric.vocabulary.score +
-            generated.value.rubric.naturalness.score) /
+          (rubric.fluency.score +
+            rubric.grammar.score +
+            rubric.vocabulary.score +
+            rubric.naturalness.score) /
             4,
         );
         return {
           score,
           comment: dailyStoryReviewComment(score),
-          rubric: generated.value.rubric,
+          rubric,
           suggestions,
         };
       });
@@ -327,19 +339,85 @@ function required<T>(value: T | undefined) {
   return value;
 }
 
+function selectReviewHistory(history: DailyStoryHistoryMessage[]) {
+  const userTurns = history
+    .filter(
+      (message): message is Extract<DailyStoryHistoryMessage, { role: "user" }> =>
+        message.role === "user",
+    )
+    .map(({ id, text }) => ({ id, text }));
+  const selected: Array<{ id: string; text: string }> = [];
+  let chars = 0;
+  for (let index = userTurns.length - 1; index >= 0; index -= 1) {
+    const turn = userTurns[index]!;
+    if (chars > 0 && chars + turn.text.length > DAILY_STORY_REVIEW_HISTORY_CHARS) continue;
+    selected.unshift(turn);
+    chars += turn.text.length;
+    if (chars >= DAILY_STORY_REVIEW_HISTORY_CHARS) break;
+  }
+  return selected;
+}
+
+function normalizeReviewRubric(
+  rubric: {
+    fluency: {
+      score: number;
+      comment: string;
+      evidence: Array<{ sourceTurnId: string; quote: string }>;
+    };
+    grammar: {
+      score: number;
+      comment: string;
+      evidence: Array<{ sourceTurnId: string; quote: string }>;
+    };
+    vocabulary: {
+      score: number;
+      comment: string;
+      evidence: Array<{ sourceTurnId: string; quote: string }>;
+    };
+    naturalness: {
+      score: number;
+      comment: string;
+      evidence: Array<{ sourceTurnId: string; quote: string }>;
+    };
+  },
+  sourceTurns: Map<string, string>,
+  requestId: string,
+) {
+  const normalized = Object.fromEntries(
+    Object.entries(rubric).map(([dimension, item]) => [
+      dimension,
+      {
+        ...item,
+        evidence: item.evidence.filter((evidence) => {
+          const source = sourceTurns.get(evidence.sourceTurnId);
+          const valid = source !== undefined && source.includes(evidence.quote);
+          if (!valid) {
+            console.warn("[daily-story review evidence skipped]", {
+              requestId,
+              dimension,
+              reason: source === undefined ? "unknown_source_turn" : "quote_not_in_source",
+            });
+          }
+          return valid;
+        }),
+      },
+    ]),
+  );
+  return normalized as typeof rubric;
+}
+
 function reconstructReviewDiff(
   original: string,
-  diff: DailyStoryReviewDiffSegment[],
-): string | null {
+  diff: unknown,
+): DailyStoryReviewDiffSegment[] | null {
+  const parsed = dailyStoryReviewDiffSchema.safeParse(diff);
+  if (!parsed.success) return null;
   let reconstructed = "";
-  let hasDeletion = false;
-  for (const segment of diff) {
-    const [operation, text] = segment;
-    if ((operation !== "=" && operation !== "-") || !text) return null;
+  for (const [, text] of parsed.data) {
     reconstructed += text;
-    if (operation === "-") hasDeletion = true;
   }
-  return hasDeletion && reconstructed === original ? reconstructed : null;
+  return reconstructed === original ? parsed.data : null;
 }
 
 async function safeProviderCall<T>(config: Env, run: () => Promise<T>, requestId?: string) {

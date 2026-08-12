@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { TextModel, TextModelRequest } from "../../capabilities/text-model";
 import { env } from "../../env";
-import { ApiError } from "../../http/errors";
 import { ProviderRequestError } from "../../providers/http";
 import { DailyProviderConfigurationError } from "../../providers/outbound-url-policy";
 import { DailyProviderRequestError } from "../../providers/safe-https-client";
@@ -303,6 +302,30 @@ describe("Daily Story policy service", () => {
     ]);
   });
 
+  test("keeps review context to recent user turns", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor([{ rubric: rubric(), suggestions: [] }], requests);
+    const history = Array.from({ length: 8 }, (_, index) => [
+      { id: `a${index}`, role: "assistant" as const, text: `assistant-${index}` },
+      {
+        id: `u${index}`,
+        role: "user" as const,
+        source: "typed" as const,
+        text: `turn-${index}-${"x".repeat(1_900)}`,
+      },
+    ]).flat();
+
+    await service.review({
+      ...reviewInput(),
+      history,
+    });
+
+    const prompt = requests[0]?.messages[1]?.content ?? "";
+    expect(prompt).toContain('"id":"u7"');
+    expect(prompt).not.toContain('"id":"u0"');
+    expect(prompt).not.toContain("assistant-7");
+  });
+
   test("restores review originals from submitted history", async () => {
     const service = serviceFor([
       {
@@ -374,7 +397,7 @@ describe("Daily Story policy service", () => {
     });
   });
 
-  test("rejects a diff that does not reconstruct the submitted user turn", async () => {
+  test("keeps the review usable when a suggestion diff is invalid", async () => {
     const service = serviceFor([
       {
         rubric: rubric(),
@@ -393,10 +416,19 @@ describe("Daily Story policy service", () => {
       },
     ]);
 
-    await expect(service.review(reviewInput())).rejects.toBeInstanceOf(ApiError);
+    const result = await service.review(reviewInput());
+    expect(result.suggestions).toEqual([
+      {
+        sourceTurnId: "u1",
+        original: "The meeting was long.",
+        improved: "The meeting took too long.",
+        category: "grammar",
+        explanationZh: "动词形式需要调整。",
+      },
+    ]);
   });
 
-  test("rejects rubric evidence whose quote is not in the submitted user turn", async () => {
+  test("drops rubric evidence whose quote is not in the submitted user turn", async () => {
     const service = serviceFor([
       {
         rubric: {
@@ -411,7 +443,9 @@ describe("Daily Story policy service", () => {
       },
     ]);
 
-    await expect(service.review(reviewInput())).rejects.toBeInstanceOf(ApiError);
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      rubric: { grammar: { evidence: [] } },
+    });
   });
 
   test("keeps ASR text verbatim, including trailing whitespace", async () => {
@@ -426,7 +460,7 @@ describe("Daily Story policy service", () => {
     expect(result.transcript).toBe("The meeting spend too much time.  ");
   });
 
-  test("rejects review suggestions with an unknown source turn", async () => {
+  test("skips review suggestions with an unknown source turn", async () => {
     const service = serviceFor([
       {
         rubric: rubric(),
@@ -451,10 +485,10 @@ describe("Daily Story policy service", () => {
         ],
         chat: chatConfig,
       }),
-    ).rejects.toBeInstanceOf(ApiError);
+    ).resolves.toMatchObject({ suggestions: [] });
   });
 
-  test("rejects duplicate review source turns", async () => {
+  test("keeps only one review suggestion per source turn", async () => {
     const service = serviceFor([
       {
         rubric: rubric(),
@@ -486,6 +520,8 @@ describe("Daily Story policy service", () => {
         ],
         chat: chatConfig,
       }),
-    ).rejects.toBeInstanceOf(ApiError);
+    ).resolves.toMatchObject({
+      suggestions: [{ sourceTurnId: "u1", improved: "The meeting was too long." }],
+    });
   });
 });

@@ -1012,6 +1012,46 @@ describe("Daily Story IndexedDB", () => {
     });
   });
 
+  test("primary-observed generation fences a delayed repository sidecar after reuse", async () => {
+    const conversationId = "sidecar-primary-observed-generation-race";
+    const primaryGate = deferNextFakeIndexedDbTransaction();
+    const writeA = writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "old", role: "user", source: "typed", text: "Old." }],
+        review: { score: 41, comment: "旧代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await primaryGate.started;
+    primaryGate.release();
+
+    const sidecarGate = deferNextFakeIndexedDbTransaction();
+    await sidecarGate.started;
+
+    await deleteStorySession(conversationId, 1);
+    const writeB = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "new", role: "user", source: "typed", text: "New." }],
+        review: { score: 96, comment: "新代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+
+    sidecarGate.release();
+    const resultA = await writeA;
+    expect(resultA.sessionInstanceId).not.toBe(writeB.sessionInstanceId);
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      sessionInstanceId: writeB.sessionInstanceId,
+      review: { score: 96, comment: "新代", rubric: null },
+    });
+  });
+
   test("refuses to export a legacy record that cannot pass the import schema", async () => {
     await clearRawStore("storySessions");
     await clearRawStore("storyLeases");

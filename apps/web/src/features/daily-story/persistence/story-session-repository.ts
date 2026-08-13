@@ -19,6 +19,11 @@ import type {
   StorySessionSummary,
 } from "../types";
 
+type StorySessionWriteResult = {
+  session: StorySession;
+  previousSessionInstanceId: string | undefined;
+};
+
 export async function ensureDailyStorage() {
   await database();
   await migrateLegacySession();
@@ -172,7 +177,7 @@ export async function writeStorySession(
   if (ownerId !== undefined && !claimToken) {
     throw new SessionConflictError();
   }
-  const result = await transaction<StorySession>(
+  const result = await transaction<StorySessionWriteResult>(
     ownerId !== undefined ? [SESSION_STORE, LEASE_STORE] : SESSION_STORE,
     "readwrite",
     (tx, abort) => {
@@ -228,7 +233,11 @@ export async function writeStorySession(
             updatedAt: new Date().toISOString(),
           };
           const write = store.put(sessionRecord(next, conversationId));
-          write.onsuccess = () => setResult(tx, next);
+          write.onsuccess = () =>
+            setResult(tx, {
+              session: next,
+              previousSessionInstanceId: previous?.sessionInstanceId,
+            });
         } catch (error) {
           abort(error);
         }
@@ -255,32 +264,31 @@ export async function writeStorySession(
       }
     },
   );
-  const expectedPreviousSessionInstanceId =
-    result.sessionInstanceId && (await readDailyStoryReview(conversationId))?.sessionInstanceId;
+  const { session: persistedSession, previousSessionInstanceId } = result;
   try {
     await persistReviewSidecar(
       conversationId,
-      result.review ?? null,
-      result.revision,
-      result.sessionInstanceId,
-      expectedPreviousSessionInstanceId,
+      persistedSession.review ?? null,
+      persistedSession.revision,
+      persistedSession.sessionInstanceId,
+      previousSessionInstanceId,
     );
   } catch {
     try {
       await persistReviewSidecar(
         conversationId,
-        result.review ?? null,
-        result.revision,
-        result.sessionInstanceId,
-        expectedPreviousSessionInstanceId,
+        persistedSession.review ?? null,
+        persistedSession.revision,
+        persistedSession.sessionInstanceId,
+        previousSessionInstanceId,
       );
     } catch {
-      notifySession(conversationId, result.revision);
+      notifySession(conversationId, persistedSession.revision);
       throw new StorySidecarPersistenceError(conversationId, "write");
     }
   }
-  notifySession(conversationId, result.revision);
-  return result;
+  notifySession(conversationId, persistedSession.revision);
+  return persistedSession;
 }
 
 export function deleteStorySession(expectedRevision: number | null): Promise<void>;

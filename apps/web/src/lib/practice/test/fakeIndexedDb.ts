@@ -11,6 +11,8 @@ type DatabaseData = {
 type TransactionGate = {
   promise: Promise<void>;
   release: () => void;
+  started: Promise<void>;
+  markStarted: () => void;
 };
 
 let nextTransactionGate: TransactionGate | undefined;
@@ -219,6 +221,7 @@ function createDatabase(data: DatabaseData) {
         (finished) => activeTransactions.delete(finished),
         nextTransactionGate?.promise,
       );
+      nextTransactionGate?.markStarted();
       nextTransactionGate = undefined;
       activeTransactions.add(transaction);
       if (closeNextTransaction) {
@@ -302,11 +305,15 @@ export function installFakeIndexedDb() {
 /** Test-only seam: hold the first request of the next transaction. */
 export function deferNextFakeIndexedDbTransaction() {
   let release!: () => void;
+  let markStarted!: () => void;
   const promise = new Promise<void>((resolve) => {
     release = resolve;
   });
-  nextTransactionGate = { promise, release };
-  return { release };
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  nextTransactionGate = { promise, release, started, markStarted };
+  return { release, started };
 }
 
 /** Test-only seam: force the next active fake transaction to abort as AbortError. */

@@ -22,7 +22,7 @@ import {
   saveProvider,
   writeStorySession,
 } from "./settings-repository";
-import { writeDailyStoryReview } from "./persistence";
+import { releaseStoryLeaseToken, writeDailyStoryReview } from "./persistence";
 import {
   __closeDailyStorageConnectionForTests,
   __resetDailyStorageForTests,
@@ -426,24 +426,116 @@ describe("Daily Story IndexedDB", () => {
       },
       null,
     );
-    await expect(acquireStoryLease("conversation-owner-delete", "owner-a")).resolves.toBe(true);
-    await expect(claimStoryLease("conversation-owner-delete", "owner-b")).resolves.toBe(true);
+    const tokenA = await claimStoryLeaseToken("conversation-owner-delete", "owner-a");
+    expect(tokenA).toBeTruthy();
+    const tokenB = await claimStoryLeaseToken("conversation-owner-delete", "owner-b");
+    expect(tokenB).toBeTruthy();
 
     await expect(
-      deleteStorySession("conversation-owner-delete", saved.revision, "owner-a"),
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-a", tokenA!),
     ).rejects.toBeInstanceOf(SessionConflictError);
     await expect(readStorySession("conversation-owner-delete")).resolves.toMatchObject({
       revision: saved.revision,
     });
 
     await expect(
-      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b"),
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b", tokenB!),
     ).resolves.toBeUndefined();
     await expect(
-      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b"),
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b", tokenB!),
     ).resolves.toBeUndefined();
     await expect(readStorySession("conversation-owner-delete")).resolves.toBeNull();
-    await releaseStoryLease("conversation-owner-delete", "owner-b");
+    await releaseStoryLeaseToken("conversation-owner-delete", "owner-b", tokenB!);
+  });
+
+  test("fails closed when a lease owner omits the fencing token", async () => {
+    const conversationId = "conversation-missing-lease-token";
+    const saved = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "原始故事", messages: [] },
+      null,
+    );
+    const token = await claimStoryLeaseToken(conversationId, "owner");
+    expect(token).toBeTruthy();
+
+    const ownerOnlyWrite = writeStorySession as unknown as (...args: unknown[]) => Promise<unknown>;
+    const ownerOnlyDelete = deleteStorySession as unknown as (
+      ...args: unknown[]
+    ) => Promise<unknown>;
+
+    await expect(
+      ownerOnlyWrite(
+        conversationId,
+        { phase: "chatting", storyZh: "不应写入", messages: [] },
+        saved.revision,
+        "owner",
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "原始故事",
+    });
+
+    await expect(ownerOnlyDelete(conversationId, saved.revision, "owner")).rejects.toBeInstanceOf(
+      SessionConflictError,
+    );
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "原始故事",
+    });
+
+    await releaseStoryLeaseToken(conversationId, "owner", token!);
+  });
+
+  test("fences stale token writes and deletes after lease handoff", async () => {
+    const saved = await writeStorySession(
+      "conversation-lease-token-handoff",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+    const tokenT1 = await claimStoryLeaseToken("conversation-lease-token-handoff", "owner");
+    expect(tokenT1).toBeTruthy();
+    await releaseStoryLeaseToken("conversation-lease-token-handoff", "owner", tokenT1!);
+    const tokenT2 = await claimStoryLeaseToken("conversation-lease-token-handoff", "owner");
+    expect(tokenT2).toBeTruthy();
+    expect(tokenT2).not.toBe(tokenT1);
+
+    await expect(
+      writeStorySession(
+        "conversation-lease-token-handoff",
+        { phase: "chatting", storyZh: "T1 stale write", messages: [] },
+        saved.revision,
+        "owner",
+        tokenT1!,
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(
+      deleteStorySession("conversation-lease-token-handoff", saved.revision, "owner", tokenT1!),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession("conversation-lease-token-handoff")).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "今天下雨",
+    });
+
+    const current = await writeStorySession(
+      "conversation-lease-token-handoff",
+      { phase: "chatting", storyZh: "T2 current write", messages: [] },
+      saved.revision,
+      "owner",
+      tokenT2!,
+    );
+    expect(current.revision).toBe(saved.revision + 1);
+    await deleteStorySession(
+      "conversation-lease-token-handoff",
+      current.revision,
+      "owner",
+      tokenT2!,
+    );
+    await releaseStoryLeaseToken("conversation-lease-token-handoff", "owner", tokenT2!);
   });
 
   test("rejects writes and deletes after the owner's lease expires", async () => {
@@ -456,11 +548,13 @@ describe("Daily Story IndexedDB", () => {
       },
       null,
     );
-    await expect(acquireStoryLease("conversation-expired-owner", "owner-a")).resolves.toBe(true);
+    const token = await claimStoryLeaseToken("conversation-expired-owner", "owner-a");
+    expect(token).toBeTruthy();
     await mutateRawStore("storyLeases", (store) => {
       store.put({
         id: "conversation-expired-owner",
         ownerId: "owner-a",
+        claimToken: token,
         expiresAt: Date.now() - 1,
       });
     });
@@ -471,10 +565,11 @@ describe("Daily Story IndexedDB", () => {
         { phase: "chatting", storyZh: "过期写入", messages: [] },
         saved.revision,
         "owner-a",
+        token!,
       ),
     ).rejects.toBeInstanceOf(SessionConflictError);
     await expect(
-      deleteStorySession("conversation-expired-owner", saved.revision, "owner-a"),
+      deleteStorySession("conversation-expired-owner", saved.revision, "owner-a", token!),
     ).rejects.toBeInstanceOf(SessionConflictError);
     await expect(readStorySession("conversation-expired-owner")).resolves.toMatchObject({
       revision: saved.revision,

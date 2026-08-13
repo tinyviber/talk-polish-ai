@@ -24,7 +24,13 @@ import {
 } from "./persistence";
 import { dailyReducer, initialDailyState, isDailyBusy, snapshotDailyState } from "./state-machine";
 import { releaseTransientTtsPlayback, type TransientTtsPlayback } from "./tts-playback";
-import type { ConnectionState, DailyCapability, ProviderSettings, TurnSource } from "./types";
+import type {
+  ConnectionState,
+  DailyCapability,
+  ProviderSettings,
+  StorySession,
+  TurnSource,
+} from "./types";
 import { createId, trimBounded } from "./types";
 import {
   get as getDailyStoryAudio,
@@ -57,6 +63,14 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
 }
 
+export function getLeaseProtectedMutationToken(
+  canEdit: boolean,
+  pageActive: boolean,
+  claimToken: string | null,
+) {
+  return canEdit && pageActive ? claimToken : null;
+}
+
 function persistenceSignature(session: {
   phase: string;
   storyZh: string;
@@ -73,6 +87,46 @@ function persistenceSignature(session: {
     ...(session.review ? { review: session.review } : {}),
     revision: session.revision,
   });
+}
+
+type StorySessionReader = (conversationId: string) => Promise<StorySession | null>;
+
+type CommittedStoryDeleteRecovery = {
+  readSession: StorySessionReader;
+  isCurrent: () => boolean;
+  clearPersistenceSignature: () => void;
+  dispatchNewStory: () => void;
+  setStorageError: (message: string) => void;
+  warn?: (...args: unknown[]) => void;
+};
+
+const STORY_SIDECAR_CLEANUP_WARNING = "故事已删除，但复核缓存清理失败。系统会在后台继续清理。";
+
+/** Advance the UI after the primary session delete committed but sidecar cleanup did not. */
+export async function recoverCommittedStoryDeletion(
+  conversationId: string,
+  error: unknown,
+  dependencies: CommittedStoryDeleteRecovery,
+) {
+  if (!(error instanceof StorySidecarPersistenceError) || error.operation !== "delete")
+    return false;
+
+  let remaining: StorySession | null;
+  try {
+    remaining = await dependencies.readSession(conversationId);
+  } catch {
+    return false;
+  }
+  if (remaining !== null || !dependencies.isCurrent()) return false;
+
+  (dependencies.warn ?? ((...args: unknown[]) => console.warn(...args)))(
+    "[daily-story sidecar cleanup pending]",
+    { conversationId, operation: error.operation },
+  );
+  dependencies.setStorageError(STORY_SIDECAR_CLEANUP_WARNING);
+  dependencies.clearPersistenceSignature();
+  dependencies.dispatchNewStory();
+  return true;
 }
 
 export function useDailyStoryController(conversationId: string, allowCompose = false) {
@@ -96,6 +150,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const stateRef = useRef(state);
   const aliveRef = useRef(true);
   const ownerIdRef = useRef(createId("tab"));
+  const leaseClaimTokenRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const coordinatorRef = useRef(new DailyStoryCoordinator());
   const retryRef = useRef<(() => void) | null>(null);
@@ -197,7 +252,6 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     coordinator.activate();
     let alive = true;
     let leaseActive = false;
-    let leaseClaimToken: string | null = null;
     let renewSequence = 0;
     const owner = ownerIdRef.current;
     const load = async (claimLease: boolean) => {
@@ -209,9 +263,9 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (!loadedLeaseToken) return;
         const token = loadedLeaseToken;
         loadedLeaseToken = null;
-        if (leaseClaimToken === token) {
+        if (leaseClaimTokenRef.current === token) {
           leaseActive = false;
-          leaseClaimToken = null;
+          leaseClaimTokenRef.current = null;
           setCoordinatorCanEdit(false);
         }
         void releaseStoryLeaseToken(conversationId, owner, token);
@@ -232,7 +286,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
             return;
           }
           leaseActive = loadedLeaseToken !== null;
-          leaseClaimToken = loadedLeaseToken;
+          leaseClaimTokenRef.current = loadedLeaseToken;
           setCoordinatorCanEdit(leaseActive);
         }
         const session = await readStorySession(conversationId);
@@ -275,7 +329,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           settingsRevision: Math.max(settings.revision, coordinatorRef.current.settingsRevision),
         });
       } catch (error) {
-        if (!isLoadCurrent()) return;
+        if (!isLoadCurrent()) {
+          releaseLoadedLease();
+          return;
+        }
         setStorageError(message(error));
         dispatch({
           type: "ready",
@@ -291,9 +348,9 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       }
       coordinatorRef.current.deactivate();
       renewSequence += 1;
-      const token = leaseClaimToken;
+      const token = leaseClaimTokenRef.current;
       leaseActive = false;
-      leaseClaimToken = null;
+      leaseClaimTokenRef.current = null;
       setCoordinatorCanEdit(false);
       if (token) void releaseStoryLeaseToken(conversationId, owner, token);
       abortRef.current?.abort();
@@ -313,7 +370,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       if (!leaseActive || !coordinatorRef.current.isPageActive()) return;
       const sequence = ++renewSequence;
       const generation = coordinatorRef.current.generation();
-      const expectedClaimToken = leaseClaimToken;
+      const expectedClaimToken = leaseClaimTokenRef.current;
       if (!expectedClaimToken) return;
       void acquireStoryLeaseToken(conversationId, owner, expectedClaimToken)
         .then((nextLeaseToken) => {
@@ -326,14 +383,15 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           ) {
             setCoordinatorCanEdit(lease);
             leaseActive = lease;
-            leaseClaimToken = nextLeaseToken;
+            leaseClaimTokenRef.current = nextLeaseToken;
             if (!lease) {
               coordinatorRef.current.beginWrite();
               invalidateCurrent();
             }
-          } else if (nextLeaseToken && !coordinatorRef.current.isPageActive()) {
-            // The IndexedDB write may finish after pagehide. Fenced release
-            // is safe because it only deletes this owner’s lease.
+          } else if (nextLeaseToken) {
+            // A superseded renewal must never leave a token that this
+            // controller no longer tracks. Fenced release is safe even when
+            // a newer claim already replaced it.
             void releaseStoryLeaseToken(conversationId, owner, nextLeaseToken);
           }
         })
@@ -382,7 +440,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (event.conversationId !== conversationId || event.ownerId === owner) return;
         renewSequence += 1;
         leaseActive = false;
-        leaseClaimToken = null;
+        leaseClaimTokenRef.current = null;
         setCoordinatorCanEdit(false);
         invalidateCurrent();
         void load(false);
@@ -402,8 +460,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("pageshow", onPageShow);
       unsubscribe();
-      const token = leaseClaimToken;
-      leaseClaimToken = null;
+      const token = leaseClaimTokenRef.current;
+      leaseClaimTokenRef.current = null;
       if (token) void releaseStoryLeaseToken(conversationId, owner, token);
     };
   }, [
@@ -418,7 +476,12 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
 
   useEffect(() => {
     const snapshot = snapshotDailyState(state);
-    if (!snapshot || !coordinatorRef.current.canEdit) return;
+    const claimToken = getLeaseProtectedMutationToken(
+      coordinatorRef.current.canEdit,
+      coordinatorRef.current.isPageActive(),
+      leaseClaimTokenRef.current,
+    );
+    if (!snapshot || !claimToken) return;
     const signature = persistenceSignature({ ...snapshot, revision: state.revision });
     if (signature === persistenceSignatureRef.current) return;
     const writeSequence = coordinatorRef.current.beginWrite();
@@ -431,6 +494,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       snapshot,
       state.revision,
       ownerIdRef.current,
+      claimToken,
     );
     pendingWritesRef.current.add(writePromise);
     void writePromise
@@ -463,7 +527,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       .finally(() => {
         pendingWritesRef.current.delete(writePromise);
       });
-  }, [conversationId, setCoordinatorCanEdit, state]);
+  }, [canEdit, conversationId, setCoordinatorCanEdit, state]);
 
   const guard = useCallback(
     () =>
@@ -1072,7 +1136,14 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     dispatch({ type: "readAloudRecording", target });
   }, []);
   const newStory = useCallback(async () => {
-    if (!coordinatorRef.current.canEdit || !coordinatorRef.current.isPageActive()) return;
+    if (
+      !getLeaseProtectedMutationToken(
+        coordinatorRef.current.canEdit,
+        coordinatorRef.current.isPageActive(),
+        leaseClaimTokenRef.current,
+      )
+    )
+      return;
     if (stateRef.current.messages.length && !window.confirm("开始新故事会放弃当前对话。继续吗？"))
       return;
     invalidateCurrent();
@@ -1090,15 +1161,32 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     try {
       const latest = await readStorySession(conversationId);
       if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
+      const claimToken = getLeaseProtectedMutationToken(
+        coordinatorRef.current.canEdit,
+        coordinatorRef.current.isPageActive(),
+        leaseClaimTokenRef.current,
+      );
+      if (!claimToken) return;
       await deleteStorySession(
         conversationId,
         latest?.revision ?? stateRef.current.revision,
         ownerIdRef.current,
+        claimToken,
       );
       if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
       persistenceSignatureRef.current = null;
     } catch (error) {
       if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
+      const recovered = await recoverCommittedStoryDeletion(conversationId, error, {
+        readSession: readStorySession,
+        isCurrent: () => coordinatorRef.current.canEdit && isOperationCurrent(operationToken),
+        clearPersistenceSignature: () => {
+          persistenceSignatureRef.current = null;
+        },
+        setStorageError,
+        dispatchNewStory: () => dispatch({ type: "newStory" }),
+      });
+      if (recovered) return;
       if (error instanceof StorySidecarPersistenceError) {
         setStorageError(message(error));
         return;

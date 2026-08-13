@@ -142,13 +142,20 @@ export function writeStorySession(
   conversationId: string,
   session: StorySessionSnapshot,
   expectedRevision: number | null,
-  ownerId?: string,
+  ownerId: string,
+  claimToken: string,
+): Promise<StorySession>;
+export function writeStorySession(
+  conversationId: string,
+  session: StorySessionSnapshot,
+  expectedRevision: number | null,
 ): Promise<StorySession>;
 export async function writeStorySession(
   conversationIdOrSession: string | StorySessionSnapshot,
   sessionOrExpectedRevision: StorySessionSnapshot | number | null,
   explicitExpectedRevision?: number | null,
   explicitOwnerId?: string,
+  explicitClaimToken?: string,
 ): Promise<StorySession> {
   const conversationId =
     typeof conversationIdOrSession === "string" ? conversationIdOrSession : CURRENT;
@@ -161,23 +168,32 @@ export async function writeStorySession(
       ? explicitExpectedRevision!
       : (sessionOrExpectedRevision as number | null);
   const ownerId = typeof conversationIdOrSession === "string" ? explicitOwnerId : undefined;
+  const claimToken = typeof conversationIdOrSession === "string" ? explicitClaimToken : undefined;
+  if (ownerId !== undefined && !claimToken) {
+    throw new SessionConflictError();
+  }
   const result = await transaction<StorySession>(
-    ownerId ? [SESSION_STORE, LEASE_STORE] : SESSION_STORE,
+    ownerId !== undefined ? [SESSION_STORE, LEASE_STORE] : SESSION_STORE,
     "readwrite",
     (tx, abort) => {
       const store = tx.objectStore(SESSION_STORE);
       const request = store.get(conversationId);
-      const leaseRequest = ownerId ? tx.objectStore(LEASE_STORE).get(conversationId) : undefined;
+      const leaseRequest =
+        ownerId !== undefined ? tx.objectStore(LEASE_STORE).get(conversationId) : undefined;
       let storedSessionRecord: StoredSession | undefined;
       let leaseRecord: unknown;
       let sessionReady = false;
-      let leaseReady = !ownerId;
+      let leaseReady = ownerId === undefined;
       const commit = () => {
         if (!sessionReady || !leaseReady) return;
         try {
-          if (ownerId) {
+          if (ownerId !== undefined) {
             const lease = leaseRecord === undefined ? null : leaseSchema.parse(leaseRecord);
-            if (lease?.ownerId !== ownerId || lease.expiresAt <= Date.now()) {
+            if (
+              lease?.ownerId !== ownerId ||
+              lease.claimToken !== claimToken ||
+              lease.expiresAt <= Date.now()
+            ) {
               abort(new SessionConflictError());
               return;
             }
@@ -265,29 +281,34 @@ export async function writeStorySession(
 
 export function deleteStorySession(expectedRevision: number | null): Promise<void>;
 export function deleteStorySession(
+  conversationId: string,
   expectedRevision: number | null,
-  ownerId?: string,
+  ownerId: string,
+  claimToken: string,
 ): Promise<void>;
 export function deleteStorySession(
   conversationId: string,
   expectedRevision: number | null,
-  ownerId?: string,
 ): Promise<void>;
 export async function deleteStorySession(
   conversationIdOrExpectedRevision: string | number | null,
   explicitExpectedRevisionOrOwner?: number | null | string,
   explicitOwnerId?: string,
+  explicitClaimToken?: string,
 ) {
   const hasConversationId = typeof conversationIdOrExpectedRevision === "string";
   const conversationId = hasConversationId ? conversationIdOrExpectedRevision : CURRENT;
   const expectedRevision = hasConversationId
     ? (explicitExpectedRevisionOrOwner as number | null)
     : conversationIdOrExpectedRevision;
-  const ownerId = hasConversationId
-    ? explicitOwnerId
-    : typeof explicitExpectedRevisionOrOwner === "string"
-      ? explicitExpectedRevisionOrOwner
-      : undefined;
+  const ownerId = hasConversationId ? explicitOwnerId : undefined;
+  const claimToken = hasConversationId ? explicitClaimToken : undefined;
+  if (
+    (ownerId !== undefined && !claimToken) ||
+    (!hasConversationId && typeof explicitExpectedRevisionOrOwner === "string")
+  ) {
+    throw new SessionConflictError();
+  }
   const result = await transaction<void>(
     ownerId === undefined ? SESSION_STORE : [SESSION_STORE, LEASE_STORE],
     "readwrite",
@@ -305,7 +326,11 @@ export async function deleteStorySession(
           if (ownerId !== undefined) {
             const leaseRecord = leaseRequest?.result as unknown;
             const lease = leaseRecord === undefined ? null : leaseSchema.parse(leaseRecord);
-            if (lease?.ownerId !== ownerId || lease.expiresAt <= Date.now()) {
+            if (
+              lease?.ownerId !== ownerId ||
+              lease.claimToken !== claimToken ||
+              lease.expiresAt <= Date.now()
+            ) {
               abort(new SessionConflictError());
               return;
             }

@@ -1,5 +1,16 @@
-import { describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { installFakeIndexedDb } from "@/lib/practice/test/fakeIndexedDb";
+import { getLeaseProtectedMutationToken } from "./controller";
 import { DailyStoryCoordinator } from "./coordinator";
+import {
+  claimStoryLeaseToken,
+  deleteStorySession,
+  readStorySession,
+  releaseStoryLeaseToken,
+  writeStorySession,
+} from "./persistence";
+import { SessionConflictError } from "./persistence/errors";
+import { __resetDailyStorageForTests } from "./persistence/testing";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -245,5 +256,77 @@ describe("Daily Story coordinator race guards", () => {
     await expect(completion).resolves.toEqual({ operation: false, write: false });
     expect(coordinator.isOperationCurrent(coordinator.beginOperation())).toBe(true);
     expect(coordinator.isWriteCurrent(coordinator.beginWrite())).toBe(true);
+  });
+});
+
+describe("Daily Story controller lease handoff", () => {
+  let restore: () => void;
+
+  beforeAll(() => {
+    restore = installFakeIndexedDb();
+  });
+
+  beforeEach(async () => {
+    await __resetDailyStorageForTests();
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase("kotoba-loop-settings");
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase("kotoba-daily-story-review-v2");
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+    await __resetDailyStorageForTests();
+  });
+
+  afterAll(() => restore());
+
+  test("pagehide/reclaim fences old T1 write and delete tokens", async () => {
+    const conversationId = "conversation-controller-lease-handoff";
+    const coordinator = activeCoordinator();
+    const saved = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "今天下雨", messages: [] },
+      null,
+    );
+    const tokenT1 = await claimStoryLeaseToken(conversationId, "owner", 1_000);
+    expect(tokenT1).toBeTruthy();
+    const oldWrite = coordinator.beginWrite();
+
+    coordinator.deactivate();
+    await releaseStoryLeaseToken(conversationId, "owner", tokenT1!);
+    expect(coordinator.isWriteCurrent(oldWrite)).toBe(false);
+    expect(getLeaseProtectedMutationToken(true, coordinator.isPageActive(), tokenT1)).toBeNull();
+
+    coordinator.activate();
+    coordinator.setCanEdit(true);
+    const tokenT2 = await claimStoryLeaseToken(conversationId, "owner", 2_000);
+    expect(tokenT2).toBeTruthy();
+    expect(tokenT2).not.toBe(tokenT1);
+    expect(
+      getLeaseProtectedMutationToken(coordinator.canEdit, coordinator.isPageActive(), tokenT2),
+    ).toBe(tokenT2);
+
+    await expect(
+      writeStorySession(
+        conversationId,
+        { phase: "chatting", storyZh: "旧 T1 写入", messages: [] },
+        saved.revision,
+        "owner",
+        tokenT1!,
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(
+      deleteStorySession(conversationId, saved.revision, "owner", tokenT1!),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "今天下雨",
+    });
+
+    await deleteStorySession(conversationId, saved.revision, "owner", tokenT2!);
+    await releaseStoryLeaseToken(conversationId, "owner", tokenT2!);
   });
 });

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { TextModel, TextModelRequest } from "../../capabilities/text-model";
+import type { DailyStoryProbe, DailyStoryRequestProviders } from "../../providers/request-scoped";
 import { env } from "../../env";
+import { createSafeProviderCall } from "./infrastructure/provider-call";
+import type { DailyStoryGuard, DailyStoryProviderFactory } from "./application/ports";
 import { ProviderRequestError } from "../../providers/http";
 import { DailyProviderConfigurationError } from "../../providers/outbound-url-policy";
 import { DailyProviderRequestError } from "../../providers/safe-https-client";
@@ -40,9 +43,13 @@ function reviewInput() {
   };
 }
 
-function fixtureModel(values: unknown[], requests: TextModelRequest[] = []): TextModel {
+function fixtureModel(
+  values: unknown[],
+  requests: TextModelRequest[] = [],
+): TextModel & DailyStoryProbe {
   return {
     name: "fixture",
+    async probe() {},
     async generate(input) {
       requests.push(input);
       const value = values.shift();
@@ -52,11 +59,12 @@ function fixtureModel(values: unknown[], requests: TextModelRequest[] = []): Tex
 }
 
 function serviceFor(values: unknown[], requests: TextModelRequest[] = []) {
-  return createDailyStoryService(env(), {
+  return testService({
     providerFactory: () => ({
       chat: fixtureModel(values, requests),
       asr: {
         name: "fixture-asr",
+        async probe() {},
         async transcribe() {
           return { text: "The meeting spend too much time.  ", provider: "fixture" };
         },
@@ -66,9 +74,27 @@ function serviceFor(values: unknown[], requests: TextModelRequest[] = []) {
   });
 }
 
+function testService(dependencies: {
+  providerFactory?: (input: Parameters<DailyStoryProviderFactory>[0]) => unknown;
+  guard?: DailyStoryGuard;
+}) {
+  const config = env();
+  return createDailyStoryService({
+    config: {
+      dailyStoryRateLimitPerMinute: config.DAILY_STORY_RATE_LIMIT_PER_MINUTE,
+      dailyStoryProviderCheckRateLimitPerMinute:
+        config.DAILY_STORY_PROVIDER_CHECK_RATE_LIMIT_PER_MINUTE,
+      dailyStoryConcurrentRequests: config.DAILY_STORY_CONCURRENT_REQUESTS,
+    },
+    providers: (input) => dependencies.providerFactory?.(input) as never,
+    guard: dependencies.guard ?? (async ({ run }) => run()),
+    safeProviderCall: createSafeProviderCall(config.NODE_ENV),
+  });
+}
+
 describe("Daily Story policy service", () => {
   test("maps provider construction failures to validation errors", async () => {
-    const service = createDailyStoryService(env(), {
+    const service = testService({
       providerFactory: () => {
         throw new DailyProviderConfigurationError();
       },
@@ -89,14 +115,14 @@ describe("Daily Story policy service", () => {
 
   test("passes the request ID into provider checks", async () => {
     const requestIds: string[] = [];
-    const service = createDailyStoryService(env(), {
+    const service = testService({
       providerFactory: () => ({
         chat: {
           name: "fixture-chat",
           async generate() {
             return { content: "", provider: "fixture" };
           },
-          async check(requestId?: string) {
+          async probe(requestId?: string) {
             if (requestId) requestIds.push(requestId);
           },
         },
@@ -113,18 +139,41 @@ describe("Daily Story policy service", () => {
     expect(requestIds).toEqual(["provider-check-request"]);
   });
 
+  test("fails closed when a provider has no explicit probe capability", async () => {
+    const service = testService({
+      providerFactory: () =>
+        ({
+          chat: {
+            name: "fixture-chat",
+            async generate() {
+              return { content: "", provider: "fixture" };
+            },
+          },
+        }) as unknown as Partial<DailyStoryRequestProviders>,
+      guard: async ({ run }) => run(),
+    });
+
+    await expect(
+      service.providerCheck({
+        learnerId: "learner",
+        requestId: "missing-probe",
+        request: { capability: "chat", provider: chatConfig },
+      }),
+    ).rejects.toMatchObject({ statusCode: 422, code: "validation_failed" });
+  });
+
   test.each([
     [401, "unauthorized"],
     [403, "unauthorized"],
   ] as const)("preserves rejected provider credentials as %i", async (status, code) => {
-    const service = createDailyStoryService(env(), {
+    const service = testService({
       providerFactory: () => ({
         chat: {
           name: "fixture-chat",
           async generate() {
             return { content: "", provider: "fixture" };
           },
-          async check() {
+          async probe() {
             throw new DailyProviderRequestError("http", status);
           },
         },
@@ -142,14 +191,14 @@ describe("Daily Story policy service", () => {
   });
 
   test("preserves provider rate limits as 429", async () => {
-    const service = createDailyStoryService(env(), {
+    const service = testService({
       providerFactory: () => ({
         chat: {
           name: "fixture-chat",
           async generate() {
             return { content: "", provider: "fixture" };
           },
-          async check() {
+          async probe() {
             throw new DailyProviderRequestError("http", 429);
           },
         },
@@ -167,14 +216,14 @@ describe("Daily Story policy service", () => {
   });
 
   test("does not label a generic provider 415 as a Fun-ASR MIME error", async () => {
-    const service = createDailyStoryService(env(), {
+    const service = testService({
       providerFactory: () => ({
         chat: {
           name: "fixture-chat",
           async generate() {
             return { content: "", provider: "fixture" };
           },
-          async check() {
+          async probe() {
             throw new DailyProviderRequestError("http", 415);
           },
         },
@@ -196,7 +245,7 @@ describe("Daily Story policy service", () => {
   });
 
   test("preserves AI SDK provider auth failures as 401", async () => {
-    const service = createDailyStoryService(env(), {
+    const service = testService({
       providerFactory: () => ({
         chat: {
           name: "fixture-chat",
@@ -207,7 +256,7 @@ describe("Daily Story policy service", () => {
               retryCount: 0,
             });
           },
-          async check() {
+          async probe() {
             throw new ProviderRequestError("Upstream chat request failed.", {
               code: "http",
               status: 401,

@@ -71,6 +71,7 @@ export type DailyReview = {
 export type StorySession = {
   schemaVersion: 1;
   revision: number;
+  sessionInstanceId?: string;
   updatedAt: string;
   phase: "chatting" | "transcriptReady" | "review";
   storyZh: string;

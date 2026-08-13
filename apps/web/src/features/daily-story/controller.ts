@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { DAILY_STORY_LIMITS } from "@kotoba/contracts";
 import { usePwa } from "@/lib/pwa";
 import {
   checkDailyProvider,
@@ -11,17 +10,18 @@ import {
   isDailyStoryAbortError,
 } from "./api";
 import {
-  SessionConflictError,
-  acquireStoryLease,
-  claimStoryLease,
+  readProviderSettings,
   deleteStorySession,
   ensureDailyStorage,
-  readProviderSettings,
   readStorySession,
-  releaseStoryLease,
-  subscribeDailyStorage,
   writeStorySession,
-} from "./settings-repository";
+  acquireStoryLeaseToken,
+  claimStoryLeaseToken,
+  releaseStoryLeaseToken,
+  SessionConflictError,
+  StorySidecarPersistenceError,
+  subscribeDailyStorage,
+} from "./persistence";
 import { dailyReducer, initialDailyState, isDailyBusy, snapshotDailyState } from "./state-machine";
 import { releaseTransientTtsPlayback, type TransientTtsPlayback } from "./tts-playback";
 import type { ConnectionState, DailyCapability, ProviderSettings, TurnSource } from "./types";
@@ -31,77 +31,30 @@ import {
   list as listDailyStoryAudio,
   put as putDailyStoryAudio,
   update as updateDailyStoryAudio,
-  type DailyStoryAudioOutboxItem,
-  type DailyStoryAudioPurpose,
 } from "./audio-outbox";
 import { runSingleFlight } from "./single-flight";
+import { isDailyStoryCachedAudioRetryCurrent, splitDailyStoryAudio } from "./controller-helpers";
+import {
+  DAILY_STORY_TURN_MAX,
+  type DailyStoryCachedAudio,
+  type DailyStoryTranscribeResult,
+} from "./shared-types";
+import { DailyStoryCoordinator, type OperationToken } from "./coordinator";
+
+export {
+  isDailyStoryCachedAudioRetryCurrent,
+  isDailyStoryPageActive,
+  splitDailyStoryAudio,
+} from "./controller-helpers";
+export { DAILY_STORY_TURN_MAX } from "./shared-types";
+export type { DailyStoryCachedAudio, DailyStoryTranscribeResult } from "./shared-types";
 
 const MAX_STORY = 4_000;
-export const DAILY_STORY_TURN_MAX = DAILY_STORY_LIMITS.turnChars;
 
-export type DailyStoryCachedAudio = {
-  clientAttemptId: string;
-  blob: Blob;
-  mimeType: string;
-  durationSec: number;
-  createdAt: number;
-  status: "queued" | "uploading" | "failed" | "completed";
-  purpose: DailyStoryAudioPurpose;
-  readAloudTarget?: string;
-  error?: string;
-};
-
-export type DailyStoryTranscribeResult =
-  | {
-      succeeded: true;
-      clientAttemptId: string;
-      transcript: string;
-      transcriptId: string;
-    }
-  | {
-      succeeded: false;
-      clientAttemptId: string;
-      error?: string;
-    };
-
-function toCachedAudio(item: DailyStoryAudioOutboxItem): DailyStoryCachedAudio {
-  return {
-    clientAttemptId: item.clientAttemptId,
-    blob: item.blob,
-    mimeType: item.mimeType,
-    durationSec: item.durationSec,
-    createdAt: item.createdAt,
-    status: item.status,
-    purpose: item.purpose,
-    ...(item.readAloudTarget ? { readAloudTarget: item.readAloudTarget } : {}),
-    ...(item.error ? { error: item.error } : {}),
-  };
-}
-
-export function splitDailyStoryAudio(items: DailyStoryAudioOutboxItem[]) {
-  const latest = items.at(-1);
-  return {
-    // Keep cachedAudio as the latest item of either purpose for failed/read-aloud retries.
-    cachedAudio: latest ? toCachedAudio(latest) : null,
-    conversationAudios: items.filter((item) => item.purpose === "conversation").map(toCachedAudio),
-  };
-}
+type AudioOutboxUploadingAttempt = { clientAttemptId: string; updatedAt: number };
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
-}
-
-export function isDailyStoryCachedAudioRetryCurrent(
-  mounted: boolean,
-  retryGeneration: number,
-  currentGeneration: number,
-  pageActive = true,
-) {
-  return isDailyStoryPageActive(mounted, pageActive) && retryGeneration === currentGeneration;
-}
-
-export function isDailyStoryPageActive(mounted: boolean, pageActive: boolean) {
-  return mounted && pageActive;
 }
 
 function persistenceSignature(session: {
@@ -141,43 +94,78 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   const [conversationAudios, setConversationAudios] = useState<DailyStoryCachedAudio[]>([]);
   const [conversationAudiosLoading, setConversationAudiosLoading] = useState(true);
   const stateRef = useRef(state);
+  const aliveRef = useRef(true);
   const ownerIdRef = useRef(createId("tab"));
   const abortRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(false);
-  const pageActiveRef = useRef(true);
-  const generationRef = useRef(0);
+  const coordinatorRef = useRef(new DailyStoryCoordinator());
   const retryRef = useRef<(() => void) | null>(null);
   const reviewInFlightRef = useRef(false);
   const transcribeInFlightRef = useRef<Promise<DailyStoryTranscribeResult> | null>(null);
   const blobRef = useRef<Blob | null>(null);
   const audioOutboxAttemptRef = useRef<string | null>(null);
+  const audioOutboxUploadingRef = useRef<AudioOutboxUploadingAttempt | null>(null);
   const ttsPlaybackRef = useRef<TransientTtsPlayback | null>(null);
+  const pendingWritesRef = useRef<Set<Promise<unknown>>>(new Set());
   const persistenceSignatureRef = useRef<string | null>(null);
-  const settingsRevisionRef = useRef(0);
   const { setBusy } = usePwa();
+  const setCoordinatorCanEdit = useCallback((value: boolean) => {
+    coordinatorRef.current.setCanEdit(value);
+    setCanEdit(value);
+  }, []);
   const releaseTtsPlayback = useCallback(() => {
     const playback = ttsPlaybackRef.current;
     ttsPlaybackRef.current = null;
     releaseTransientTtsPlayback(playback);
   }, []);
   const invalidateCurrent = useCallback(() => {
-    generationRef.current += 1;
+    coordinatorRef.current.invalidate();
     abortRef.current?.abort();
+  }, []);
+  const isOperationCurrent = useCallback((token: OperationToken) => {
+    return coordinatorRef.current.isOperationCurrent(token);
   }, []);
 
   const refreshCachedAudio = useCallback(async () => {
+    if (!aliveRef.current || !coordinatorRef.current.isPageActive()) return;
+    const refreshSequence = coordinatorRef.current.beginAudioRefresh();
+    const refreshGeneration = coordinatorRef.current.generation();
+    const isRefreshCurrent = () =>
+      aliveRef.current &&
+      coordinatorRef.current.isAudioRefreshCurrent(refreshSequence) &&
+      coordinatorRef.current.generation() === refreshGeneration;
     setConversationAudiosLoading(true);
     try {
       const items = await listDailyStoryAudio({ conversationId });
+      if (!isRefreshCurrent()) return;
       const audio = splitDailyStoryAudio(items);
       setCachedAudio(audio.cachedAudio);
       setConversationAudios(audio.conversationAudios);
     } catch {
       // Cache inspection must never block the conversation UI.
     } finally {
-      setConversationAudiosLoading(false);
+      if (isRefreshCurrent()) setConversationAudiosLoading(false);
     }
   }, [conversationId]);
+
+  const rollbackUploadingAudio = useCallback(
+    async (attempt: AudioOutboxUploadingAttempt | null = audioOutboxUploadingRef.current) => {
+      if (!attempt) return;
+      try {
+        await updateDailyStoryAudio(attempt.clientAttemptId, {
+          status: "queued",
+          error: null,
+          expectedUpdatedAt: attempt.updatedAt,
+        });
+      } catch {
+        // Outbox recovery is best effort and must not block page lifecycle work.
+      } finally {
+        if (audioOutboxUploadingRef.current === attempt) {
+          audioOutboxUploadingRef.current = null;
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     void refreshCachedAudio();
@@ -189,179 +177,300 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
   }, [setBusy, state]);
 
   useEffect(() => {
-    mountedRef.current = true;
+    const coordinator = coordinatorRef.current;
+    coordinator.activate();
+    void refreshCachedAudio();
+    aliveRef.current = true;
     return () => {
-      mountedRef.current = false;
-      pageActiveRef.current = false;
-      invalidateCurrent();
+      aliveRef.current = false;
+      coordinator.deactivate();
+      abortRef.current?.abort();
+      transcribeInFlightRef.current = null;
+      void rollbackUploadingAudio();
       releaseTtsPlayback();
       setBusy(false, "daily-story");
     };
-  }, [invalidateCurrent, releaseTtsPlayback, setBusy]);
+  }, [releaseTtsPlayback, rollbackUploadingAudio, setBusy]);
 
   useEffect(() => {
+    const coordinator = coordinatorRef.current;
+    coordinator.activate();
     let alive = true;
     let leaseActive = false;
+    let leaseClaimToken: string | null = null;
+    let renewSequence = 0;
     const owner = ownerIdRef.current;
-    const load = async () => {
+    const load = async (claimLease: boolean) => {
+      const loadToken = coordinatorRef.current.beginLoad(claimLease);
+      coordinatorRef.current.beginWrite();
+      invalidateCurrent();
+      let loadedLeaseToken: string | null = null;
+      const releaseLoadedLease = () => {
+        if (!loadedLeaseToken) return;
+        const token = loadedLeaseToken;
+        loadedLeaseToken = null;
+        if (leaseClaimToken === token) {
+          leaseActive = false;
+          leaseClaimToken = null;
+          setCoordinatorCanEdit(false);
+        }
+        void releaseStoryLeaseToken(conversationId, owner, token);
+      };
+      const isLoadCurrent = () => alive && coordinatorRef.current.isLoadCurrent(loadToken);
       try {
         await ensureDailyStorage();
+        if (loadToken.claimLease) {
+          // Claim before the session read. Otherwise an obsolete load can
+          // arrive late and overwrite a newer tab/page-show claim.
+          loadedLeaseToken = await claimStoryLeaseToken(
+            conversationId,
+            owner,
+            loadToken.claimStartedAt,
+          );
+          if (!isLoadCurrent()) {
+            releaseLoadedLease();
+            return;
+          }
+          leaseActive = loadedLeaseToken !== null;
+          leaseClaimToken = loadedLeaseToken;
+          setCoordinatorCanEdit(leaseActive);
+        }
         const session = await readStorySession(conversationId);
-        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
+        if (!isLoadCurrent()) {
+          releaseLoadedLease();
+          return;
+        }
         if (!session && !allowCompose) {
-          setCanEdit(false);
+          releaseLoadedLease();
+          setCoordinatorCanEdit(false);
           setConversationMissing(true);
           setStorageError(null);
-          dispatch({ type: "ready", session: null, settingsRevision: settingsRevisionRef.current });
+          persistenceSignatureRef.current = null;
+          dispatch({
+            type: "ready",
+            session: null,
+            settingsRevision: coordinatorRef.current.settingsRevision,
+          });
           return;
         }
         setConversationMissing(false);
-        const lease = await claimStoryLease(conversationId, owner);
-        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
-        leaseActive = lease;
-        setCanEdit(lease);
+        const settingsReadSequence = coordinatorRef.current.beginSettingsRead();
         const settings = await readProviderSettings();
-        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
-        settingsRevisionRef.current = settings.revision;
-        setCapabilities({ chat: !!settings.chat, asr: !!settings.asr, tts: !!settings.tts });
+        if (!isLoadCurrent()) {
+          releaseLoadedLease();
+          return;
+        }
+        if (
+          coordinatorRef.current.isSettingsReadCurrent(settingsReadSequence) &&
+          settings.revision >= coordinatorRef.current.settingsRevision
+        ) {
+          coordinatorRef.current.setSettingsRevision(settings.revision);
+          setCapabilities({ chat: !!settings.chat, asr: !!settings.asr, tts: !!settings.tts });
+        }
         persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
         setStorageError(null);
-        dispatch({ type: "ready", session, settingsRevision: settings.revision });
+        dispatch({
+          type: "ready",
+          session,
+          settingsRevision: Math.max(settings.revision, coordinatorRef.current.settingsRevision),
+        });
       } catch (error) {
-        if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
+        if (!isLoadCurrent()) return;
         setStorageError(message(error));
-        dispatch({ type: "ready", session: null, settingsRevision: settingsRevisionRef.current });
+        dispatch({
+          type: "ready",
+          session: null,
+          settingsRevision: coordinatorRef.current.settingsRevision,
+        });
       }
     };
-    void load();
+    void load(true);
     const onPageHide = () => {
       if (stateRef.current.phase === "reviewing") {
         dispatch({ type: "reviewCancelled" });
       }
-      pageActiveRef.current = false;
-      mountedRef.current = false;
+      coordinatorRef.current.deactivate();
+      renewSequence += 1;
+      const token = leaseClaimToken;
       leaseActive = false;
-      setCanEdit(false);
-      invalidateCurrent();
+      leaseClaimToken = null;
+      setCoordinatorCanEdit(false);
+      if (token) void releaseStoryLeaseToken(conversationId, owner, token);
+      abortRef.current?.abort();
+      transcribeInFlightRef.current = null;
+      void rollbackUploadingAudio();
+      releaseTtsPlayback();
     };
     const onPageShow = () => {
-      pageActiveRef.current = true;
-      mountedRef.current = true;
-      void load();
+      coordinatorRef.current.activate();
+      renewSequence += 1;
+      void load(true);
+      void refreshCachedAudio();
     };
     window.addEventListener("pagehide", onPageHide);
     window.addEventListener("pageshow", onPageShow);
     const renew = window.setInterval(() => {
-      if (!leaseActive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
-        return;
-      void acquireStoryLease(conversationId, owner)
-        .then((lease) => {
-          if (alive && isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) {
-            setCanEdit(lease);
+      if (!leaseActive || !coordinatorRef.current.isPageActive()) return;
+      const sequence = ++renewSequence;
+      const generation = coordinatorRef.current.generation();
+      const expectedClaimToken = leaseClaimToken;
+      if (!expectedClaimToken) return;
+      void acquireStoryLeaseToken(conversationId, owner, expectedClaimToken)
+        .then((nextLeaseToken) => {
+          const lease = nextLeaseToken !== null;
+          if (
+            alive &&
+            sequence === renewSequence &&
+            coordinatorRef.current.isPageActive() &&
+            coordinatorRef.current.generation() === generation
+          ) {
+            setCoordinatorCanEdit(lease);
             leaseActive = lease;
+            leaseClaimToken = nextLeaseToken;
+            if (!lease) {
+              coordinatorRef.current.beginWrite();
+              invalidateCurrent();
+            }
+          } else if (nextLeaseToken && !coordinatorRef.current.isPageActive()) {
+            // The IndexedDB write may finish after pagehide. Fenced release
+            // is safe because it only deletes this owner’s lease.
+            void releaseStoryLeaseToken(conversationId, owner, nextLeaseToken);
           }
         })
         .catch((error: unknown) => {
-          if (alive && isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
+          if (
+            alive &&
+            sequence === renewSequence &&
+            coordinatorRef.current.isPageActive() &&
+            coordinatorRef.current.generation() === generation
+          )
             setStorageError(message(error));
         });
     }, 8_000);
     const unsubscribe = subscribeDailyStorage((event) => {
       if (event.kind === "settings") {
+        const settingsReadSequence = coordinatorRef.current.beginSettingsRead();
+        const settingsGeneration = coordinatorRef.current.generation();
         void readProviderSettings()
           .then((settings) => {
-            if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
+            if (
+              !alive ||
+              !coordinatorRef.current.isSettingsReadCurrent(settingsReadSequence) ||
+              coordinatorRef.current.generation() !== settingsGeneration ||
+              settings.revision <= coordinatorRef.current.settingsRevision
+            )
               return;
             setCapabilities({ chat: !!settings.chat, asr: !!settings.asr, tts: !!settings.tts });
-            if (settings.revision <= settingsRevisionRef.current) return;
             const hadActiveOperation = stateRef.current.operation !== null;
-            settingsRevisionRef.current = settings.revision;
+            coordinatorRef.current.setSettingsRevision(settings.revision);
             if (hadActiveOperation) {
               invalidateCurrent();
               setStorageError("API 配置已在另一标签页更新。当前操作已取消，请按新配置重试。");
             }
             dispatch({ type: "settingsRevisionChanged", settingsRevision: settings.revision });
           })
-          .catch((error: unknown) => alive && setStorageError(message(error)));
+          .catch(
+            (error: unknown) =>
+              alive &&
+              coordinatorRef.current.isSettingsReadCurrent(settingsReadSequence) &&
+              coordinatorRef.current.generation() === settingsGeneration &&
+              setStorageError(message(error)),
+          );
         return;
       }
       if (event.kind === "lease") {
         if (event.conversationId !== conversationId || event.ownerId === owner) return;
+        renewSequence += 1;
         leaseActive = false;
-        setCanEdit(false);
+        leaseClaimToken = null;
+        setCoordinatorCanEdit(false);
         invalidateCurrent();
-        void readStorySession(conversationId)
-          .then((session) => {
-            if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current))
-              return;
-            persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
-            dispatch({
-              type: "ready",
-              session,
-              settingsRevision: settingsRevisionRef.current,
-            });
-          })
-          .catch((error: unknown) => alive && setStorageError(message(error)));
+        void load(false);
         return;
       }
       if (event.kind !== "session" || event.conversationId !== conversationId) return;
       // Metadata-only signal. Reload from IndexedDB; never trust cross-tab payloads.
-      setCanEdit(false);
-      leaseActive = false;
       invalidateCurrent();
-      void readStorySession(conversationId)
-        .then((session) => {
-          if (!alive || !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
-          persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
-          dispatch({
-            type: "ready",
-            session,
-            settingsRevision: settingsRevisionRef.current,
-          });
-        })
-        .catch((error: unknown) => alive && setStorageError(message(error)));
+      void load(false);
     });
     return () => {
       alive = false;
-      pageActiveRef.current = false;
-      mountedRef.current = false;
+      coordinator.deactivate();
+      renewSequence += 1;
+      transcribeInFlightRef.current = null;
       window.clearInterval(renew);
       window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("pageshow", onPageShow);
       unsubscribe();
-      void releaseStoryLease(conversationId, owner);
+      const token = leaseClaimToken;
+      leaseClaimToken = null;
+      if (token) void releaseStoryLeaseToken(conversationId, owner, token);
     };
-  }, [allowCompose, conversationId, invalidateCurrent]);
+  }, [
+    allowCompose,
+    conversationId,
+    invalidateCurrent,
+    refreshCachedAudio,
+    releaseTtsPlayback,
+    rollbackUploadingAudio,
+    setCoordinatorCanEdit,
+  ]);
 
   useEffect(() => {
     const snapshot = snapshotDailyState(state);
-    if (!snapshot || !canEdit) return;
+    if (!snapshot || !coordinatorRef.current.canEdit) return;
     const signature = persistenceSignature({ ...snapshot, revision: state.revision });
     if (signature === persistenceSignatureRef.current) return;
+    const writeSequence = coordinatorRef.current.beginWrite();
+    const isWriteSequenceCurrent = () =>
+      coordinatorRef.current.isWriteSequenceCurrent(writeSequence);
+    const isWriteCurrent = () => coordinatorRef.current.isWriteCurrent(writeSequence);
     persistenceSignatureRef.current = signature;
-    void writeStorySession(conversationId, snapshot, state.revision, ownerIdRef.current)
+    const writePromise = writeStorySession(
+      conversationId,
+      snapshot,
+      state.revision,
+      ownerIdRef.current,
+    );
+    pendingWritesRef.current.add(writePromise);
+    void writePromise
       .then((session) => {
+        if (!isWriteCurrent()) return;
         persistenceSignatureRef.current = persistenceSignature(session);
         setStorageError(null);
         dispatch({ type: "persisted", session });
       })
       .catch((error: unknown) => {
+        if (!isWriteCurrent()) return;
         if (error instanceof SessionConflictError) {
-          setCanEdit(false);
-          void readStorySession(conversationId).then((session) =>
-            dispatch({ type: "ready", session, settingsRevision: settingsRevisionRef.current }),
-          );
+          setCoordinatorCanEdit(false);
+          void readStorySession(conversationId)
+            .then((session) => {
+              if (!isWriteSequenceCurrent()) return;
+              persistenceSignatureRef.current = session ? persistenceSignature(session) : null;
+              dispatch({
+                session,
+                settingsRevision: coordinatorRef.current.settingsRevision,
+                type: "ready",
+              });
+            })
+            .catch((reloadError: unknown) => {
+              if (isWriteSequenceCurrent()) setStorageError(message(reloadError));
+            });
         }
         setStorageError(message(error));
+      })
+      .finally(() => {
+        pendingWritesRef.current.delete(writePromise);
       });
-  }, [canEdit, conversationId, state]);
+  }, [conversationId, setCoordinatorCanEdit, state]);
 
   const guard = useCallback(
     () =>
-      isDailyStoryPageActive(mountedRef.current, pageActiveRef.current) &&
-      canEdit &&
+      coordinatorRef.current.isPageActive() &&
+      coordinatorRef.current.canEdit &&
       !isDailyBusy(stateRef.current.phase),
-    [canEdit],
+    [],
   );
   const abortCurrent = useCallback(() => {
     invalidateCurrent();
@@ -369,17 +478,30 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     abortRef.current = controller;
     return controller;
   }, [invalidateCurrent]);
-  const currentSettings = useCallback(async () => {
+  const currentSettings = useCallback(async (): Promise<ProviderSettings | null> => {
+    const settingsReadSequence = coordinatorRef.current.beginSettingsRead();
+    const settingsGeneration = coordinatorRef.current.generation();
     try {
       const settings = await readProviderSettings();
-      if (settings.revision > settingsRevisionRef.current) {
-        settingsRevisionRef.current = settings.revision;
+      if (
+        !aliveRef.current ||
+        !coordinatorRef.current.isSettingsReadCurrent(settingsReadSequence) ||
+        coordinatorRef.current.generation() !== settingsGeneration
+      )
+        return null;
+      if (settings.revision > coordinatorRef.current.settingsRevision) {
+        coordinatorRef.current.setSettingsRevision(settings.revision);
         dispatch({ type: "settingsRevisionChanged", settingsRevision: settings.revision });
       }
       setStorageError(null);
       return settings;
     } catch (error) {
-      setStorageError(message(error));
+      if (
+        aliveRef.current &&
+        coordinatorRef.current.isSettingsReadCurrent(settingsReadSequence) &&
+        coordinatorRef.current.generation() === settingsGeneration
+      )
+        setStorageError(message(error));
       throw error;
     }
   }, []);
@@ -397,9 +519,11 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     }
     let operationId: string | undefined;
     let operationSettingsRevision: number | undefined;
+    let operationToken: OperationToken | undefined;
     try {
       const settings = await currentSettings();
-      if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
+      if (!settings) return;
+      if (!coordinatorRef.current.isPageActive() || !coordinatorRef.current.canEdit) return;
       if (!settings.chat) {
         setStorageError("开始聊天前，请先在设置中保存 Chat 配置。");
         return;
@@ -407,12 +531,15 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       operationId = createId("start");
       operationSettingsRevision = settings.revision;
       const controller = abortCurrent();
+      operationToken = coordinatorRef.current.beginOperation(settings.revision);
+      if (!operationToken) return;
       dispatch({ type: "startRequest", operationId, settingsRevision: settings.revision, storyZh });
       const result = await startDailyStory({
         storyZh,
         chat: settings.chat,
         signal: controller.signal,
       });
+      if (!operationToken || !isOperationCurrent(operationToken)) return;
       dispatch({
         type: "startSuccess",
         operationId,
@@ -420,10 +547,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         opening: { id: result.opening.id, role: "assistant", text: result.opening.text },
       });
     } catch (error) {
-      if (
-        isDailyStoryAbortError(error) ||
-        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-      )
+      if (isDailyStoryAbortError(error) || !operationToken || !isOperationCurrent(operationToken))
         return;
       dispatch({
         type: "failure",
@@ -436,7 +560,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       });
       retryRef.current = () => void start();
     }
-  }, [abortCurrent, currentSettings, guard]);
+  }, [abortCurrent, currentSettings, guard, isOperationCurrent]);
 
   const transcribe = useCallback(
     async (
@@ -450,8 +574,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       return runSingleFlight(transcribeInFlightRef, async () => {
         const target = readAloudTarget ?? stateRef.current.readAloudTarget ?? undefined;
         if (
-          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current) ||
-          !canEdit ||
+          !coordinatorRef.current.isPageActive() ||
+          !coordinatorRef.current.canEdit ||
           !(
             [
               "recording",
@@ -476,12 +600,21 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           clientAttemptIdOverride ?? audioOutboxAttemptRef.current ?? createId("asr");
         audioOutboxAttemptRef.current = clientAttemptId;
         const controller = abortCurrent();
+        const transcribeGeneration = coordinatorRef.current.generation();
+        const isTranscribeCurrent = () =>
+          aliveRef.current &&
+          coordinatorRef.current.isPageActive() &&
+          coordinatorRef.current.canEdit &&
+          coordinatorRef.current.generation() === transcribeGeneration;
         let operationId: string | undefined;
         let operationSettingsRevision: number | undefined;
         let transcriptId: string | undefined;
+        let operationToken: OperationToken | undefined;
+        let uploadingAttempt: AudioOutboxUploadingAttempt | null = null;
         try {
           try {
-            await putDailyStoryAudio({
+            if (!isTranscribeCurrent()) return { succeeded: false, clientAttemptId };
+            const persisted = await putDailyStoryAudio({
               clientAttemptId,
               conversationId,
               blob: audio,
@@ -491,37 +624,62 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
               purpose: readAloud ? "readAloud" : "conversation",
               ...(readAloud && target ? { readAloudTarget: target } : {}),
             });
-            await updateDailyStoryAudio(clientAttemptId, { status: "uploading", error: null });
+            if (!isTranscribeCurrent()) return { succeeded: false, clientAttemptId };
+            const uploading = await updateDailyStoryAudio(
+              clientAttemptId,
+              { status: "uploading", error: null },
+              { expectedUpdatedAt: persisted.updatedAt },
+            );
+            if (!uploading) return { succeeded: false, clientAttemptId };
+            uploadingAttempt = {
+              clientAttemptId: uploading.clientAttemptId,
+              updatedAt: uploading.updatedAt,
+            };
+            audioOutboxUploadingRef.current = uploadingAttempt;
+            if (!isTranscribeCurrent()) {
+              await rollbackUploadingAudio(uploadingAttempt);
+              return { succeeded: false, clientAttemptId };
+            }
             await refreshCachedAudio();
           } catch (error) {
             // IndexedDB is a reliability enhancement. If browser storage is
             // unavailable, keep the direct upload path usable.
-            setStorageError(`录音未能写入本地缓存，将直接上传：${message(error)}`);
+            if (isTranscribeCurrent())
+              setStorageError(`录音未能写入本地缓存，将直接上传：${message(error)}`);
           }
-          if (
-            controller.signal.aborted ||
-            !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-          ) {
-            await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
-              () => {},
-            );
+          if (controller.signal.aborted || !isTranscribeCurrent()) {
+            await rollbackUploadingAudio(uploadingAttempt);
             return { succeeded: false, clientAttemptId };
           }
           const settings = await currentSettings();
-          if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) {
-            await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
-              () => {},
-            );
+          if (!settings) {
+            await rollbackUploadingAudio(uploadingAttempt);
+            return { succeeded: false, clientAttemptId };
+          }
+          if (!isTranscribeCurrent()) {
+            await rollbackUploadingAudio(uploadingAttempt);
             return { succeeded: false, clientAttemptId };
           }
           if (!settings.asr) {
-            await updateDailyStoryAudio(clientAttemptId, {
-              status: "queued",
-              error: "语音聊天需配置 ASR。",
-            }).catch(() => {});
+            if (uploadingAttempt) {
+              await updateDailyStoryAudio(
+                clientAttemptId,
+                { status: "queued", error: "语音聊天需配置 ASR。" },
+                { expectedUpdatedAt: uploadingAttempt.updatedAt },
+              ).catch(() => {});
+            }
+            if (audioOutboxUploadingRef.current === uploadingAttempt) {
+              audioOutboxUploadingRef.current = null;
+            }
+            if (!isTranscribeCurrent()) return { succeeded: false, clientAttemptId };
             await refreshCachedAudio();
+            if (!isTranscribeCurrent()) return { succeeded: false, clientAttemptId };
             setStorageError("语音聊天需配置 ASR。可继续使用文字输入（备用，不是语音转写）。");
-            dispatch({ type: readAloud ? "resetReadAloud" : "reRecord" });
+            if (
+              isTranscribeCurrent() &&
+              coordinatorRef.current.settingsRevision === settings.revision
+            )
+              dispatch({ type: readAloud ? "resetReadAloud" : "reRecord" });
             return {
               succeeded: false,
               clientAttemptId,
@@ -531,6 +689,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           operationId = createId(readAloud ? "read" : "asr");
           operationSettingsRevision = settings.revision;
           transcriptId = createId(readAloud ? "read" : "asr");
+          operationToken = coordinatorRef.current.beginOperation(settings.revision);
+          if (!operationToken) return { succeeded: false, clientAttemptId };
           dispatch({
             type: "transcribeRequest",
             operationId,
@@ -547,15 +707,33 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           });
           const text = result.transcript;
           if (!text.trim()) throw new Error("没有识别到语音。请重录后再试。");
+          if (!operationToken || !isOperationCurrent(operationToken)) {
+            await rollbackUploadingAudio(uploadingAttempt);
+            return { succeeded: false, clientAttemptId };
+          }
           // Keep the successful recording in the seven-day outbox as well. This
           // lets us inspect/retry the exact bytes when an upstream ASR model
           // returns a clearly wrong language instead of deleting the evidence.
-          await updateDailyStoryAudio(clientAttemptId, {
-            status: "completed",
-            error: null,
-          }).catch(() => {});
+          if (uploadingAttempt) {
+            const completed = await updateDailyStoryAudio(
+              clientAttemptId,
+              { status: "completed", error: null },
+              { expectedUpdatedAt: uploadingAttempt.updatedAt },
+            ).catch(() => undefined);
+            if (!completed) return { succeeded: false, clientAttemptId };
+          }
+          if (audioOutboxUploadingRef.current === uploadingAttempt) {
+            audioOutboxUploadingRef.current = null;
+          }
+          if (!operationToken || !isOperationCurrent(operationToken)) {
+            return { succeeded: false, clientAttemptId };
+          }
           await refreshCachedAudio();
           audioOutboxAttemptRef.current = null;
+          if (!operationToken || !isOperationCurrent(operationToken)) {
+            return { succeeded: false, clientAttemptId };
+          }
+          if (!isTranscribeCurrent()) return { succeeded: false, clientAttemptId };
           dispatch({
             type: "transcribeSuccess",
             operationId,
@@ -567,19 +745,31 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         } catch (error) {
           if (
             isDailyStoryAbortError(error) ||
-            !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+            !operationToken ||
+            !isOperationCurrent(operationToken)
           ) {
-            await updateDailyStoryAudio(clientAttemptId, { status: "queued", error: null }).catch(
-              () => {},
-            );
+            await rollbackUploadingAudio(uploadingAttempt);
             return { succeeded: false, clientAttemptId };
           }
           const errorMessage = message(error);
-          await updateDailyStoryAudio(clientAttemptId, {
-            status: "failed",
-            error: errorMessage,
-          }).catch(() => {});
+          if (uploadingAttempt) {
+            const failed = await updateDailyStoryAudio(
+              clientAttemptId,
+              { status: "failed", error: errorMessage },
+              { expectedUpdatedAt: uploadingAttempt.updatedAt },
+            ).catch(() => undefined);
+            if (!failed) return { succeeded: false, clientAttemptId };
+          }
+          if (audioOutboxUploadingRef.current === uploadingAttempt) {
+            audioOutboxUploadingRef.current = null;
+          }
+          if (!isOperationCurrent(operationToken)) {
+            return { succeeded: false, clientAttemptId };
+          }
           await refreshCachedAudio();
+          if (!isOperationCurrent(operationToken)) {
+            return { succeeded: false, clientAttemptId };
+          }
           dispatch({
             type: "failure",
             message: errorMessage,
@@ -604,22 +794,25 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         }
       });
     },
-    [abortCurrent, canEdit, conversationId, currentSettings, refreshCachedAudio],
+    [
+      abortCurrent,
+      conversationId,
+      currentSettings,
+      isOperationCurrent,
+      refreshCachedAudio,
+      rollbackUploadingAudio,
+    ],
   );
 
   const retryCachedAudio = useCallback(() => {
     const attemptId = cachedAudio?.clientAttemptId;
-    if (!canEdit || !attemptId) return;
-    const retryGeneration = generationRef.current;
+    if (!coordinatorRef.current.canEdit || !attemptId) return;
+    const retryGeneration = coordinatorRef.current.generation();
     void getDailyStoryAudio(attemptId)
       .then((item) => {
         if (
-          !isDailyStoryCachedAudioRetryCurrent(
-            mountedRef.current,
-            retryGeneration,
-            generationRef.current,
-            pageActiveRef.current,
-          )
+          !coordinatorRef.current.isPageActive() ||
+          retryGeneration !== coordinatorRef.current.generation()
         )
           return;
         if (!item) throw new Error("找不到缓存录音。录音可能已超过 7 天或已被清理。");
@@ -630,22 +823,18 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       })
       .catch((error: unknown) => {
         if (
-          isDailyStoryCachedAudioRetryCurrent(
-            mountedRef.current,
-            retryGeneration,
-            generationRef.current,
-            pageActiveRef.current,
-          )
+          coordinatorRef.current.isPageActive() &&
+          retryGeneration === coordinatorRef.current.generation()
         )
           setStorageError(message(error));
       });
-  }, [cachedAudio, canEdit, transcribe]);
+  }, [cachedAudio, transcribe]);
 
   const send = useCallback(
     async (source: TurnSource, rawText: string): Promise<boolean> => {
       if (
         (!guard() && stateRef.current.phase !== "error") ||
-        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
+        !coordinatorRef.current.isPageActive()
       )
         return false;
       const text = rawText.trim();
@@ -657,9 +846,11 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       const turn = { id: stateRef.current.pendingTranscript?.id ?? createId(source), source, text };
       let operationId: string | undefined;
       let operationSettingsRevision: number | undefined;
+      let operationToken: OperationToken | undefined;
       try {
         const settings = await currentSettings();
-        if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return false;
+        if (!settings) return false;
+        if (!coordinatorRef.current.isPageActive() || !coordinatorRef.current.canEdit) return false;
         if (!settings.chat) {
           setStorageError("请先在设置中保存 Chat 配置。");
           return false;
@@ -667,6 +858,8 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         operationId = createId("reply");
         operationSettingsRevision = settings.revision;
         const controller = abortCurrent();
+        operationToken = coordinatorRef.current.beginOperation(settings.revision);
+        if (!operationToken) return false;
         dispatch({ type: "sendRequest", operationId, settingsRevision: settings.revision, turn });
         const result = await replyDailyStory({
           storyZh: stateRef.current.storyZh,
@@ -675,6 +868,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           chat: settings.chat,
           signal: controller.signal,
         });
+        if (!operationToken || !isOperationCurrent(operationToken)) return false;
         dispatch({
           type: "replySuccess",
           operationId,
@@ -684,10 +878,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         });
         return true;
       } catch (error) {
-        if (
-          isDailyStoryAbortError(error) ||
-          !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-        )
+        if (isDailyStoryAbortError(error) || !operationToken || !isOperationCurrent(operationToken))
           return false;
         dispatch({
           type: "failure",
@@ -702,7 +893,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         return false;
       }
     },
-    [abortCurrent, currentSettings, guard],
+    [abortCurrent, currentSettings, guard, isOperationCurrent],
   );
 
   const finish = useCallback(async () => {
@@ -713,13 +904,17 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     reviewInFlightRef.current = true;
     let operationId: string | undefined;
     let operationSettingsRevision: number | undefined;
+    let operationToken: OperationToken | undefined;
     try {
       const settings = await currentSettings();
-      if (!isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)) return;
+      if (!settings) return;
+      if (!coordinatorRef.current.isPageActive() || !coordinatorRef.current.canEdit) return;
       if (!settings.chat) return;
       operationId = createId("review");
       operationSettingsRevision = settings.revision;
       const controller = abortCurrent();
+      operationToken = coordinatorRef.current.beginOperation(settings.revision);
+      if (!operationToken) return;
       dispatch({ type: "reviewRequest", operationId, settingsRevision: settings.revision });
       const review = await reviewDailyStory({
         storyZh: current.storyZh,
@@ -727,12 +922,10 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         chat: settings.chat,
         signal: controller.signal,
       });
+      if (!operationToken || !isOperationCurrent(operationToken)) return;
       dispatch({ type: "reviewSuccess", operationId, settingsRevision: settings.revision, review });
     } catch (error) {
-      if (
-        isDailyStoryAbortError(error) ||
-        !isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-      )
+      if (isDailyStoryAbortError(error) || !operationToken || !isOperationCurrent(operationToken))
         return;
       dispatch({
         type: "failure",
@@ -747,7 +940,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     } finally {
       reviewInFlightRef.current = false;
     }
-  }, [abortCurrent, currentSettings, guard]);
+  }, [abortCurrent, currentSettings, guard, isOperationCurrent]);
 
   const cancelReview = useCallback(() => {
     if (stateRef.current.phase !== "reviewing") return;
@@ -760,18 +953,41 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       capability: DailyCapability,
       provider: NonNullable<ProviderSettings[DailyCapability]>,
     ) => {
-      setConnection((current) => ({ ...current, [capability]: "checking" }));
+      let providerCheckToken: OperationToken | undefined;
       try {
         const settings = await currentSettings();
+        if (!settings || !coordinatorRef.current.isPageActive() || !coordinatorRef.current.canEdit)
+          return false;
+        providerCheckToken = coordinatorRef.current.beginProviderCheck(settings.revision);
+        const isProviderCheckCurrent = () =>
+          coordinatorRef.current.isProviderCheckCurrent(providerCheckToken!);
+        if (!isProviderCheckCurrent()) return false;
+        setConnection((current) =>
+          isProviderCheckCurrent() ? { ...current, [capability]: "checking" } : current,
+        );
         await checkDailyProvider({
           capability,
           provider,
           ...(capability === "asr" ? { directAsr: settings.local?.asrDirect ?? false } : {}),
         });
-        setConnection((current) => ({ ...current, [capability]: "connected" }));
+        if (!isProviderCheckCurrent()) return false;
+        setConnection((current) =>
+          isProviderCheckCurrent() ? { ...current, [capability]: "connected" } : current,
+        );
         return true;
       } catch {
-        setConnection((current) => ({ ...current, [capability]: "failed" }));
+        // A superseded check must not overwrite the result of the latest check.
+        // The provider lane is independent, so chat/TTS operations remain intact.
+        if (
+          providerCheckToken &&
+          coordinatorRef.current.isProviderCheckCurrent(providerCheckToken)
+        ) {
+          setConnection((current) =>
+            coordinatorRef.current.isProviderCheckCurrent(providerCheckToken!)
+              ? { ...current, [capability]: "failed" }
+              : current,
+          );
+        }
         return false;
       }
     },
@@ -780,22 +996,32 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
 
   const playTts = useCallback(
     async (text: string) => {
+      let operationToken: OperationToken | undefined;
       try {
         const settings = await currentSettings();
+        if (!settings) return;
+        if (!coordinatorRef.current.isPageActive() || !coordinatorRef.current.canEdit) return;
         if (!settings.tts) {
           setStorageError("未配置 TTS，无法朗读。");
           return;
         }
         releaseTtsPlayback();
         const controller = abortCurrent();
+        operationToken = coordinatorRef.current.beginOperation(settings.revision);
+        if (!operationToken) return;
         const blob = await synthesizeDailyStory({
           text,
           tts: settings.tts,
           signal: controller.signal,
         });
+        if (!operationToken || !isOperationCurrent(operationToken)) return;
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         const playback = { audio, url };
+        if (!isOperationCurrent(operationToken)) {
+          releaseTransientTtsPlayback(playback);
+          return;
+        }
         ttsPlaybackRef.current = playback;
         const revoke = () => {
           if (ttsPlaybackRef.current === playback) ttsPlaybackRef.current = null;
@@ -805,25 +1031,24 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         audio.addEventListener("error", revoke, { once: true });
         try {
           await audio.play();
+          if (!operationToken || !isOperationCurrent(operationToken)) revoke();
         } catch (error) {
           revoke();
           throw error;
         }
       } catch (error) {
-        if (
-          !isDailyStoryAbortError(error) &&
-          isDailyStoryPageActive(mountedRef.current, pageActiveRef.current)
-        )
+        if (!isDailyStoryAbortError(error) && operationToken && isOperationCurrent(operationToken))
           setStorageError(message(error));
       }
     },
-    [abortCurrent, currentSettings, releaseTtsPlayback],
+    [abortCurrent, currentSettings, isOperationCurrent, releaseTtsPlayback],
   );
 
   const retry = useCallback(() => retryRef.current?.(), []);
   const beginRecording = useCallback(() => {
     blobRef.current = null;
     audioOutboxAttemptRef.current = null;
+    audioOutboxUploadingRef.current = null;
     dispatch({ type: "recording" });
   }, []);
   const recordingDraftReady = useCallback((readAloud = false) => {
@@ -833,36 +1058,68 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     dispatch({ type: "continueRecording", readAloud });
   }, []);
   const cancelRecording = useCallback(() => dispatch({ type: "recordingCancelled" }), []);
-  const saveAsrDraft = useCallback(
-    (rawText: string) => {
-      if (!canEdit) return false;
-      const text = trimBounded(rawText, DAILY_STORY_TURN_MAX);
-      if (!text || stateRef.current.pendingTranscript?.source !== "asr") return false;
-      dispatch({ type: "editTranscript", text });
-      return true;
-    },
-    [canEdit],
-  );
+  const saveAsrDraft = useCallback((rawText: string) => {
+    if (!coordinatorRef.current.canEdit) return false;
+    const text = trimBounded(rawText, DAILY_STORY_TURN_MAX);
+    if (!text || stateRef.current.pendingTranscript?.source !== "asr") return false;
+    dispatch({ type: "editTranscript", text });
+    return true;
+  }, []);
   const beginReadAloud = useCallback((target: string) => {
     blobRef.current = null;
     audioOutboxAttemptRef.current = null;
+    audioOutboxUploadingRef.current = null;
     dispatch({ type: "readAloudRecording", target });
   }, []);
   const newStory = useCallback(async () => {
+    if (!coordinatorRef.current.canEdit || !coordinatorRef.current.isPageActive()) return;
     if (stateRef.current.messages.length && !window.confirm("开始新故事会放弃当前对话。继续吗？"))
       return;
     invalidateCurrent();
+    coordinatorRef.current.beginWrite();
+    const operationToken = coordinatorRef.current.beginOperation(
+      coordinatorRef.current.settingsRevision,
+    );
+    if (!operationToken || !coordinatorRef.current.canEdit || !isOperationCurrent(operationToken))
+      return;
     blobRef.current = null;
     audioOutboxAttemptRef.current = null;
-    persistenceSignatureRef.current = null;
+    audioOutboxUploadingRef.current = null;
+    await Promise.all([...pendingWritesRef.current].map((write) => write.catch(() => {})));
+    if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
     try {
-      await deleteStorySession(conversationId, stateRef.current.revision);
+      const latest = await readStorySession(conversationId);
+      if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
+      await deleteStorySession(
+        conversationId,
+        latest?.revision ?? stateRef.current.revision,
+        ownerIdRef.current,
+      );
+      if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
+      persistenceSignatureRef.current = null;
     } catch (error) {
+      if (!coordinatorRef.current.canEdit || !isOperationCurrent(operationToken)) return;
+      if (error instanceof StorySidecarPersistenceError) {
+        setStorageError(message(error));
+        return;
+      }
+      try {
+        // Session deletion commits before review-sidecar cleanup. If the
+        // second physical store fails, do not strand the UI on the old story.
+        const remaining = await readStorySession(conversationId);
+        if (remaining === null) {
+          persistenceSignatureRef.current = null;
+          dispatch({ type: "newStory" });
+          return;
+        }
+      } catch {
+        // Preserve the original storage error when the verification read fails.
+      }
       setStorageError(message(error));
       return;
     }
     dispatch({ type: "newStory" });
-  }, [conversationId, invalidateCurrent]);
+  }, [conversationId, invalidateCurrent, isOperationCurrent]);
 
   return {
     state,
@@ -883,7 +1140,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     cancelRecording,
     saveAsrDraft,
     retryCachedAudio,
-    sendAsr: (text: string) => void send("asr", text),
+    sendAsr: (text: string) => send("asr", text),
     sendTyped: (text: string) => send("typed", text),
     reRecord: () => dispatch({ type: "reRecord" }),
     finish,

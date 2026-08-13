@@ -11,15 +11,17 @@ import { createOpenAICompatibleTextModel } from "./openai-text-model";
 import { createOpenAICompatibleSpeechToText } from "./openai-speech-to-text";
 import { createStructuredGenerator } from "../capabilities/structured-generator";
 import { createSpeechSynthesisService } from "../modules/speech-synthesis/service";
+import { createProviderRegistry } from "../platform/ai/registry/provider-registry";
 import { localLlmConfig } from "./llm-config";
 import { createRealtimeProvider, type RealtimeProvider } from "./realtime";
 import type { AssessmentProvider } from "./assessment";
 import type { AudioStorageProvider } from "./storage";
 import type { TranscriptionProvider } from "./transcription";
 import type { TextToSpeechProvider } from "./tts";
-import type { TextModel } from "../capabilities/text-model";
+import type { TextModel } from "../platform/ai/capabilities/text-model";
+import type { TextToSpeech } from "../platform/ai/capabilities/text-to-speech";
 import type { StructuredGenerator } from "../capabilities/structured-generator";
-import type { SpeechToText } from "../capabilities/speech-to-text";
+import type { SpeechToText } from "../platform/ai/capabilities/speech-to-text";
 
 export type Providers = {
   transcription: TranscriptionProvider;
@@ -78,37 +80,58 @@ export function providers(config = env()): Providers {
     maxAttempts: config.HTTP_MAX_ATTEMPTS,
   };
 
-  const textModel =
-    config.ASSESSMENT_PROVIDER === "openai-compatible"
-      ? createOpenAICompatibleTextModel(chat)
-      : undefined;
+  const assessmentEnabled = config.ASSESSMENT_PROVIDER === "openai-compatible";
+  const transcriptionEnabled = config.TRANSCRIPTION_PROVIDER === "openai-compatible";
+  const ttsEnabled = config.TTS_PROVIDER === "openai-compatible";
+  const aiRegistry = createProviderRegistry({
+    textModel: [
+      {
+        name: "openai-compatible-text-model",
+        matches: () => true,
+        create: (provider: typeof chat) => createOpenAICompatibleTextModel(provider),
+      },
+    ],
+    speechToText: [
+      {
+        name: "openai-compatible-transcription",
+        matches: () => true,
+        create: (provider: typeof transcription) => createOpenAICompatibleSpeechToText(provider),
+      },
+    ],
+    textToSpeech: [
+      {
+        name: "openai-compatible-tts",
+        matches: () => true,
+        create: (provider: typeof tts) => createOpenAICompatibleTextToSpeech(provider),
+      },
+    ],
+  });
+
+  const textModel = assessmentEnabled ? aiRegistry.createTextModel(chat) : undefined;
   const structuredGenerator = textModel ? createStructuredGenerator(textModel) : undefined;
-  const speechToText =
-    config.TRANSCRIPTION_PROVIDER === "openai-compatible"
-      ? createOpenAICompatibleSpeechToText(transcription)
-      : undefined;
+  const speechToText = transcriptionEnabled
+    ? aiRegistry.createSpeechToText(transcription)
+    : undefined;
+  const textToSpeech = ttsEnabled ? aiRegistry.createTextToSpeech(tts) : undefined;
 
   return {
-    transcription:
-      config.TRANSCRIPTION_PROVIDER === "openai-compatible"
-        ? createOpenAICompatibleTranscriptionProvider(transcription, storage)
-        : createMockTranscriptionProvider(),
-    assessment:
-      config.ASSESSMENT_PROVIDER === "openai-compatible"
-        ? createOpenAICompatibleAssessmentProvider(chat, {
-            model: textModel,
-            generator: structuredGenerator,
-          })
-        : createMockAssessmentProvider(),
-    tts:
-      config.TTS_PROVIDER === "openai-compatible"
-        ? createSpeechSynthesisService({
-            textToSpeech: createOpenAICompatibleTextToSpeech(tts),
-            storage,
-            model: tts.model ?? "openai-compatible",
-            defaultVoice: tts.voice,
-          })
-        : createMockTtsProvider(),
+    transcription: transcriptionEnabled
+      ? createOpenAICompatibleTranscriptionProvider(transcription, storage)
+      : createMockTranscriptionProvider(),
+    assessment: assessmentEnabled
+      ? createOpenAICompatibleAssessmentProvider(chat, {
+          model: textModel,
+          generator: structuredGenerator,
+        })
+      : createMockAssessmentProvider(),
+    tts: textToSpeech
+      ? createSpeechSynthesisService({
+          textToSpeech,
+          storage,
+          model: tts.model ?? "openai-compatible",
+          defaultVoice: tts.voice,
+        })
+      : createMockTtsProvider(),
     storage,
     realtime: createRealtimeProvider({
       enabled: config.REALTIME_FEATURE_ENABLED,
@@ -134,6 +157,7 @@ export type {
   AudioStorageProvider,
   TranscriptionProvider,
   TextToSpeechProvider,
+  TextToSpeech,
   TextModel,
   StructuredGenerator,
   SpeechToText,

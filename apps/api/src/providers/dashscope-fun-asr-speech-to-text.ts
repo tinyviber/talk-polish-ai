@@ -6,6 +6,7 @@ import {
 } from "@kotoba/contracts";
 import type { Env } from "../env";
 import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
+import type { ProviderProbe } from "../platform/ai/probe";
 import { DailyProviderRequestError, createDailySafeHttpsClient } from "./safe-https-client";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -25,34 +26,42 @@ export function isDashScopeFunAsrProvider(
 export function createDashScopeFunAsrSpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
-): SpeechToText {
-  const client = createDailySafeHttpsClient({
-    // Fun-ASR-Realtime uses the native `/api/v1` endpoint even when the user
-    // entered the familiar `/compatible-mode/v1` DashScope endpoint.
-    baseUrl: new URL("/api/v1", new URL(provider.baseUrl).origin).toString(),
-    apiKey: provider.apiKey,
-    timeoutMs: 30_000,
-    maxAttempts: 1,
-    maxResponseBytes: JSON_RESPONSE_BYTES,
-    production: config.NODE_ENV === "production",
-    allowSyntheticDns:
-      config.NODE_ENV !== "production" && config.DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS,
-    allowedOrigins: config.DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  });
+): SpeechToText & ProviderProbe {
+  const allowSyntheticDns =
+    config.NODE_ENV !== "production" && config.DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS;
+  const client = createDailySafeHttpsClient(
+    {
+      // Fun-ASR-Realtime uses the native `/api/v1` endpoint even when the user
+      // entered the familiar `/compatible-mode/v1` DashScope endpoint.
+      baseUrl: new URL("/api/v1", new URL(provider.baseUrl).origin).toString(),
+      apiKey: provider.apiKey,
+      timeoutMs: 30_000,
+      maxAttempts: 1,
+      maxResponseBytes: JSON_RESPONSE_BYTES,
+      production: config.NODE_ENV === "production",
+      allowSyntheticDns,
+      allowedOrigins: config.DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    },
+    {
+      ...(config.NODE_ENV === "test" && allowSyntheticDns ? { fetch: globalThis.fetch } : {}),
+    },
+  );
 
+  const probe = async (requestId?: string) => {
+    await requestFunAsr(
+      client,
+      provider,
+      createDashScopeFunAsrProbeAudio(),
+      "audio/mpeg",
+      requestId,
+    );
+  };
   return {
     name: "dashscope-fun-asr",
-    async check(requestId?: string) {
-      await requestFunAsr(
-        client,
-        provider,
-        createDashScopeFunAsrProbeAudio(),
-        "audio/mpeg",
-        requestId,
-      );
-    },
+    probe,
+    check: probe,
     async transcribe(input) {
       const response = await requestFunAsr(
         client,

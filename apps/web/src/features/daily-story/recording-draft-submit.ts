@@ -1,4 +1,4 @@
-import type { DailyStoryTranscribeResult } from "./controller";
+import type { DailyStoryTranscribeResult } from "./shared-types";
 import type { DailyPhase } from "./state-machine";
 import type { DailyStoryAudioPurpose } from "./audio-outbox";
 import type { RecordingDraft, RecordingDraftFailureKind } from "./recording-drafts";

@@ -7,7 +7,7 @@ import {
   importStorySessions,
   listStorySessions,
   subscribeDailyStorage,
-} from "@/features/daily-story/settings-repository";
+} from "@/features/daily-story/persistence";
 import { createConversationId, type StorySessionSummary } from "@/features/daily-story/types";
 import { DailyStoryHeader } from "./AppHeader";
 

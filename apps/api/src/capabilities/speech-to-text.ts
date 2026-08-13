@@ -32,5 +32,5 @@ export interface SpeechToText {
     requestId?: string;
   }): Promise<Transcript>;
   check?(requestId?: string): Promise<void>;
-  probe?(): Promise<void>;
+  probe?(requestId?: string): Promise<void>;
 }

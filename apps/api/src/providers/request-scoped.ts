@@ -7,10 +7,18 @@ import type {
 import { identifyProviderPreset, normalizeProviderBaseUrl } from "@kotoba/contracts";
 import { createStructuredGenerator } from "../capabilities/structured-generator";
 import type { Env } from "../env";
-import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
-import type { TextModel } from "../capabilities/text-model";
-import type { TextToSpeech, SynthesizedAudio } from "../capabilities/text-to-speech";
-import { DailyProviderRequestError, createDailySafeHttpsClient } from "./safe-https-client";
+import type { SpeechToText, Transcript } from "../platform/ai/capabilities/speech-to-text";
+import type { TextModel } from "../platform/ai/capabilities/text-model";
+import type { TextToSpeech, SynthesizedAudio } from "../platform/ai/capabilities/text-to-speech";
+import {
+  PROVIDER_PROBE_MAX_TOKENS,
+  providerProbeSchema,
+  providerProbeSystemPrompt,
+  providerProbeUserPrompt,
+} from "../platform/ai/probe";
+import type { ProviderProbe } from "../platform/ai/probe";
+import { createProbedProviderRegistry } from "../platform/ai/registry/provider-registry";
+import { DailyProviderRequestError, createDailySafeHttpsClient } from "../platform/ai/transport";
 import {
   createDashScopeCompatibleSpeechToText,
   isDashScopeCompatibleAsrUrl,
@@ -20,22 +28,23 @@ import {
   isDashScopeFunAsrProvider,
 } from "./dashscope-fun-asr-speech-to-text";
 import { createOpenAICompatibleTextModel } from "./openai-text-model";
-import {
-  DAILY_STORY_OPENING_MAX_TOKENS,
-  conversationSystemPrompt,
-  openingResultSchema,
-  openingUserPrompt,
-} from "../modules/daily-story/policy";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
 const AUDIO_RESPONSE_BYTES = 15 * 1024 * 1024;
-const PROVIDER_CHECK_STORY = "这是一次 provider connectivity check。";
 
 export type DailyStoryRequestProviders = {
-  chat: TextModel;
-  asr: SpeechToText;
-  tts: TextToSpeech;
+  chat: TextModel & DailyStoryProbe;
+  asr: SpeechToText & DailyStoryProbe;
+  tts: TextToSpeech & DailyStoryProbe;
 };
+
+type DailyStoryCapabilityPorts = {
+  textModel: TextModel & DailyStoryProbe;
+  speechToText: SpeechToText & DailyStoryProbe;
+  textToSpeech: TextToSpeech & DailyStoryProbe;
+};
+
+export type DailyStoryProbe = ProviderProbe;
 
 /** Construct providers per request. Configurations and keys never reach a process cache. */
 export function createDailyStoryRequestProviders(
@@ -46,17 +55,59 @@ export function createDailyStoryRequestProviders(
     tts: DailyStoryTtsConfig;
   }>,
 ): Partial<DailyStoryRequestProviders> {
-  return {
-    ...(input.chat
-      ? { chat: createDailyStoryTextModel(config, normalizeDailyStoryProvider(input.chat)) }
-      : {}),
-    ...(input.asr
-      ? { asr: createDailyStorySpeechToText(config, normalizeDailyStoryProvider(input.asr)) }
-      : {}),
-    ...(input.tts
-      ? { tts: createDailyStoryTextToSpeech(config, normalizeDailyStoryProvider(input.tts)) }
-      : {}),
-  };
+  const registry = createDailyStoryProviderRegistry(config);
+  const providers: Partial<DailyStoryRequestProviders> = {};
+  if (input.chat)
+    providers.chat = registry.createTextModel(normalizeDailyStoryProvider(input.chat));
+  if (input.asr)
+    providers.asr = registry.createSpeechToText(normalizeDailyStoryProvider(input.asr));
+  if (input.tts)
+    providers.tts = registry.createTextToSpeech(normalizeDailyStoryProvider(input.tts));
+  return providers;
+}
+
+function createDailyStoryProviderRegistry(config: Env) {
+  return createProbedProviderRegistry<
+    DailyStoryChatConfig,
+    DailyStoryAsrConfig,
+    DailyStoryTtsConfig,
+    DailyStoryCapabilityPorts
+  >({
+    textModel: [
+      {
+        name: "daily-story-openai-compatible-chat",
+        matches: () => true,
+        create: (provider: DailyStoryChatConfig) => createDailyStoryTextModel(config, provider),
+      },
+    ],
+    speechToText: [
+      {
+        name: "dashscope-fun-asr",
+        matches: isDashScopeFunAsrProvider,
+        create: (provider: DailyStoryAsrConfig) =>
+          createDashScopeFunAsrSpeechToText(config, provider),
+      },
+      {
+        name: "dashscope-compatible-asr",
+        matches: (provider: DailyStoryAsrConfig) => isDashScopeCompatibleAsrUrl(provider.baseUrl),
+        create: (provider: DailyStoryAsrConfig) =>
+          createDashScopeCompatibleSpeechToText(config, provider),
+      },
+      {
+        name: "daily-story-openai-compatible-asr",
+        matches: () => true,
+        create: (provider: DailyStoryAsrConfig) =>
+          createOpenAICompatibleDailyStorySpeechToText(config, provider),
+      },
+    ],
+    textToSpeech: [
+      {
+        name: "daily-story-openai-compatible-tts",
+        matches: () => true,
+        create: (provider: DailyStoryTtsConfig) => createDailyStoryTextToSpeech(config, provider),
+      },
+    ],
+  });
 }
 
 /** Accept both `https://host` and the OpenAI-compatible `https://host/v1` form. */
@@ -69,7 +120,10 @@ export function normalizeDailyStoryProvider<T extends { baseUrl: string }>(provi
   }
 }
 
-export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatConfig): TextModel {
+export function createDailyStoryTextModel(
+  config: Env,
+  provider: DailyStoryChatConfig,
+): TextModel & DailyStoryProbe {
   // The browser-provided preset is only a UI hint. Derive provider-specific
   // behavior from the canonical endpoint so DeepSeek options cannot be
   // spoofed onto a custom endpoint, and legacy DeepSeek settings without a
@@ -94,14 +148,14 @@ export function createDailyStoryTextModel(config: Env, provider: DailyStoryChatC
   return {
     ...model,
     name: "daily-story-request-scoped-chat",
-    async check(requestId?: string) {
+    async probe(requestId?: string) {
       await createStructuredGenerator(model).generate({
         messages: [
-          { role: "system", content: conversationSystemPrompt },
-          { role: "user", content: openingUserPrompt(PROVIDER_CHECK_STORY) },
+          { role: "system", content: providerProbeSystemPrompt },
+          { role: "user", content: providerProbeUserPrompt() },
         ],
-        schema: openingResultSchema,
-        maxTokens: DAILY_STORY_OPENING_MAX_TOKENS,
+        schema: providerProbeSchema,
+        maxTokens: PROVIDER_PROBE_MAX_TOKENS,
         requestId,
       });
     },
@@ -171,21 +225,15 @@ function selectProviderHeaders(headers: Headers) {
 export function createDailyStorySpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
-): SpeechToText {
+): SpeechToText & DailyStoryProbe {
   const normalizedProvider = normalizeDailyStoryProvider(provider);
-  if (isDashScopeFunAsrProvider(normalizedProvider)) {
-    return createDashScopeFunAsrSpeechToText(config, normalizedProvider);
-  }
-  if (isDashScopeCompatibleAsrUrl(normalizedProvider.baseUrl)) {
-    return createDashScopeCompatibleSpeechToText(config, normalizedProvider);
-  }
-  return createOpenAICompatibleDailyStorySpeechToText(config, normalizedProvider);
+  return createDailyStoryProviderRegistry(config).createSpeechToText(normalizedProvider);
 }
 
 function createOpenAICompatibleDailyStorySpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
-): SpeechToText {
+): SpeechToText & DailyStoryProbe {
   // A transcription upload is large and usually not idempotent at the
   // gateway. Retrying the same audio three times only multiplies provider
   // load and makes the browser timeout before the API can return a useful
@@ -193,7 +241,7 @@ function createOpenAICompatibleDailyStorySpeechToText(
   const client = transport(config, provider, { maxAttempts: 1 });
   return {
     name: "daily-story-request-scoped-asr",
-    async check(requestId?: string) {
+    async probe(requestId?: string) {
       await sendTranscription(
         client,
         provider,
@@ -221,11 +269,11 @@ function createOpenAICompatibleDailyStorySpeechToText(
 export function createDailyStoryTextToSpeech(
   config: Env,
   provider: DailyStoryTtsConfig,
-): TextToSpeech {
+): TextToSpeech & DailyStoryProbe {
   const client = transport(config, provider);
   return {
     name: "daily-story-request-scoped-tts",
-    async check(requestId?: string) {
+    async probe(requestId?: string) {
       await synthesize(client, provider, "ping", requestId);
     },
     async synthesize(input): Promise<SynthesizedAudio> {
@@ -244,19 +292,25 @@ function transport(
   provider: Pick<DailyStoryChatConfig, "baseUrl" | "apiKey">,
   options: { maxAttempts?: number } = {},
 ) {
-  return createDailySafeHttpsClient({
-    baseUrl: provider.baseUrl,
-    apiKey: provider.apiKey,
-    timeoutMs: 30_000,
-    maxAttempts: options.maxAttempts ?? config.HTTP_MAX_ATTEMPTS,
-    maxResponseBytes: JSON_RESPONSE_BYTES,
-    production: config.NODE_ENV === "production",
-    allowSyntheticDns:
-      config.NODE_ENV !== "production" && config.DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS,
-    allowedOrigins: config.DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  });
+  const allowSyntheticDns =
+    config.NODE_ENV !== "production" && config.DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS;
+  return createDailySafeHttpsClient(
+    {
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      timeoutMs: 30_000,
+      maxAttempts: options.maxAttempts ?? config.HTTP_MAX_ATTEMPTS,
+      maxResponseBytes: JSON_RESPONSE_BYTES,
+      production: config.NODE_ENV === "production",
+      allowSyntheticDns,
+      allowedOrigins: config.DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    },
+    {
+      ...(config.NODE_ENV === "test" && allowSyntheticDns ? { fetch: globalThis.fetch } : {}),
+    },
+  );
 }
 
 async function sendTranscription(

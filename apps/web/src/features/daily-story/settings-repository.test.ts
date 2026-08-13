@@ -1,17 +1,17 @@
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   closeNextFakeIndexedDbTransaction,
   installFakeIndexedDb,
 } from "@/lib/practice/test/fakeIndexedDb";
 import {
-  __closeDailyStorageConnectionForTests,
-  __resetDailyStorageForTests,
   SessionConflictError,
   DailyStorageError,
   clearProvider,
   acquireStoryLease,
   claimStoryLease,
+  claimStoryLeaseToken,
   deleteStorySession,
+  ensureDailyStorage,
   exportStorySessions,
   importStorySessions,
   listStorySessions,
@@ -22,6 +22,11 @@ import {
   saveProvider,
   writeStorySession,
 } from "./settings-repository";
+import { writeDailyStoryReview } from "./persistence";
+import {
+  __closeDailyStorageConnectionForTests,
+  __resetDailyStorageForTests,
+} from "./persistence/testing";
 
 let restore: () => void;
 
@@ -147,6 +152,22 @@ function exportFixture(id: string, text = "I stayed home.") {
 
 beforeAll(() => {
   restore = installFakeIndexedDb();
+});
+
+beforeEach(async () => {
+  await __resetDailyStorageForTests();
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase("kotoba-loop-settings");
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase("kotoba-daily-story-review-v2");
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  await __resetDailyStorageForTests();
+  await ensureDailyStorage();
 });
 
 afterAll(() => restore());
@@ -395,7 +416,90 @@ describe("Daily Story IndexedDB", () => {
     await deleteStorySession("conversation-conflict", saved.revision);
   });
 
+  test("rejects a stale owner delete and allows the current owner to delete", async () => {
+    const saved = await writeStorySession(
+      "conversation-owner-delete",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+    await expect(acquireStoryLease("conversation-owner-delete", "owner-a")).resolves.toBe(true);
+    await expect(claimStoryLease("conversation-owner-delete", "owner-b")).resolves.toBe(true);
+
+    await expect(
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-a"),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession("conversation-owner-delete")).resolves.toMatchObject({
+      revision: saved.revision,
+    });
+
+    await expect(
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b"),
+    ).resolves.toBeUndefined();
+    await expect(
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b"),
+    ).resolves.toBeUndefined();
+    await expect(readStorySession("conversation-owner-delete")).resolves.toBeNull();
+    await releaseStoryLease("conversation-owner-delete", "owner-b");
+  });
+
+  test("rejects writes and deletes after the owner's lease expires", async () => {
+    const saved = await writeStorySession(
+      "conversation-expired-owner",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+    await expect(acquireStoryLease("conversation-expired-owner", "owner-a")).resolves.toBe(true);
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({
+        id: "conversation-expired-owner",
+        ownerId: "owner-a",
+        expiresAt: Date.now() - 1,
+      });
+    });
+
+    await expect(
+      writeStorySession(
+        "conversation-expired-owner",
+        { phase: "chatting", storyZh: "过期写入", messages: [] },
+        saved.revision,
+        "owner-a",
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(
+      deleteStorySession("conversation-expired-owner", saved.revision, "owner-a"),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession("conversation-expired-owner")).resolves.toMatchObject({
+      revision: saved.revision,
+    });
+    await deleteStorySession("conversation-expired-owner", saved.revision);
+  });
+
   test("migrates the legacy current session and keeps conversations separate", async () => {
+    await ensureDailyStorage();
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    await mutateRawStore("storySessions", (store) => {
+      store.put({
+        id: "current",
+        schemaVersion: 1,
+        revision: 1,
+        updatedAt: "2026-08-10T00:00:00.000Z",
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [{ id: "legacy-ai", role: "assistant", text: "How was your day?" }],
+      });
+    });
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({ id: "current", ownerId: "legacy-owner", expiresAt: Date.now() + 10_000 });
+    });
     const migrated = await listStorySessions();
     expect(migrated).toHaveLength(1);
     expect(migrated[0]?.id).not.toBe("current");
@@ -427,6 +531,14 @@ describe("Daily Story IndexedDB", () => {
     await releaseStoryLease("conversation-b", "owner-b");
   });
 
+  test("rejects a late lease claim with an older claim timestamp", async () => {
+    const newer = await claimStoryLeaseToken("conversation-lease-race", "newer", 2_000);
+    expect(newer).toBeTruthy();
+    await expect(
+      claimStoryLeaseToken("conversation-lease-race", "older", 1_000),
+    ).resolves.toBeNull();
+  });
+
   test("round-trips projected sessions without secrets or revision", async () => {
     await clearRawStore("storySessions");
     await clearRawStore("storyLeases");
@@ -445,8 +557,8 @@ describe("Daily Story IndexedDB", () => {
           },
         ],
         review: {
-          score: null,
-          comment: null,
+          score: 88,
+          comment: "继续保持。",
           rubric: null,
           suggestions: [
             {
@@ -486,8 +598,8 @@ describe("Daily Story IndexedDB", () => {
             },
           ],
           review: {
-            score: null,
-            comment: null,
+            score: 88,
+            comment: "继续保持。",
             rubric: null,
             suggestions: [
               {
@@ -516,6 +628,8 @@ describe("Daily Story IndexedDB", () => {
     const restored = await readStorySession("conversation-roundtrip");
     expect(restored?.revision).toBe(1);
     expect(restored?.updatedAt).toBe(saved.updatedAt);
+    expect(restored?.review?.score).toBe(88);
+    expect(restored?.review?.comment).toBe("继续保持。");
     expect(restored?.review?.suggestions[0]?.category).toBe("naturalness");
     expect(restored?.review?.suggestions[0]?.diff).toEqual([
       ["=", "I stayed"],
@@ -557,6 +671,46 @@ describe("Daily Story IndexedDB", () => {
     });
     await expect(exportStorySessions()).resolves.toContain('"version":2');
     await deleteStorySession("legacy-v1", 1);
+  });
+
+  test("does not merge a stale sidecar into a reused session id", async () => {
+    await clearRawStore("storySessions");
+    const first = await writeStorySession(
+      "reused-session",
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "u1", role: "user", source: "typed", text: "Old." }],
+        review: {
+          score: null,
+          comment: null,
+          rubric: null,
+          suggestions: [],
+        },
+      },
+      null,
+    );
+    await deleteStorySession("reused-session", first.revision);
+    await writeDailyStoryReview("reused-session", {
+      score: 99,
+      comment: "stale",
+      rubric: null,
+      sessionRevision: 1,
+      sessionInstanceId: "old-instance",
+    });
+    const second = await writeStorySession(
+      "reused-session",
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "u2", role: "user", source: "typed", text: "New." }],
+        review: { suggestions: [] },
+      },
+      null,
+    );
+    expect((await readStorySession("reused-session"))?.review?.score).toBe(null);
+    expect(await exportStorySessions()).not.toContain("stale");
+    expect(second.revision).toBe(1);
   });
 
   test("refuses to export a legacy record that cannot pass the import schema", async () => {

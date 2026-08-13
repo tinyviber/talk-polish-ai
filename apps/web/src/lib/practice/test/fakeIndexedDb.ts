@@ -31,6 +31,7 @@ function createObjectStoreHandle(store: StoreData, tx: ReturnType<typeof createT
   const run = <T>(action: () => T) => tx.run(action);
   return {
     getAll: () => run(() => Array.from(store.records.values()).map((value) => clone(value))),
+    getAllKeys: () => run(() => Array.from(store.records.keys())),
     get: (key: IDBValidKey) => run(() => clone(store.records.get(key))),
     put: (value: Record<string, unknown>) =>
       run(() => {

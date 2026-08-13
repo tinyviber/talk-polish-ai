@@ -42,6 +42,8 @@ type SafeResponse = { bytes: Uint8Array; contentType?: string; status: number };
 type DailySafeHttpsClientDependencies = {
   resolveAddresses?: typeof resolveDailyProviderPublicAddresses;
   request?: typeof httpsRequest;
+  /** Test-only adapter. Production always uses requestPinned. */
+  fetch?: typeof globalThis.fetch;
 };
 
 /**
@@ -66,11 +68,15 @@ export function createDailySafeHttpsClient(
           if (remainingDeadlineMs(deadline) <= 0) {
             throw new DailyProviderRequestError("timeout");
           }
-          if (options.allowSyntheticDns && !options.production) {
-            const response = await requestWithSystemFetch(target, input, options, deadline);
-            if (remainingDeadlineMs(deadline) <= 0) {
-              throw new DailyProviderRequestError("timeout");
-            }
+          if (options.allowSyntheticDns && !options.production && dependencies.fetch) {
+            const response = await requestWithInjectedFetch(
+              target,
+              input,
+              options,
+              deadline,
+              dependencies.fetch,
+            );
+            if (remainingDeadlineMs(deadline) <= 0) throw new DailyProviderRequestError("timeout");
             return response;
           }
           // This call intentionally remains inside retry loop: DNS is not cached.
@@ -112,59 +118,48 @@ export function createDailySafeHttpsClient(
   };
 }
 
-async function requestWithSystemFetch(
+async function requestWithInjectedFetch(
   target: DailyProviderTarget,
   input: RequestInput,
   options: DailySafeHttpsClientOptions,
   deadline: number,
+  fetchImpl: typeof globalThis.fetch,
 ): Promise<SafeResponse> {
   const url = joinDailyProviderPath(target, input.path);
-  const body = input.body ? new Uint8Array(input.body) : undefined;
   const maxBytes = input.maxResponseBytes ?? options.maxResponseBytes ?? 2 * 1024 * 1024;
-  const headers = new Headers({
-    accept: input.accept ?? "application/json",
-    authorization: `Bearer ${options.apiKey}`,
-    ...(input.requestId
-      ? {
-          "x-request-id": input.requestId,
-          "x-client-request-id": input.requestId,
-          "idempotency-key": input.requestId,
-        }
-      : {}),
-    ...input.headers,
-  });
   const controller = new AbortController();
   const remaining = remainingDeadlineMs(deadline);
-  if (remaining <= 0) {
-    throw new DailyProviderRequestError("timeout");
-  }
+  if (remaining <= 0) throw new DailyProviderRequestError("timeout");
   const timer = setTimeout(() => controller.abort(), remaining);
   try {
-    const response = await fetch(url, {
+    const response = await fetchImpl(url, {
       method: "POST",
-      headers,
-      ...(body ? { body } : {}),
+      headers: {
+        accept: input.accept ?? "application/json",
+        authorization: `Bearer ${options.apiKey}`,
+        ...(input.requestId
+          ? {
+              "x-request-id": input.requestId,
+              "x-client-request-id": input.requestId,
+              "idempotency-key": input.requestId,
+            }
+          : {}),
+        ...input.headers,
+      },
+      ...(input.body ? { body: input.body } : {}),
       redirect: "error",
       signal: controller.signal,
     });
-    if (response.status >= 300 && response.status < 400) {
+    if (response.status >= 300 && response.status < 400)
       throw new DailyProviderRequestError("redirect", response.status);
-    }
-    if (response.status < 200 || response.status >= 300) {
-      throw new DailyProviderRequestError(
-        "http",
-        response.status,
-        await providerResponseReason(response, options.apiKey),
-      );
-    }
+    if (response.status < 200 || response.status >= 300)
+      throw new DailyProviderRequestError("http", response.status);
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maxBytes) {
+    if (Number.isFinite(declared) && declared > maxBytes)
       throw new DailyProviderRequestError("response", response.status);
-    }
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > maxBytes) {
+    if (bytes.byteLength > maxBytes)
       throw new DailyProviderRequestError("response", response.status);
-    }
     return {
       bytes,
       contentType: response.headers.get("content-type") ?? undefined,
@@ -175,35 +170,6 @@ async function requestWithSystemFetch(
     throw new DailyProviderRequestError(controller.signal.aborted ? "timeout" : "network");
   } finally {
     clearTimeout(timer);
-  }
-}
-
-async function providerResponseReason(response: Response, secret: string) {
-  try {
-    const text = await response.text();
-    if (!text) return undefined;
-    let value: unknown = text;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      // Keep only a short, non-JSON diagnostic below.
-    }
-    const message =
-      value && typeof value === "object" && "error" in value && value.error
-        ? typeof value.error === "object" && "message" in value.error
-          ? value.error.message
-          : value.error
-        : value && typeof value === "object" && "message" in value
-          ? value.message
-          : value;
-    if (typeof message !== "string") return undefined;
-    const redacted = secret ? message.split(secret).join("<redacted>") : message;
-    return redacted
-      .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
-      .replace(/sk-[a-z0-9_-]+/gi, "sk-<redacted>")
-      .slice(0, 400);
-  } catch {
-    return undefined;
   }
 }
 

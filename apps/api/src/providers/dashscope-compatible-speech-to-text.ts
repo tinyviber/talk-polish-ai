@@ -1,6 +1,7 @@
 import { identifyProviderPreset, type DailyStoryAsrConfig } from "@kotoba/contracts";
 import type { Env } from "../env";
 import type { SpeechToText, Transcript } from "../capabilities/speech-to-text";
+import type { ProviderProbe } from "../platform/ai/probe";
 import { DailyProviderRequestError, createDailySafeHttpsClient } from "./safe-https-client";
 
 const JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -13,28 +14,36 @@ export function isDashScopeCompatibleAsrUrl(value: string) {
 export function createDashScopeCompatibleSpeechToText(
   config: Env,
   provider: DailyStoryAsrConfig,
-): SpeechToText {
-  const client = createDailySafeHttpsClient({
-    baseUrl: provider.baseUrl,
-    apiKey: provider.apiKey,
-    timeoutMs: 30_000,
-    // Audio requests are not replayed automatically. The caller can retry
-    // deliberately without multiplying provider load.
-    maxAttempts: 1,
-    maxResponseBytes: JSON_RESPONSE_BYTES,
-    production: config.NODE_ENV === "production",
-    allowSyntheticDns:
-      config.NODE_ENV !== "production" && config.DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS,
-    allowedOrigins: config.DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  });
+): SpeechToText & ProviderProbe {
+  const allowSyntheticDns =
+    config.NODE_ENV !== "production" && config.DAILY_PROVIDER_ALLOW_SYNTHETIC_DNS;
+  const client = createDailySafeHttpsClient(
+    {
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      timeoutMs: 30_000,
+      // Audio requests are not replayed automatically. The caller can retry
+      // deliberately without multiplying provider load.
+      maxAttempts: 1,
+      maxResponseBytes: JSON_RESPONSE_BYTES,
+      production: config.NODE_ENV === "production",
+      allowSyntheticDns,
+      allowedOrigins: config.DAILY_PROVIDER_ALLOWED_ORIGINS.split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    },
+    {
+      ...(config.NODE_ENV === "test" && allowSyntheticDns ? { fetch: globalThis.fetch } : {}),
+    },
+  );
 
+  const probe = async (requestId?: string) => {
+    await requestDashScopeAsr(client, provider, silentWav(), "audio/wav", "en", requestId);
+  };
   return {
     name: "dashscope-compatible-asr",
-    async check(requestId?: string) {
-      await requestDashScopeAsr(client, provider, silentWav(), "audio/wav", "en", requestId);
-    },
+    probe,
+    check: probe,
     async transcribe(input) {
       const response = await requestDashScopeAsr(
         client,

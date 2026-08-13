@@ -16,15 +16,15 @@ import {
 } from "@kotoba/contracts";
 import type { FastifyInstance, FastifyPluginOptions, FastifyRequest } from "fastify";
 import { requireLearnerAuth } from "../../auth";
-import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
-import { createDailyStoryService, type DailyStoryService } from "./service";
+import { DailyStoryApplicationError } from "./application/errors";
+import type { DailyStoryService } from "./service";
 
 export async function dailyStoryRoutes(
   app: FastifyInstance,
-  options: FastifyPluginOptions & { config: Env; service?: DailyStoryService },
+  options: FastifyPluginOptions & { service: DailyStoryService; isProduction: boolean },
 ) {
-  const service = options.service ?? createDailyStoryService(options.config);
+  const service = options.service;
 
   app.post(
     "/api/daily-story/start",
@@ -45,12 +45,14 @@ export async function dailyStoryRoutes(
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const body = dailyStoryStartRequestSchema.parse(request.body);
-      const result = await service.start({
-        ...body,
-        learnerId: learner.id,
-        ip: request.ip,
-        requestId: request.id,
-      });
+      const result = await runDailyStory(() =>
+        service.start({
+          ...body,
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
+        }),
+      );
       return { ...result, requestId: request.id };
     },
   );
@@ -76,14 +78,16 @@ export async function dailyStoryRoutes(
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const multipart = await readDailyStoryMultipart(request);
-      const result = await service.transcribe({
-        learnerId: learner.id,
-        ip: request.ip,
-        requestId: request.id,
-        asr: multipart.asr,
-        audio: multipart.audio,
-        mimeType: multipart.mimeType,
-      });
+      const result = await runDailyStory(() =>
+        service.transcribe({
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
+          asr: multipart.asr,
+          audio: multipart.audio,
+          mimeType: multipart.mimeType,
+        }),
+      );
       return { ...result, requestId: request.id };
     },
   );
@@ -107,12 +111,14 @@ export async function dailyStoryRoutes(
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const body = dailyStoryReplyRequestSchema.parse(request.body);
-      const result = await service.reply({
-        ...body,
-        learnerId: learner.id,
-        ip: request.ip,
-        requestId: request.id,
-      });
+      const result = await runDailyStory(() =>
+        service.reply({
+          ...body,
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
+        }),
+      );
       return { ...result, requestId: request.id };
     },
   );
@@ -136,12 +142,14 @@ export async function dailyStoryRoutes(
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const body = dailyStoryReviewRequestSchema.parse(request.body);
-      const result = await service.review({
-        ...body,
-        learnerId: learner.id,
-        ip: request.ip,
-        requestId: request.id,
-      });
+      const result = await runDailyStory(() =>
+        service.review({
+          ...body,
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
+        }),
+      );
       return { ...result, requestId: request.id };
     },
   );
@@ -154,6 +162,7 @@ export async function dailyStoryRoutes(
         summary: "Synthesize uncached Daily Story audio",
         body: dailyStoryTtsRequestSchema,
         response: {
+          200: { type: "string", format: "binary" },
           401: errorResponseSchema,
           422: errorResponseSchema,
           429: errorResponseSchema,
@@ -164,12 +173,14 @@ export async function dailyStoryRoutes(
     async (request, reply) => {
       const learner = await requireLearnerAuth(request);
       const body = dailyStoryTtsRequestSchema.parse(request.body);
-      const audio = await service.tts({
-        ...body,
-        learnerId: learner.id,
-        ip: request.ip,
-        requestId: request.id,
-      });
+      const audio = await runDailyStory(() =>
+        service.tts({
+          ...body,
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
+        }),
+      );
       return reply
         .type(audio.contentType)
         .header("Cache-Control", "private, no-store")
@@ -197,7 +208,7 @@ export async function dailyStoryRoutes(
     async (request) => {
       const learner = await requireLearnerAuth(request);
       const body = dailyStoryProviderCheckRequestSchema.parse(request.body);
-      if (options.config.NODE_ENV !== "production") {
+      if (!options.isProduction) {
         request.log.info(
           {
             capability: body.capability,
@@ -208,15 +219,28 @@ export async function dailyStoryRoutes(
           "daily-story provider check",
         );
       }
-      const result = await service.providerCheck({
-        learnerId: learner.id,
-        ip: request.ip,
-        requestId: request.id,
-        request: body,
-      });
+      const result = await runDailyStory(() =>
+        service.providerCheck({
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
+          request: body,
+        }),
+      );
       return { ...result, requestId: request.id };
     },
   );
+}
+
+async function runDailyStory<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof DailyStoryApplicationError) {
+      throw new ApiError(error.statusCode, error.code, error.message, error.details);
+    }
+    throw error;
+  }
 }
 
 async function readDailyStoryMultipart(request: FastifyRequest) {

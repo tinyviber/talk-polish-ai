@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  DAILY_STORY_OPENING_MAX_TOKENS,
-  conversationSystemPrompt,
-} from "../modules/daily-story/policy";
+import { PROVIDER_PROBE_MAX_TOKENS, providerProbeSystemPrompt } from "../platform/ai/probe";
 import { env } from "../env";
 import { createDailyStoryRequestProviders, normalizeDailyStoryProvider } from "./request-scoped";
 
@@ -97,8 +94,8 @@ describe("request-scoped provider catalog", () => {
           },
         },
       );
-      await providers.chat?.check?.("chat-provider-check");
-      await providers.tts?.check?.("tts-provider-check");
+      await providers.chat?.probe?.("chat-provider-check");
+      await providers.tts?.probe?.("tts-provider-check");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -109,16 +106,16 @@ describe("request-scoped provider catalog", () => {
     ]);
     expect(observed[0]?.body).toMatchObject({
       model: "deepseek-v4-flash",
-      max_tokens: DAILY_STORY_OPENING_MAX_TOKENS,
+      max_tokens: PROVIDER_PROBE_MAX_TOKENS,
       response_format: { type: "json_object" },
       thinking: { type: "disabled" },
     });
     expect(observed[0]?.body.messages).toEqual(
       expect.arrayContaining([
-        { role: "system", content: conversationSystemPrompt },
+        { role: "system", content: providerProbeSystemPrompt },
         expect.objectContaining({
           role: "user",
-          content: expect.stringContaining("Start conversation now."),
+          content: expect.stringContaining('Return {"reply":"ok"} now.'),
         }),
       ]),
     );
@@ -236,7 +233,7 @@ describe("request-scoped provider catalog", () => {
           },
         },
       );
-      await expect(providers.chat?.check?.("invalid-json-check")).rejects.toMatchObject({
+      await expect(providers.chat?.probe?.("invalid-json-check")).rejects.toMatchObject({
         code: "structured_generation",
       });
     } finally {
@@ -271,7 +268,7 @@ describe("request-scoped provider catalog", () => {
           },
         },
       );
-      await expect(providers.chat?.check?.("invalid-opening-shape")).rejects.toMatchObject({
+      await expect(providers.chat?.probe?.("invalid-opening-shape")).rejects.toMatchObject({
         code: "structured_generation",
       });
     } finally {

@@ -16,5 +16,5 @@ export interface TextToSpeech {
     requestId?: string;
   }): Promise<SynthesizedAudio>;
   check?(requestId?: string): Promise<void>;
-  probe?(): Promise<void>;
+  probe?(requestId?: string): Promise<void>;
 }

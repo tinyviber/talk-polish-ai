@@ -43,6 +43,12 @@ export type DailyStoryAudioOutboxUpdate = Partial<
   >
 > & {
   error?: string | null;
+  /** Optional CAS token; this field is never persisted. */
+  expectedUpdatedAt?: number;
+};
+
+export type DailyStoryAudioOutboxUpdateOptions = {
+  expectedUpdatedAt?: number;
 };
 
 export type ListDailyStoryAudioOutboxOptions = {
@@ -235,6 +241,7 @@ export async function get(clientAttemptId: string): Promise<DailyStoryAudioOutbo
 export async function update(
   clientAttemptId: string,
   changes: DailyStoryAudioOutboxUpdate,
+  options?: DailyStoryAudioOutboxUpdateOptions | number,
 ): Promise<DailyStoryAudioOutboxItem | undefined> {
   await removeExpired();
   const db = await openDatabase();
@@ -247,11 +254,17 @@ export async function update(
     const current = request.result as DailyStoryAudioOutboxItem | undefined;
     if (!current) return;
 
-    const { error, ...rest } = changes;
+    const expectedUpdatedAt =
+      typeof options === "number"
+        ? options
+        : (options?.expectedUpdatedAt ?? changes.expectedUpdatedAt);
+    if (expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) return;
+
+    const { error, expectedUpdatedAt: _expectedUpdatedAt, ...rest } = changes;
     updated = {
       ...current,
       ...rest,
-      updatedAt: Date.now(),
+      updatedAt: Math.max(Date.now(), current.updatedAt + 1),
       ...(error === null
         ? {}
         : error === undefined

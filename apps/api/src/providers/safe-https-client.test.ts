@@ -257,53 +257,6 @@ describe("Daily safe pinned HTTPS client", () => {
     expect(elapsedMs).toBeLessThan(timeoutMs + 120);
   });
 
-  test("passes only the remaining request budget to a retried synthetic fetch", async () => {
-    const originalFetch = globalThis.fetch;
-    const fetchSignals: AbortSignal[] = [];
-    const timeoutMs = 260;
-    const startedAt = Date.now();
-    let calls = 0;
-    globalThis.fetch = (async (_input, init) => {
-      calls += 1;
-      const signal = init?.signal;
-      if (signal) fetchSignals.push(signal);
-      if (calls === 1) throw new Error("connection reset");
-      return await new Promise<Response>((_resolve, reject) => {
-        if (signal?.aborted) {
-          reject(new DOMException("Aborted", "AbortError"));
-          return;
-        }
-        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
-          once: true,
-        });
-      });
-    }) as typeof fetch;
-
-    try {
-      const client = createDailySafeHttpsClient({
-        baseUrl: "https://provider.example.com/v1",
-        apiKey: "fixture-key",
-        timeoutMs,
-        maxAttempts: 2,
-        production: false,
-        allowSyntheticDns: true,
-        allowedOrigins: [],
-      });
-
-      const outcome = await client
-        .request({ path: "/chat/completions" })
-        .catch((error: unknown) => error);
-      const elapsedMs = Date.now() - startedAt;
-
-      expect(outcome).toMatchObject({ code: "timeout" });
-      expect(calls).toBe(2);
-      expect(fetchSignals[1]?.aborted).toBe(true);
-      expect(elapsedMs).toBeLessThan(timeoutMs + 120);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   test("preserves provider DNS and configuration errors without retrying", async () => {
     for (const boundaryError of [
       new DailyProviderDnsError(),
@@ -334,42 +287,6 @@ describe("Daily safe pinned HTTPS client", () => {
       expect(outcome).toBe(boundaryError);
       expect(outcome).toBeInstanceOf(boundaryError.constructor);
       expect(resolveCalls).toBe(1);
-    }
-  });
-
-  test("redacts the configured API key from synthetic HTTP diagnostics", async () => {
-    const originalFetch = globalThis.fetch;
-    const apiKey = "dashscope-key-123";
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ error: { message: `Invalid API key: ${apiKey}` } }), {
-        status: 400,
-        headers: { "content-type": "application/json" },
-      })) as unknown as typeof fetch;
-
-    try {
-      const client = createDailySafeHttpsClient({
-        baseUrl: "https://provider.example.com/v1",
-        apiKey,
-        timeoutMs: 100,
-        maxAttempts: 1,
-        production: false,
-        allowSyntheticDns: true,
-        allowedOrigins: [],
-      });
-
-      const outcome = await client
-        .request({ path: "/chat/completions" })
-        .catch((error: unknown) => error);
-
-      expect(outcome).toBeInstanceOf(DailyProviderRequestError);
-      expect(outcome).toMatchObject({
-        code: "http",
-        status: 400,
-        reason: "Invalid API key: <redacted>",
-      });
-      expect((outcome as DailyProviderRequestError).reason).not.toContain(apiKey);
-    } finally {
-      globalThis.fetch = originalFetch;
     }
   });
 

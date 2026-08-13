@@ -156,6 +156,38 @@ describe("Daily Story audio outbox", () => {
     expect(await update("missing", { status: "failed" })).toBeUndefined();
   });
 
+  test("uses expectedUpdatedAt as a CAS and never regresses a newer retry", async () => {
+    const saved = await put({
+      clientAttemptId: "cas-attempt",
+      conversationId: "conversation-1",
+      blob: new Blob(["audio"], { type: "audio/webm" }),
+      mimeType: "audio/webm",
+      durationSec: 1,
+      createdAt: Date.now(),
+    });
+
+    const retrying = await update("cas-attempt", { status: "uploading" });
+    expect(retrying?.updatedAt).toBeGreaterThan(saved.updatedAt);
+
+    const retried = await update("cas-attempt", { status: "uploading" });
+    expect(retried?.updatedAt).toBeGreaterThan(retrying!.updatedAt);
+
+    await expect(
+      update(
+        "cas-attempt",
+        { status: "queued", error: "stale abort" },
+        { expectedUpdatedAt: retrying!.updatedAt },
+      ),
+    ).resolves.toBeUndefined();
+    const current = await get("cas-attempt");
+    expect(current).toMatchObject({ status: "uploading", updatedAt: retried!.updatedAt });
+    expect(current).not.toHaveProperty("error");
+
+    await expect(
+      update("cas-attempt", { status: "completed" }, retried!.updatedAt),
+    ).resolves.toMatchObject({ status: "completed" });
+  });
+
   test("lists by conversation and status, and removes an item", async () => {
     const base = {
       blob: new Blob(["audio"], { type: "audio/webm" }),

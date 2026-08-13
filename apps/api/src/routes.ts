@@ -83,5 +83,8 @@ export async function registerRoutes(
   await app.register(expressionRoutes);
   await app.register(progressRoutes);
   await app.register(providerRoutes, { config, providerSet: runtime.providers });
-  await app.register(dailyStoryRoutes, { config });
+  await app.register(dailyStoryRoutes, {
+    service: runtime.dailyStory,
+    isProduction: config.NODE_ENV === "production",
+  });
 }

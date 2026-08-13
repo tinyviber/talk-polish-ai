@@ -29,7 +29,7 @@ import {
   readProviderSettings,
   saveAsrDirectPreference,
   saveProvider,
-} from "@/features/daily-story/settings-repository";
+} from "@/features/daily-story/persistence";
 import {
   applyProviderSelection,
   hasEffectiveProviderEndpointChanged,

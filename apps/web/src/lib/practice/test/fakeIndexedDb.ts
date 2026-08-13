@@ -8,6 +8,15 @@ type DatabaseData = {
   stores: Map<string, StoreData>;
 };
 
+type TransactionGate = {
+  promise: Promise<void>;
+  release: () => void;
+  started: Promise<void>;
+  markStarted: () => void;
+};
+
+let nextTransactionGate: TransactionGate | undefined;
+
 function clone<T>(value: T): T {
   try {
     return structuredClone(value);
@@ -31,6 +40,7 @@ function createObjectStoreHandle(store: StoreData, tx: ReturnType<typeof createT
   const run = <T>(action: () => T) => tx.run(action);
   return {
     getAll: () => run(() => Array.from(store.records.values()).map((value) => clone(value))),
+    getAllKeys: () => run(() => Array.from(store.records.keys())),
     get: (key: IDBValidKey) => run(() => clone(store.records.get(key))),
     put: (value: Record<string, unknown>) =>
       run(() => {
@@ -89,6 +99,7 @@ function createTransaction(
   data: DatabaseData,
   storeNames: string[],
   onFinish?: (transaction: { forceAbort(error: Error): void }) => void,
+  startGate?: Promise<void>,
 ) {
   let pending = 0;
   let completed = false;
@@ -134,7 +145,7 @@ function createTransaction(
     run<T>(action: () => T) {
       const request = createRequest<T>();
       tx.begin();
-      queueMicrotask(() => {
+      const execute = () => {
         if (aborted) return;
         try {
           request.result = action();
@@ -147,7 +158,9 @@ function createTransaction(
         } finally {
           tx.end();
         }
-      });
+      };
+      if (startGate) void startGate.then(() => queueMicrotask(execute));
+      else queueMicrotask(execute);
       return request as unknown as IDBRequest<T>;
     },
     objectStore(name: string) {
@@ -206,7 +219,10 @@ function createDatabase(data: DatabaseData) {
         data,
         Array.isArray(storeNames) ? storeNames : [storeNames],
         (finished) => activeTransactions.delete(finished),
+        nextTransactionGate?.promise,
       );
+      nextTransactionGate?.markStarted();
+      nextTransactionGate = undefined;
       activeTransactions.add(transaction);
       if (closeNextTransaction) {
         closeNextTransaction = false;
@@ -219,6 +235,7 @@ function createDatabase(data: DatabaseData) {
 }
 
 export function installFakeIndexedDb() {
+  nextTransactionGate = undefined;
   const databases = new Map<string, DatabaseData>();
   const databaseHandles = new Set<{ __closeNextTransaction(): void }>();
   const original = globalThis.indexedDB;
@@ -283,6 +300,20 @@ export function installFakeIndexedDb() {
       value: original,
     });
   };
+}
+
+/** Test-only seam: hold the first request of the next transaction. */
+export function deferNextFakeIndexedDbTransaction() {
+  let release!: () => void;
+  let markStarted!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  nextTransactionGate = { promise, release, started, markStarted };
+  return { release, started };
 }
 
 /** Test-only seam: force the next active fake transaction to abort as AbortError. */

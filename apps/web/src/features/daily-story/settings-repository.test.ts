@@ -1,27 +1,37 @@
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   closeNextFakeIndexedDbTransaction,
+  deferNextFakeIndexedDbTransaction,
   installFakeIndexedDb,
 } from "@/lib/practice/test/fakeIndexedDb";
 import {
-  __closeDailyStorageConnectionForTests,
-  __resetDailyStorageForTests,
   SessionConflictError,
   DailyStorageError,
   clearProvider,
   acquireStoryLease,
   claimStoryLease,
+  claimStoryLeaseToken,
   deleteStorySession,
+  ensureDailyStorage,
   exportStorySessions,
   importStorySessions,
   listStorySessions,
   readProviderSettings,
   readStorySession,
-  releaseStoryLease,
   saveAsrDirectPreference,
   saveProvider,
   writeStorySession,
 } from "./settings-repository";
+import {
+  deleteDailyStoryReview,
+  releaseStoryLeaseToken,
+  renewStoryLeaseToken,
+  writeDailyStoryReview,
+} from "./persistence";
+import {
+  __closeDailyStorageConnectionForTests,
+  __resetDailyStorageForTests,
+} from "./persistence/testing";
 
 let restore: () => void;
 
@@ -147,6 +157,22 @@ function exportFixture(id: string, text = "I stayed home.") {
 
 beforeAll(() => {
   restore = installFakeIndexedDb();
+});
+
+beforeEach(async () => {
+  await __resetDailyStorageForTests();
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase("kotoba-loop-settings");
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase("kotoba-daily-story-review-v2");
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  await __resetDailyStorageForTests();
+  await ensureDailyStorage();
 });
 
 afterAll(() => restore());
@@ -395,7 +421,186 @@ describe("Daily Story IndexedDB", () => {
     await deleteStorySession("conversation-conflict", saved.revision);
   });
 
+  test("rejects a stale owner delete and allows the current owner to delete", async () => {
+    const saved = await writeStorySession(
+      "conversation-owner-delete",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+    const tokenA = await claimStoryLeaseToken("conversation-owner-delete", "owner-a");
+    expect(tokenA).toBeTruthy();
+    await releaseStoryLeaseToken("conversation-owner-delete", "owner-a", tokenA!);
+    const tokenB = await claimStoryLeaseToken("conversation-owner-delete", "owner-b");
+    expect(tokenB).toBeTruthy();
+
+    await expect(
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-a", tokenA!),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession("conversation-owner-delete")).resolves.toMatchObject({
+      revision: saved.revision,
+    });
+
+    await expect(
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b", tokenB!),
+    ).resolves.toBeUndefined();
+    await expect(
+      deleteStorySession("conversation-owner-delete", saved.revision, "owner-b", tokenB!),
+    ).resolves.toBeUndefined();
+    await expect(readStorySession("conversation-owner-delete")).resolves.toBeNull();
+    await releaseStoryLeaseToken("conversation-owner-delete", "owner-b", tokenB!);
+  });
+
+  test("fails closed when a lease owner omits the fencing token", async () => {
+    const conversationId = "conversation-missing-lease-token";
+    const saved = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "原始故事", messages: [] },
+      null,
+    );
+    const token = await claimStoryLeaseToken(conversationId, "owner");
+    expect(token).toBeTruthy();
+
+    const ownerOnlyWrite = writeStorySession as unknown as (...args: unknown[]) => Promise<unknown>;
+    const ownerOnlyDelete = deleteStorySession as unknown as (
+      ...args: unknown[]
+    ) => Promise<unknown>;
+
+    await expect(
+      ownerOnlyWrite(
+        conversationId,
+        { phase: "chatting", storyZh: "不应写入", messages: [] },
+        saved.revision,
+        "owner",
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "原始故事",
+    });
+
+    await expect(ownerOnlyDelete(conversationId, saved.revision, "owner")).rejects.toBeInstanceOf(
+      SessionConflictError,
+    );
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "原始故事",
+    });
+
+    await releaseStoryLeaseToken(conversationId, "owner", token!);
+  });
+
+  test("fences stale token writes and deletes after lease handoff", async () => {
+    const saved = await writeStorySession(
+      "conversation-lease-token-handoff",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+    const tokenT1 = await claimStoryLeaseToken("conversation-lease-token-handoff", "owner");
+    expect(tokenT1).toBeTruthy();
+    await releaseStoryLeaseToken("conversation-lease-token-handoff", "owner", tokenT1!);
+    const tokenT2 = await claimStoryLeaseToken("conversation-lease-token-handoff", "owner");
+    expect(tokenT2).toBeTruthy();
+    expect(tokenT2).not.toBe(tokenT1);
+
+    await expect(
+      writeStorySession(
+        "conversation-lease-token-handoff",
+        { phase: "chatting", storyZh: "T1 stale write", messages: [] },
+        saved.revision,
+        "owner",
+        tokenT1!,
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(
+      deleteStorySession("conversation-lease-token-handoff", saved.revision, "owner", tokenT1!),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession("conversation-lease-token-handoff")).resolves.toMatchObject({
+      revision: saved.revision,
+      storyZh: "今天下雨",
+    });
+
+    const current = await writeStorySession(
+      "conversation-lease-token-handoff",
+      { phase: "chatting", storyZh: "T2 current write", messages: [] },
+      saved.revision,
+      "owner",
+      tokenT2!,
+    );
+    expect(current.revision).toBe(saved.revision + 1);
+    await deleteStorySession(
+      "conversation-lease-token-handoff",
+      current.revision,
+      "owner",
+      tokenT2!,
+    );
+    await releaseStoryLeaseToken("conversation-lease-token-handoff", "owner", tokenT2!);
+  });
+
+  test("rejects writes and deletes after the owner's lease expires", async () => {
+    const saved = await writeStorySession(
+      "conversation-expired-owner",
+      {
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [],
+      },
+      null,
+    );
+    const token = await claimStoryLeaseToken("conversation-expired-owner", "owner-a");
+    expect(token).toBeTruthy();
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({
+        id: "conversation-expired-owner",
+        ownerId: "owner-a",
+        claimToken: token,
+        expiresAt: Date.now() - 1,
+      });
+    });
+
+    await expect(
+      writeStorySession(
+        "conversation-expired-owner",
+        { phase: "chatting", storyZh: "过期写入", messages: [] },
+        saved.revision,
+        "owner-a",
+        token!,
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(
+      deleteStorySession("conversation-expired-owner", saved.revision, "owner-a", token!),
+    ).rejects.toBeInstanceOf(SessionConflictError);
+    await expect(readStorySession("conversation-expired-owner")).resolves.toMatchObject({
+      revision: saved.revision,
+    });
+    await deleteStorySession("conversation-expired-owner", saved.revision);
+  });
+
   test("migrates the legacy current session and keeps conversations separate", async () => {
+    await ensureDailyStorage();
+    await clearRawStore("storySessions");
+    await clearRawStore("storyLeases");
+    await mutateRawStore("storySessions", (store) => {
+      store.put({
+        id: "current",
+        schemaVersion: 1,
+        revision: 1,
+        updatedAt: "2026-08-10T00:00:00.000Z",
+        phase: "chatting",
+        storyZh: "今天下雨",
+        messages: [{ id: "legacy-ai", role: "assistant", text: "How was your day?" }],
+      });
+    });
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({ id: "current", ownerId: "legacy-owner", expiresAt: Date.now() + 10_000 });
+    });
     const migrated = await listStorySessions();
     expect(migrated).toHaveLength(1);
     expect(migrated[0]?.id).not.toBe("current");
@@ -415,16 +620,101 @@ describe("Daily Story IndexedDB", () => {
   });
 
   test("leases are isolated per conversation", async () => {
-    expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(true);
-    expect(await acquireStoryLease("conversation-b", "owner-b")).toBe(true);
+    const tokenA = await claimStoryLeaseToken("conversation-a", "owner-a");
+    const tokenB = await claimStoryLeaseToken("conversation-b", "owner-b");
+    expect(tokenA).toBeTruthy();
+    expect(tokenB).toBeTruthy();
     expect(await acquireStoryLease("conversation-a", "owner-b")).toBe(false);
-    expect(await claimStoryLease("conversation-a", "owner-b")).toBe(true);
-    expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(false);
-    await releaseStoryLease("conversation-a", "owner-a");
-    await releaseStoryLease("conversation-a", "owner-b");
-    expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(true);
-    await releaseStoryLease("conversation-a", "owner-b");
-    await releaseStoryLease("conversation-b", "owner-b");
+    expect(await claimStoryLease("conversation-a", "owner-b")).toBe(false);
+    await releaseStoryLeaseToken("conversation-a", "owner-a", tokenA!);
+    const replacement = await claimStoryLeaseToken("conversation-a", "owner-b");
+    expect(replacement).toBeTruthy();
+    await releaseStoryLeaseToken("conversation-a", "owner-b", replacement!);
+    await releaseStoryLeaseToken("conversation-b", "owner-b", tokenB!);
+  });
+
+  test("renew preserves the fencing token and only extends its expiry", async () => {
+    const conversationId = "conversation-renew-stable-token";
+    const token = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(token).toBeTruthy();
+    const before = (await readRawStore("storyLeases")).find(
+      (record) => record["id"] === conversationId,
+    );
+    expect(await renewStoryLeaseToken(conversationId, "owner", token!)).toBe(true);
+    expect(await renewStoryLeaseToken(conversationId, "owner", token!)).toBe(true);
+    const after = (await readRawStore("storyLeases")).find(
+      (record) => record["id"] === conversationId,
+    );
+    expect(after?.["claimToken"]).toBe(token);
+    expect(after?.["claimSequence"]).toBe(1);
+    expect(Number(after?.["expiresAt"] ?? 0)).toBeGreaterThanOrEqual(
+      Number(before?.["expiresAt"] ?? 0),
+    );
+    await releaseStoryLeaseToken(conversationId, "owner", token!);
+  });
+
+  test("a mutation captured before heartbeat still succeeds with the same token", async () => {
+    const conversationId = "conversation-renew-mutation";
+    const saved = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "原始故事", messages: [] },
+      null,
+    );
+    const token = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(token).toBeTruthy();
+    expect(await renewStoryLeaseToken(conversationId, "owner", token!)).toBe(true);
+    const updated = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "heartbeat 后仍可写入", messages: [] },
+      saved.revision,
+      "owner",
+      token!,
+    );
+    expect(updated.revision).toBe(saved.revision + 1);
+    await releaseStoryLeaseToken(conversationId, "owner", token!);
+  });
+
+  test("renew rejects a replaced or expired generation", async () => {
+    const conversationId = "conversation-renew-fenced";
+    const tokenT1 = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(tokenT1).toBeTruthy();
+    await releaseStoryLeaseToken(conversationId, "owner", tokenT1!);
+    const tokenT2 = await claimStoryLeaseToken(conversationId, "owner", 2);
+    expect(tokenT2).toBeTruthy();
+    await releaseStoryLeaseToken(conversationId, "owner", tokenT1!);
+    expect(await renewStoryLeaseToken(conversationId, "owner", tokenT2!)).toBe(true);
+    expect(await renewStoryLeaseToken(conversationId, "owner", tokenT1!)).toBe(false);
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({
+        id: conversationId,
+        ownerId: "owner",
+        claimToken: tokenT2,
+        claimSequence: 2,
+        expiresAt: Date.now() - 1,
+      });
+    });
+    expect(await renewStoryLeaseToken(conversationId, "owner", tokenT2!)).toBe(false);
+  });
+
+  test("same-millisecond claim sequence keeps the newer load lease", async () => {
+    const conversationId = "conversation-same-millisecond-claims";
+    const newer = await claimStoryLeaseToken(conversationId, "owner", 2);
+    expect(newer).toBeTruthy();
+    const older = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(older).toBeNull();
+    const lease = (await readRawStore("storyLeases")).find(
+      (record) => record["id"] === conversationId,
+    );
+    expect(lease).toMatchObject({ ownerId: "owner", claimToken: newer, claimSequence: 2 });
+    await releaseStoryLeaseToken(conversationId, "owner", newer!);
+  });
+
+  test("rejects a late lease claim with an older local sequence", async () => {
+    const newer = await claimStoryLeaseToken("conversation-lease-race", "newer", 2_000);
+    expect(newer).toBeTruthy();
+    await expect(
+      claimStoryLeaseToken("conversation-lease-race", "older", 1_000),
+    ).resolves.toBeNull();
   });
 
   test("round-trips projected sessions without secrets or revision", async () => {
@@ -445,8 +735,8 @@ describe("Daily Story IndexedDB", () => {
           },
         ],
         review: {
-          score: null,
-          comment: null,
+          score: 88,
+          comment: "继续保持。",
           rubric: null,
           suggestions: [
             {
@@ -486,8 +776,8 @@ describe("Daily Story IndexedDB", () => {
             },
           ],
           review: {
-            score: null,
-            comment: null,
+            score: 88,
+            comment: "继续保持。",
             rubric: null,
             suggestions: [
               {
@@ -516,6 +806,8 @@ describe("Daily Story IndexedDB", () => {
     const restored = await readStorySession("conversation-roundtrip");
     expect(restored?.revision).toBe(1);
     expect(restored?.updatedAt).toBe(saved.updatedAt);
+    expect(restored?.review?.score).toBe(88);
+    expect(restored?.review?.comment).toBe("继续保持。");
     expect(restored?.review?.suggestions[0]?.category).toBe("naturalness");
     expect(restored?.review?.suggestions[0]?.diff).toEqual([
       ["=", "I stayed"],
@@ -557,6 +849,207 @@ describe("Daily Story IndexedDB", () => {
     });
     await expect(exportStorySessions()).resolves.toContain('"version":2');
     await deleteStorySession("legacy-v1", 1);
+  });
+
+  test("does not merge a stale sidecar into a reused session id", async () => {
+    await clearRawStore("storySessions");
+    const first = await writeStorySession(
+      "reused-session",
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "u1", role: "user", source: "typed", text: "Old." }],
+        review: {
+          score: null,
+          comment: null,
+          rubric: null,
+          suggestions: [],
+        },
+      },
+      null,
+    );
+    await deleteStorySession("reused-session", first.revision);
+    await writeDailyStoryReview("reused-session", {
+      score: 99,
+      comment: "stale",
+      rubric: null,
+      sessionRevision: 1,
+      sessionInstanceId: "old-instance",
+    });
+    const second = await writeStorySession(
+      "reused-session",
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "u2", role: "user", source: "typed", text: "New." }],
+        review: { suggestions: [] },
+      },
+      null,
+    );
+    expect((await readStorySession("reused-session"))?.review?.score).toBe(null);
+    expect(await exportStorySessions()).not.toContain("stale");
+    expect(second.revision).toBe(1);
+  });
+
+  test("stale sidecar cleanup cannot delete a newer session review", async () => {
+    await clearRawStore("storySessions");
+    const first = await writeStorySession(
+      "sidecar-generation-race",
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "old", role: "user", source: "typed", text: "Old." }],
+        review: { score: null, comment: null, rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    const firstIdentity = first.sessionInstanceId;
+    await clearRawStore("storySessions");
+    const second = await writeStorySession(
+      "sidecar-generation-race",
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "new", role: "user", source: "typed", text: "New." }],
+        review: { score: 91, comment: "保留", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    expect(second.sessionInstanceId).not.toBe(firstIdentity);
+
+    await deleteDailyStoryReview("sidecar-generation-race", first.revision, firstIdentity);
+
+    await expect(readStorySession("sidecar-generation-race")).resolves.toMatchObject({
+      sessionInstanceId: second.sessionInstanceId,
+      review: { score: 91, comment: "保留" },
+    });
+  });
+
+  test("a stale same-generation sidecar write cannot overwrite a newer revision", async () => {
+    const conversationId = "sidecar-revision-write-race";
+    const seed = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "故事",
+        messages: [{ id: "u1", role: "user", source: "typed", text: "Hello." }],
+        review: { suggestions: [] },
+      },
+      null,
+    );
+
+    const gate = deferNextFakeIndexedDbTransaction();
+    const staleWrite = writeDailyStoryReview(conversationId, {
+      score: 55,
+      comment: "旧版本",
+      rubric: null,
+      sessionRevision: seed.revision,
+      ...(seed.sessionInstanceId ? { sessionInstanceId: seed.sessionInstanceId } : {}),
+    });
+    await Promise.resolve();
+
+    await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "故事",
+        messages: [{ id: "u1", role: "user", source: "typed", text: "Hello." }],
+        review: { score: 88, comment: "新版本", rubric: null, suggestions: [] },
+      },
+      seed.revision,
+    );
+    gate.release();
+    await staleWrite;
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: seed.revision + 1,
+      review: { score: 88, comment: "新版本", rubric: null },
+    });
+  });
+
+  test("a stale old-session sidecar write cannot overwrite a reused session id", async () => {
+    const conversationId = "sidecar-session-reuse-write-race";
+    const old = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "old", role: "user", source: "typed", text: "Old." }],
+        review: { score: 31, comment: "旧代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await deleteStorySession(conversationId, old.revision);
+
+    const gate = deferNextFakeIndexedDbTransaction();
+    const staleWrite = writeDailyStoryReview(conversationId, {
+      score: 31,
+      comment: "迟到旧代",
+      rubric: null,
+      sessionRevision: old.revision,
+      ...(old.sessionInstanceId ? { sessionInstanceId: old.sessionInstanceId } : {}),
+    });
+    await Promise.resolve();
+
+    const fresh = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "new", role: "user", source: "typed", text: "New." }],
+        review: { score: 97, comment: "新代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    expect(fresh.sessionInstanceId).not.toBe(old.sessionInstanceId);
+    gate.release();
+    await staleWrite;
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: fresh.revision,
+      sessionInstanceId: fresh.sessionInstanceId,
+      review: { score: 97, comment: "新代", rubric: null },
+    });
+  });
+
+  test("primary-observed generation fences a delayed repository sidecar after reuse", async () => {
+    const conversationId = "sidecar-primary-observed-generation-race";
+    const primaryGate = deferNextFakeIndexedDbTransaction();
+    const writeA = writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "old", role: "user", source: "typed", text: "Old." }],
+        review: { score: 41, comment: "旧代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await primaryGate.started;
+    primaryGate.release();
+
+    const sidecarGate = deferNextFakeIndexedDbTransaction();
+    await sidecarGate.started;
+
+    await deleteStorySession(conversationId, 1);
+    const writeB = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "new", role: "user", source: "typed", text: "New." }],
+        review: { score: 96, comment: "新代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+
+    sidecarGate.release();
+    const resultA = await writeA;
+    expect(resultA.sessionInstanceId).not.toBe(writeB.sessionInstanceId);
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      sessionInstanceId: writeB.sessionInstanceId,
+      review: { score: 96, comment: "新代", rubric: null },
+    });
   });
 
   test("refuses to export a legacy record that cannot pass the import schema", async () => {

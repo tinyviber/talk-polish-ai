@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { RecordingDraft } from "@/features/daily-story/recording-drafts";
-import { resolveDailyStoryErrorRetryUi } from "./DailyStoryPage";
+import { resolveDailyStoryErrorRetryUi } from "./daily-story-error-retry";
 import { resolveRecordingDraftPurpose } from "./recording-draft-purpose";
 
 function makeDraft(overrides: Partial<RecordingDraft> = {}): RecordingDraft {

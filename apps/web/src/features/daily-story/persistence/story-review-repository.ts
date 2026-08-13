@@ -88,10 +88,43 @@ export async function writeDailyStoryReview(
   return normalized;
 }
 
-export async function deleteDailyStoryReview(conversationId: string): Promise<void> {
+export async function deleteDailyStoryReview(
+  conversationId: string,
+  expectedSessionRevision?: number,
+  expectedSessionInstanceId?: string,
+): Promise<void> {
   await reviewTransaction<void>("readwrite", (tx) => {
-    const request = tx.objectStore(REVIEW_STORE).delete(conversationId);
-    request.onsuccess = () => setResult(tx, undefined);
+    const store = tx.objectStore(REVIEW_STORE);
+    if (expectedSessionRevision === undefined && expectedSessionInstanceId === undefined) {
+      const request = store.delete(conversationId);
+      request.onsuccess = () => setResult(tx, undefined);
+      return;
+    }
+    // A generation-scoped cleanup must fail closed if either identity is
+    // absent. Legacy sidecars are repaired separately and must not be deleted
+    // by a mutation that cannot prove which session created them.
+    if (expectedSessionRevision === undefined || expectedSessionInstanceId === undefined) {
+      setResult(tx, undefined);
+      return;
+    }
+    const read = store.get(conversationId);
+    read.onsuccess = () => {
+      const record = read.result as unknown;
+      if (record === undefined) {
+        setResult(tx, undefined);
+        return;
+      }
+      const parsed = storedReviewSidecarSchema.parse(record);
+      if (
+        parsed.sessionRevision !== expectedSessionRevision ||
+        parsed.sessionInstanceId !== expectedSessionInstanceId
+      ) {
+        setResult(tx, undefined);
+        return;
+      }
+      const deletion = store.delete(conversationId);
+      deletion.onsuccess = () => setResult(tx, undefined);
+    };
   });
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DailyStoryProviderCheckRequest } from "@kotoba/contracts";
-import type { DailyStoryProviders } from "./ports";
+import type { DailyStoryProviderFactory, DailyStoryProviders } from "./ports";
 import { createCheckProvider } from "./check-provider";
 
 const config = {
@@ -29,7 +29,7 @@ describe("Daily Story provider check use case", () => {
   test("selects chat, ASR, TTS and uses the provider-check rate limit", async () => {
     const calls: string[] = [];
     const guardInputs: Array<{ capability: string; perMinute: number }> = [];
-    const providers = (input: Parameters<(input: any) => DailyStoryProviders>[0]) => {
+    const providers: DailyStoryProviderFactory = (input) => {
       const result: DailyStoryProviders = {};
       if (input.chat) result.chat = provider(calls, "chat") as never;
       if (input.asr) result.asr = provider(calls, "asr") as never;

@@ -27,10 +27,9 @@ export {
 } from "./story-review-repository";
 export {
   acquireStoryLease,
-  acquireStoryLeaseToken,
   claimStoryLease,
   claimStoryLeaseToken,
-  releaseStoryLease,
+  renewStoryLeaseToken,
   releaseStoryLeaseToken,
 } from "./story-lease-repository";
 export { exportStorySessions, importStorySessions } from "./story-transfer";

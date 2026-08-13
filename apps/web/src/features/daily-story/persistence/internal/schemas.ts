@@ -101,6 +101,11 @@ export const leaseSchema = z
     ownerId: z.string().min(1).max(160),
     expiresAt: z.number().int().positive(),
     claimToken: z.string().min(1).max(160).optional(),
+    // Strictly increasing within one controller. Kept optional for legacy
+    // records written before claim sequencing was introduced.
+    claimSequence: z.number().int().positive().optional(),
+    // Legacy field retained only so old records remain readable. It is not
+    // used for freshness decisions.
     claimStartedAt: z.number().int().positive().optional(),
   })
   .strict();

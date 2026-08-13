@@ -24,7 +24,7 @@ export {
   acquireStoryLease,
   claimStoryLease,
   claimStoryLeaseToken,
-  releaseStoryLease,
+  renewStoryLeaseToken,
 } from "./persistence";
 export { exportStorySessions, importStorySessions } from "./persistence";
 export {

@@ -89,7 +89,7 @@ export class DailyStoryCoordinator {
   }
 
   beginLoad(claimLease = true): LoadToken {
-    return { sequence: this.loadSequenceGate.begin(), claimLease, claimStartedAt: Date.now() };
+    return { sequence: this.loadSequenceGate.begin(), claimLease };
   }
 
   isLoadCurrent(load: LoadToken | number) {
@@ -148,6 +148,5 @@ export class DailyStoryCoordinator {
 export type LoadToken = Readonly<{
   sequence: number;
   claimLease: boolean;
-  claimStartedAt: number;
 }>;
 export type { OperationToken } from "./operation-guards";

@@ -42,6 +42,18 @@ describe("Daily Story coordinator race guards", () => {
     expect(coordinator.isLoadCurrent(secondLoad)).toBe(true);
   });
 
+  test("an immediate pagehide/pageshow gets a newer editable load sequence", () => {
+    const coordinator = activeCoordinator();
+    const initial = coordinator.beginLoad(true);
+    coordinator.deactivate();
+    coordinator.activate();
+    const restored = coordinator.beginLoad(true);
+
+    expect(restored.sequence).toBeGreaterThan(initial.sequence);
+    expect(restored.claimLease).toBe(true);
+    expect(coordinator.isLoadCurrent(restored)).toBe(true);
+  });
+
   test("a reconcile load is read-only and never requests a lease claim", () => {
     const coordinator = activeCoordinator();
     const initialLoad = coordinator.beginLoad(true);

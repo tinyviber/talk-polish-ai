@@ -295,7 +295,7 @@ export async function deleteStorySession(
   explicitExpectedRevisionOrOwner?: number | null | string,
   explicitOwnerId?: string,
   explicitClaimToken?: string,
-) {
+): Promise<void> {
   const hasConversationId = typeof conversationIdOrExpectedRevision === "string";
   const conversationId = hasConversationId ? conversationIdOrExpectedRevision : CURRENT;
   const expectedRevision = hasConversationId
@@ -309,7 +309,7 @@ export async function deleteStorySession(
   ) {
     throw new SessionConflictError();
   }
-  const result = await transaction<void>(
+  const result = await transaction<{ revision: number; sessionInstanceId?: string } | null>(
     ownerId === undefined ? SESSION_STORE : [SESSION_STORE, LEASE_STORE],
     "readwrite",
     (tx, abort) => {
@@ -344,7 +344,13 @@ export async function deleteStorySession(
             return;
           }
           const deletion = store.delete(conversationId);
-          deletion.onsuccess = () => setResult(tx, undefined);
+          deletion.onsuccess = () =>
+            setResult(
+              tx,
+              current
+                ? { revision: current.revision, sessionInstanceId: current.sessionInstanceId }
+                : null,
+            );
         } catch (error) {
           abort(error);
         }
@@ -363,16 +369,17 @@ export async function deleteStorySession(
     },
   );
   notifySession(conversationId, (expectedRevision ?? 0) + 1);
-  try {
-    await deleteDailyStoryReview(conversationId);
-  } catch {
+  if (result?.sessionInstanceId) {
     try {
-      await deleteDailyStoryReview(conversationId);
+      await deleteDailyStoryReview(conversationId, result.revision, result.sessionInstanceId);
     } catch {
-      throw new StorySidecarPersistenceError(conversationId, "delete");
+      try {
+        await deleteDailyStoryReview(conversationId, result.revision, result.sessionInstanceId);
+      } catch {
+        throw new StorySidecarPersistenceError(conversationId, "delete");
+      }
     }
   }
-  return result;
 }
 
 async function persistReviewSidecar(
@@ -390,6 +397,8 @@ async function persistReviewSidecar(
       ...(sessionInstanceId ? { sessionInstanceId } : {}),
     });
   } else {
-    await deleteDailyStoryReview(conversationId);
+    if (sessionInstanceId) {
+      await deleteDailyStoryReview(conversationId, sessionRevision, sessionInstanceId);
+    }
   }
 }

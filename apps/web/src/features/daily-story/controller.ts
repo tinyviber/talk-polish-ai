@@ -15,8 +15,8 @@ import {
   ensureDailyStorage,
   readStorySession,
   writeStorySession,
-  acquireStoryLeaseToken,
   claimStoryLeaseToken,
+  renewStoryLeaseToken,
   releaseStoryLeaseToken,
   SessionConflictError,
   StorySidecarPersistenceError,
@@ -276,11 +276,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (loadToken.claimLease) {
           // Claim before the session read. Otherwise an obsolete load can
           // arrive late and overwrite a newer tab/page-show claim.
-          loadedLeaseToken = await claimStoryLeaseToken(
-            conversationId,
-            owner,
-            loadToken.claimStartedAt,
-          );
+          loadedLeaseToken = await claimStoryLeaseToken(conversationId, owner, loadToken.sequence);
           if (!isLoadCurrent()) {
             releaseLoadedLease();
             return;
@@ -372,27 +368,21 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       const generation = coordinatorRef.current.generation();
       const expectedClaimToken = leaseClaimTokenRef.current;
       if (!expectedClaimToken) return;
-      void acquireStoryLeaseToken(conversationId, owner, expectedClaimToken)
-        .then((nextLeaseToken) => {
-          const lease = nextLeaseToken !== null;
+      void renewStoryLeaseToken(conversationId, owner, expectedClaimToken)
+        .then((renewed) => {
           if (
             alive &&
             sequence === renewSequence &&
             coordinatorRef.current.isPageActive() &&
             coordinatorRef.current.generation() === generation
           ) {
-            setCoordinatorCanEdit(lease);
-            leaseActive = lease;
-            leaseClaimTokenRef.current = nextLeaseToken;
-            if (!lease) {
+            setCoordinatorCanEdit(renewed);
+            leaseActive = renewed;
+            if (!renewed) {
+              leaseClaimTokenRef.current = null;
               coordinatorRef.current.beginWrite();
               invalidateCurrent();
             }
-          } else if (nextLeaseToken) {
-            // A superseded renewal must never leave a token that this
-            // controller no longer tracks. Fenced release is safe even when
-            // a newer claim already replaced it.
-            void releaseStoryLeaseToken(conversationId, owner, nextLeaseToken);
           }
         })
         .catch((error: unknown) => {

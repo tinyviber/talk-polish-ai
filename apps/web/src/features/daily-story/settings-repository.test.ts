@@ -17,12 +17,16 @@ import {
   listStorySessions,
   readProviderSettings,
   readStorySession,
-  releaseStoryLease,
   saveAsrDirectPreference,
   saveProvider,
   writeStorySession,
 } from "./settings-repository";
-import { releaseStoryLeaseToken, writeDailyStoryReview } from "./persistence";
+import {
+  deleteDailyStoryReview,
+  releaseStoryLeaseToken,
+  renewStoryLeaseToken,
+  writeDailyStoryReview,
+} from "./persistence";
 import {
   __closeDailyStorageConnectionForTests,
   __resetDailyStorageForTests,
@@ -428,6 +432,7 @@ describe("Daily Story IndexedDB", () => {
     );
     const tokenA = await claimStoryLeaseToken("conversation-owner-delete", "owner-a");
     expect(tokenA).toBeTruthy();
+    await releaseStoryLeaseToken("conversation-owner-delete", "owner-a", tokenA!);
     const tokenB = await claimStoryLeaseToken("conversation-owner-delete", "owner-b");
     expect(tokenB).toBeTruthy();
 
@@ -614,19 +619,96 @@ describe("Daily Story IndexedDB", () => {
   });
 
   test("leases are isolated per conversation", async () => {
-    expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(true);
-    expect(await acquireStoryLease("conversation-b", "owner-b")).toBe(true);
+    const tokenA = await claimStoryLeaseToken("conversation-a", "owner-a");
+    const tokenB = await claimStoryLeaseToken("conversation-b", "owner-b");
+    expect(tokenA).toBeTruthy();
+    expect(tokenB).toBeTruthy();
     expect(await acquireStoryLease("conversation-a", "owner-b")).toBe(false);
-    expect(await claimStoryLease("conversation-a", "owner-b")).toBe(true);
-    expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(false);
-    await releaseStoryLease("conversation-a", "owner-a");
-    await releaseStoryLease("conversation-a", "owner-b");
-    expect(await acquireStoryLease("conversation-a", "owner-a")).toBe(true);
-    await releaseStoryLease("conversation-a", "owner-b");
-    await releaseStoryLease("conversation-b", "owner-b");
+    expect(await claimStoryLease("conversation-a", "owner-b")).toBe(false);
+    await releaseStoryLeaseToken("conversation-a", "owner-a", tokenA!);
+    const replacement = await claimStoryLeaseToken("conversation-a", "owner-b");
+    expect(replacement).toBeTruthy();
+    await releaseStoryLeaseToken("conversation-a", "owner-b", replacement!);
+    await releaseStoryLeaseToken("conversation-b", "owner-b", tokenB!);
   });
 
-  test("rejects a late lease claim with an older claim timestamp", async () => {
+  test("renew preserves the fencing token and only extends its expiry", async () => {
+    const conversationId = "conversation-renew-stable-token";
+    const token = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(token).toBeTruthy();
+    const before = (await readRawStore("storyLeases")).find(
+      (record) => record["id"] === conversationId,
+    );
+    expect(await renewStoryLeaseToken(conversationId, "owner", token!)).toBe(true);
+    expect(await renewStoryLeaseToken(conversationId, "owner", token!)).toBe(true);
+    const after = (await readRawStore("storyLeases")).find(
+      (record) => record["id"] === conversationId,
+    );
+    expect(after?.["claimToken"]).toBe(token);
+    expect(after?.["claimSequence"]).toBe(1);
+    expect(Number(after?.["expiresAt"] ?? 0)).toBeGreaterThanOrEqual(
+      Number(before?.["expiresAt"] ?? 0),
+    );
+    await releaseStoryLeaseToken(conversationId, "owner", token!);
+  });
+
+  test("a mutation captured before heartbeat still succeeds with the same token", async () => {
+    const conversationId = "conversation-renew-mutation";
+    const saved = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "原始故事", messages: [] },
+      null,
+    );
+    const token = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(token).toBeTruthy();
+    expect(await renewStoryLeaseToken(conversationId, "owner", token!)).toBe(true);
+    const updated = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "heartbeat 后仍可写入", messages: [] },
+      saved.revision,
+      "owner",
+      token!,
+    );
+    expect(updated.revision).toBe(saved.revision + 1);
+    await releaseStoryLeaseToken(conversationId, "owner", token!);
+  });
+
+  test("renew rejects a replaced or expired generation", async () => {
+    const conversationId = "conversation-renew-fenced";
+    const tokenT1 = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(tokenT1).toBeTruthy();
+    await releaseStoryLeaseToken(conversationId, "owner", tokenT1!);
+    const tokenT2 = await claimStoryLeaseToken(conversationId, "owner", 2);
+    expect(tokenT2).toBeTruthy();
+    await releaseStoryLeaseToken(conversationId, "owner", tokenT1!);
+    expect(await renewStoryLeaseToken(conversationId, "owner", tokenT2!)).toBe(true);
+    expect(await renewStoryLeaseToken(conversationId, "owner", tokenT1!)).toBe(false);
+    await mutateRawStore("storyLeases", (store) => {
+      store.put({
+        id: conversationId,
+        ownerId: "owner",
+        claimToken: tokenT2,
+        claimSequence: 2,
+        expiresAt: Date.now() - 1,
+      });
+    });
+    expect(await renewStoryLeaseToken(conversationId, "owner", tokenT2!)).toBe(false);
+  });
+
+  test("same-millisecond claim sequence keeps the newer load lease", async () => {
+    const conversationId = "conversation-same-millisecond-claims";
+    const newer = await claimStoryLeaseToken(conversationId, "owner", 2);
+    expect(newer).toBeTruthy();
+    const older = await claimStoryLeaseToken(conversationId, "owner", 1);
+    expect(older).toBeNull();
+    const lease = (await readRawStore("storyLeases")).find(
+      (record) => record["id"] === conversationId,
+    );
+    expect(lease).toMatchObject({ ownerId: "owner", claimToken: newer, claimSequence: 2 });
+    await releaseStoryLeaseToken(conversationId, "owner", newer!);
+  });
+
+  test("rejects a late lease claim with an older local sequence", async () => {
     const newer = await claimStoryLeaseToken("conversation-lease-race", "newer", 2_000);
     expect(newer).toBeTruthy();
     await expect(
@@ -806,6 +888,40 @@ describe("Daily Story IndexedDB", () => {
     expect((await readStorySession("reused-session"))?.review?.score).toBe(null);
     expect(await exportStorySessions()).not.toContain("stale");
     expect(second.revision).toBe(1);
+  });
+
+  test("stale sidecar cleanup cannot delete a newer session review", async () => {
+    await clearRawStore("storySessions");
+    const first = await writeStorySession(
+      "sidecar-generation-race",
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "old", role: "user", source: "typed", text: "Old." }],
+        review: { score: null, comment: null, rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    const firstIdentity = first.sessionInstanceId;
+    await clearRawStore("storySessions");
+    const second = await writeStorySession(
+      "sidecar-generation-race",
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "new", role: "user", source: "typed", text: "New." }],
+        review: { score: 91, comment: "保留", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    expect(second.sessionInstanceId).not.toBe(firstIdentity);
+
+    await deleteDailyStoryReview("sidecar-generation-race", first.revision, firstIdentity);
+
+    await expect(readStorySession("sidecar-generation-race")).resolves.toMatchObject({
+      sessionInstanceId: second.sessionInstanceId,
+      review: { score: 91, comment: "保留" },
+    });
   });
 
   test("refuses to export a legacy record that cannot pass the import schema", async () => {

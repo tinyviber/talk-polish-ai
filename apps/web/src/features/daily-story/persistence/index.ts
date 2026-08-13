@@ -29,6 +29,7 @@ export {
   acquireStoryLease,
   claimStoryLease,
   claimStoryLeaseToken,
+  LEASE_RETRY_DELAY_MS,
   renewStoryLeaseToken,
   releaseStoryLeaseToken,
 } from "./story-lease-repository";

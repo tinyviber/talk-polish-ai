@@ -1,7 +1,8 @@
 export type DailyStorageEvent =
   | { kind: "settings"; revision: number }
   | { kind: "session"; conversationId: string; revision: number }
-  | { kind: "lease"; conversationId: string; ownerId: string };
+  | { kind: "lease"; conversationId: string; ownerId: string }
+  | { kind: "leaseReleased"; conversationId: string; ownerId: string };
 
 let channel: BroadcastChannel | undefined;
 const listeners = new Set<(event: DailyStorageEvent) => void>();
@@ -22,6 +23,14 @@ export function notifySession(conversationId: string, revision: number) {
 
 export function notifyLease(conversationId: string, ownerId: string) {
   storageChannel()?.postMessage({ kind: "lease", conversationId, ownerId });
+}
+
+export function notifyLeaseReleased(conversationId: string, ownerId: string) {
+  const event = { kind: "leaseReleased" as const, conversationId, ownerId };
+  // BroadcastChannel does not deliver to the sending channel object. Emit to
+  // same-document listeners too, which covers rapid remounts in one tab.
+  listeners.forEach((callback) => callback(event));
+  storageChannel()?.postMessage(event);
 }
 
 export function subscribeDailyStorage(listener: (event: DailyStorageEvent) => void) {
@@ -47,6 +56,12 @@ export function subscribeDailyStorage(listener: (event: DailyStorageEvent) => vo
         listeners.forEach((callback) => callback({ kind, conversationId, revision }));
       } else if (
         kind === "lease" &&
+        typeof conversationId === "string" &&
+        typeof ownerId === "string"
+      ) {
+        listeners.forEach((callback) => callback({ kind, conversationId, ownerId }));
+      } else if (
+        kind === "leaseReleased" &&
         typeof conversationId === "string" &&
         typeof ownerId === "string"
       ) {

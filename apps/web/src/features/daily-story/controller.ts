@@ -16,6 +16,7 @@ import {
   readStorySession,
   writeStorySession,
   claimStoryLeaseToken,
+  LEASE_RETRY_DELAY_MS,
   renewStoryLeaseToken,
   releaseStoryLeaseToken,
   SessionConflictError,
@@ -253,11 +254,37 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     let alive = true;
     let leaseActive = false;
     let renewSequence = 0;
+    let leaseRetryTimer: number | undefined;
     const owner = ownerIdRef.current;
+    const clearLeaseRetry = () => {
+      if (leaseRetryTimer === undefined) return;
+      window.clearTimeout(leaseRetryTimer);
+      leaseRetryTimer = undefined;
+    };
     const load = async (claimLease: boolean) => {
       const loadToken = coordinatorRef.current.beginLoad(claimLease);
       coordinatorRef.current.beginWrite();
       invalidateCurrent();
+      clearLeaseRetry();
+      const scheduleLeaseRetry = () => {
+        if (
+          leaseRetryTimer !== undefined ||
+          !alive ||
+          !coordinatorRef.current.isLoadCurrent(loadToken) ||
+          !coordinatorRef.current.isPageActive()
+        )
+          return;
+        leaseRetryTimer = window.setTimeout(() => {
+          leaseRetryTimer = undefined;
+          if (
+            !alive ||
+            !coordinatorRef.current.isLoadCurrent(loadToken) ||
+            !coordinatorRef.current.isPageActive()
+          )
+            return;
+          void load(true);
+        }, LEASE_RETRY_DELAY_MS);
+      };
       let loadedLeaseToken: string | null = null;
       const releaseLoadedLease = () => {
         if (!loadedLeaseToken) return;
@@ -276,6 +303,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         if (loadToken.claimLease) {
           // Claim before the session read. Otherwise an obsolete load can
           // arrive late and overwrite a newer tab/page-show claim.
+          if (!alive || !coordinatorRef.current.isLoadCurrent(loadToken)) return;
           loadedLeaseToken = await claimStoryLeaseToken(conversationId, owner, loadToken.sequence);
           if (!isLoadCurrent()) {
             releaseLoadedLease();
@@ -284,6 +312,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           leaseActive = loadedLeaseToken !== null;
           leaseClaimTokenRef.current = loadedLeaseToken;
           setCoordinatorCanEdit(leaseActive);
+          if (!leaseActive) scheduleLeaseRetry();
         }
         const session = await readStorySession(conversationId);
         if (!isLoadCurrent()) {
@@ -324,6 +353,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           session,
           settingsRevision: Math.max(settings.revision, coordinatorRef.current.settingsRevision),
         });
+        if (!leaseActive) scheduleLeaseRetry();
       } catch (error) {
         if (!isLoadCurrent()) {
           releaseLoadedLease();
@@ -344,6 +374,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       }
       coordinatorRef.current.deactivate();
       renewSequence += 1;
+      clearLeaseRetry();
       const token = leaseClaimTokenRef.current;
       leaseActive = false;
       leaseClaimTokenRef.current = null;
@@ -436,6 +467,16 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         void load(false);
         return;
       }
+      if (event.kind === "leaseReleased") {
+        if (
+          event.conversationId !== conversationId ||
+          leaseActive ||
+          !coordinatorRef.current.isPageActive()
+        )
+          return;
+        void load(true);
+        return;
+      }
       if (event.kind !== "session" || event.conversationId !== conversationId) return;
       // Metadata-only signal. Reload from IndexedDB; never trust cross-tab payloads.
       invalidateCurrent();
@@ -445,6 +486,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
       alive = false;
       coordinator.deactivate();
       renewSequence += 1;
+      clearLeaseRetry();
       transcribeInFlightRef.current = null;
       window.clearInterval(renew);
       window.removeEventListener("pagehide", onPageHide);

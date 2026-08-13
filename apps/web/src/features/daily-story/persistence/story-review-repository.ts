@@ -65,6 +65,7 @@ export async function readDailyStoryReview(
 export async function writeDailyStoryReview(
   conversationId: string,
   review: DailyReviewSidecar,
+  options: { expectedPreviousSessionInstanceId?: string } = {},
 ): Promise<DailyReviewSidecar> {
   const normalized = {
     score: review.score ?? null,
@@ -78,12 +79,41 @@ export async function writeDailyStoryReview(
     return normalized;
   }
   await reviewTransaction<void>("readwrite", (tx, abort) => {
-    try {
-      const request = tx.objectStore(REVIEW_STORE).put(sidecarRecord(conversationId, normalized));
-      request.onsuccess = () => setResult(tx, undefined);
-    } catch (error) {
-      abort(error);
-    }
+    const store = tx.objectStore(REVIEW_STORE);
+    const read = store.get(conversationId);
+    read.onsuccess = () => {
+      try {
+        const record = read.result as unknown;
+        if (record !== undefined) {
+          const current = storedReviewSidecarSchema.parse(record);
+          const sameGeneration =
+            normalized.sessionInstanceId !== undefined &&
+            current.sessionInstanceId === normalized.sessionInstanceId;
+          if (sameGeneration) {
+            if (
+              normalized.sessionRevision === undefined ||
+              (current.sessionRevision !== undefined &&
+                current.sessionRevision > normalized.sessionRevision)
+            ) {
+              setResult(tx, undefined);
+              return;
+            }
+          } else if (
+            normalized.sessionInstanceId === undefined ||
+            current.sessionInstanceId !== options.expectedPreviousSessionInstanceId
+          ) {
+            // A different session generation may replace the previous one
+            // only when the caller proves which previous generation it saw.
+            setResult(tx, undefined);
+            return;
+          }
+        }
+        const request = store.put(sidecarRecord(conversationId, normalized));
+        request.onsuccess = () => setResult(tx, undefined);
+      } catch (error) {
+        abort(error);
+      }
+    };
   });
   return normalized;
 }

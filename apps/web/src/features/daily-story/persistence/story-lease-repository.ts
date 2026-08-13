@@ -1,7 +1,9 @@
 import { CURRENT, LEASE_MS, LEASE_STORE } from "./internal/database";
-import { notifyLease } from "./storage-events";
+import { notifyLease, notifyLeaseReleased } from "./storage-events";
 import { leaseSchema } from "./internal/schemas";
 import { setResult, transaction } from "./internal/transaction";
+
+export const LEASE_RETRY_DELAY_MS = LEASE_MS + 100;
 
 export function acquireStoryLease(ownerId: string): Promise<boolean>;
 export function acquireStoryLease(conversationId: string, ownerId: string): Promise<boolean>;
@@ -100,18 +102,20 @@ export async function releaseStoryLeaseToken(
   ownerId: string,
   claimToken: string,
 ) {
-  return transaction<void>(LEASE_STORE, "readwrite", (tx) => {
+  const released = await transaction<boolean>(LEASE_STORE, "readwrite", (tx) => {
     const store = tx.objectStore(LEASE_STORE);
     const request = store.get(conversationId);
     request.onsuccess = () => {
       const record = request.result as unknown;
       const lease = record === undefined ? null : leaseSchema.parse(record);
       if (lease?.ownerId !== ownerId || lease.claimToken !== claimToken) {
-        setResult(tx, undefined);
+        setResult(tx, false);
         return;
       }
       const deletion = store.delete(conversationId);
-      deletion.onsuccess = () => setResult(tx, undefined);
+      deletion.onsuccess = () => setResult(tx, true);
     };
   });
+  if (released) notifyLeaseReleased(conversationId, ownerId);
+  return released;
 }

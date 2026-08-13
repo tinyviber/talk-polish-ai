@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   closeNextFakeIndexedDbTransaction,
+  deferNextFakeIndexedDbTransaction,
   installFakeIndexedDb,
 } from "@/lib/practice/test/fakeIndexedDb";
 import {
@@ -921,6 +922,93 @@ describe("Daily Story IndexedDB", () => {
     await expect(readStorySession("sidecar-generation-race")).resolves.toMatchObject({
       sessionInstanceId: second.sessionInstanceId,
       review: { score: 91, comment: "保留" },
+    });
+  });
+
+  test("a stale same-generation sidecar write cannot overwrite a newer revision", async () => {
+    const conversationId = "sidecar-revision-write-race";
+    const seed = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "故事",
+        messages: [{ id: "u1", role: "user", source: "typed", text: "Hello." }],
+        review: { suggestions: [] },
+      },
+      null,
+    );
+
+    const gate = deferNextFakeIndexedDbTransaction();
+    const staleWrite = writeDailyStoryReview(conversationId, {
+      score: 55,
+      comment: "旧版本",
+      rubric: null,
+      sessionRevision: seed.revision,
+      ...(seed.sessionInstanceId ? { sessionInstanceId: seed.sessionInstanceId } : {}),
+    });
+    await Promise.resolve();
+
+    await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "故事",
+        messages: [{ id: "u1", role: "user", source: "typed", text: "Hello." }],
+        review: { score: 88, comment: "新版本", rubric: null, suggestions: [] },
+      },
+      seed.revision,
+    );
+    gate.release();
+    await staleWrite;
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: seed.revision + 1,
+      review: { score: 88, comment: "新版本", rubric: null },
+    });
+  });
+
+  test("a stale old-session sidecar write cannot overwrite a reused session id", async () => {
+    const conversationId = "sidecar-session-reuse-write-race";
+    const old = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "旧故事",
+        messages: [{ id: "old", role: "user", source: "typed", text: "Old." }],
+        review: { score: 31, comment: "旧代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await deleteStorySession(conversationId, old.revision);
+
+    const gate = deferNextFakeIndexedDbTransaction();
+    const staleWrite = writeDailyStoryReview(conversationId, {
+      score: 31,
+      comment: "迟到旧代",
+      rubric: null,
+      sessionRevision: old.revision,
+      ...(old.sessionInstanceId ? { sessionInstanceId: old.sessionInstanceId } : {}),
+    });
+    await Promise.resolve();
+
+    const fresh = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "新故事",
+        messages: [{ id: "new", role: "user", source: "typed", text: "New." }],
+        review: { score: 97, comment: "新代", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    expect(fresh.sessionInstanceId).not.toBe(old.sessionInstanceId);
+    gate.release();
+    await staleWrite;
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: fresh.revision,
+      sessionInstanceId: fresh.sessionInstanceId,
+      review: { score: 97, comment: "新代", rubric: null },
     });
   });
 

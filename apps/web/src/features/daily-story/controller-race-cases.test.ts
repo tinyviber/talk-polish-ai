@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { installFakeIndexedDb } from "@/lib/practice/test/fakeIndexedDb";
+import {
+  deferNextFakeIndexedDbTransaction,
+  installFakeIndexedDb,
+} from "@/lib/practice/test/fakeIndexedDb";
 import { getLeaseProtectedMutationToken } from "./controller";
 import { DailyStoryCoordinator } from "./coordinator";
 import {
@@ -9,6 +12,7 @@ import {
   releaseStoryLeaseToken,
   writeStorySession,
 } from "./persistence";
+import { subscribeDailyStorage } from "./persistence";
 import { SessionConflictError } from "./persistence/errors";
 import { __resetDailyStorageForTests } from "./persistence/testing";
 
@@ -341,4 +345,76 @@ describe("Daily Story controller lease handoff", () => {
     await deleteStorySession(conversationId, saved.revision, "owner", tokenT2!);
     await releaseStoryLeaseToken(conversationId, "owner", tokenT2!);
   });
+
+  test("release notification lets a rejected remount claim without stale release damage", async () => {
+    const conversationId = "conversation-fast-remount-release";
+    const tokenA = await claimStoryLeaseToken(conversationId, "owner-a", 1);
+    expect(tokenA).toBeTruthy();
+
+    let editable = false;
+    let tokenB: string | null = null;
+    const acquired = new Promise<void>((resolve) => {
+      const unsubscribe = subscribeDailyStorage((event) => {
+        if (event.kind !== "leaseReleased" || event.conversationId !== conversationId) return;
+        void claimStoryLeaseToken(conversationId, "owner-b", 1).then((token) => {
+          tokenB = token;
+          editable = token !== null;
+          unsubscribe();
+          resolve();
+        });
+      });
+    });
+
+    const releaseGate = deferNextFakeIndexedDbTransaction();
+    const releaseA = releaseStoryLeaseToken(conversationId, "owner-a", tokenA!);
+    await expect(claimStoryLeaseToken(conversationId, "owner-b", 1)).resolves.toBeNull();
+
+    releaseGate.release();
+    await expect(releaseA).resolves.toBe(true);
+    await acquired;
+
+    expect(editable).toBe(true);
+    expect(tokenB).toBeTruthy();
+    // A stale continuation cannot release the new generation.
+    await expect(releaseStoryLeaseToken(conversationId, "owner-a", tokenA!)).resolves.toBe(false);
+    await expect(claimStoryLeaseToken(conversationId, "owner-c", 1)).resolves.toBeNull();
+    await releaseStoryLeaseToken(conversationId, "owner-b", tokenB!);
+  });
+
+  test("an expired live lease can be reclaimed by the next load", async () => {
+    const conversationId = "conversation-expired-remount";
+    const tokenA = await claimStoryLeaseToken(conversationId, "owner-a", 1);
+    expect(tokenA).toBeTruthy();
+    await mutateRawLeaseForRace(conversationId, {
+      ownerId: "owner-a",
+      claimToken: tokenA!,
+      claimSequence: 1,
+      expiresAt: Date.now() - 1,
+    });
+
+    const tokenB = await claimStoryLeaseToken(conversationId, "owner-b", 1);
+    expect(tokenB).toBeTruthy();
+    expect(tokenB).not.toBe(tokenA);
+    await releaseStoryLeaseToken(conversationId, "owner-b", tokenB!);
+  });
 });
+
+async function mutateRawLeaseForRace(
+  conversationId: string,
+  lease: { ownerId: string; claimToken: string; claimSequence: number; expiresAt: number },
+) {
+  const request = indexedDB.open("kotoba-loop-settings", 2);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction("storyLeases", "readwrite");
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => reject(transaction.error);
+    transaction.objectStore("storyLeases").put({ id: conversationId, ...lease });
+  });
+}

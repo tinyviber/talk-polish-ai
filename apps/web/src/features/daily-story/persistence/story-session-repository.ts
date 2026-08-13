@@ -255,12 +255,15 @@ export async function writeStorySession(
       }
     },
   );
+  const expectedPreviousSessionInstanceId =
+    result.sessionInstanceId && (await readDailyStoryReview(conversationId))?.sessionInstanceId;
   try {
     await persistReviewSidecar(
       conversationId,
       result.review ?? null,
       result.revision,
       result.sessionInstanceId,
+      expectedPreviousSessionInstanceId,
     );
   } catch {
     try {
@@ -269,6 +272,7 @@ export async function writeStorySession(
         result.review ?? null,
         result.revision,
         result.sessionInstanceId,
+        expectedPreviousSessionInstanceId,
       );
     } catch {
       notifySession(conversationId, result.revision);
@@ -387,15 +391,23 @@ async function persistReviewSidecar(
   review: DailyReview | null,
   sessionRevision: number,
   sessionInstanceId?: string,
+  expectedPreviousSessionInstanceId?: string,
 ) {
   if (review) {
-    await writeDailyStoryReview(conversationId, {
-      score: review.score,
-      comment: review.comment,
-      rubric: review.rubric,
-      sessionRevision,
-      ...(sessionInstanceId ? { sessionInstanceId } : {}),
-    });
+    const writeOptions = expectedPreviousSessionInstanceId
+      ? { expectedPreviousSessionInstanceId }
+      : undefined;
+    await writeDailyStoryReview(
+      conversationId,
+      {
+        score: review.score,
+        comment: review.comment,
+        rubric: review.rubric,
+        sessionRevision,
+        ...(sessionInstanceId ? { sessionInstanceId } : {}),
+      },
+      writeOptions,
+    );
   } else {
     if (sessionInstanceId) {
       await deleteDailyStoryReview(conversationId, sessionRevision, sessionInstanceId);

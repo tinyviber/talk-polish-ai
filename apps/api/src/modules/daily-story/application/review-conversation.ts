@@ -8,6 +8,7 @@ import { dailyStoryValidation } from "./errors";
 import { createStructuredGenerator } from "../../../capabilities/structured-generator";
 import {
   reviewResultSchema,
+  reviewLegacyScoresCandidateSchema,
   reviewRubricCandidateSchema,
   reviewSuggestionCandidateSchema,
   reviewSystemPrompt,
@@ -128,10 +129,11 @@ export function createReviewConversation(dependencies: {
             diffSegments: fallback.diffSegments,
           });
         }
-        const parsedRubric = reviewRubricCandidateSchema.safeParse(generated.value.rubric);
-        const rubric = parsedRubric.success
-          ? normalizeReviewRubric(parsedRubric.data, sourceTurns)
-          : null;
+        const rubricCandidate = normalizeReviewRubricCandidate(
+          generated.value.rubric,
+          generated.value.scores,
+        );
+        const rubric = rubricCandidate ? normalizeReviewRubric(rubricCandidate, sourceTurns) : null;
         for (const skipped of rubric?.skippedEvidence ?? []) {
           console.warn("[daily-story review evidence skipped]", {
             requestId: input.requestId,
@@ -139,7 +141,15 @@ export function createReviewConversation(dependencies: {
             reason: skipped.reason,
           });
         }
-        const score = rubric ? calculateReviewScore(rubric.rubric) : null;
+        const score = rubric
+          ? calculateReviewScore(rubric.rubric)
+          : normalizeScoreCandidate(generated.value.overall ?? generated.value.score);
+        if (!rubric && score === null) {
+          console.warn("[daily-story review score missing]", {
+            requestId: input.requestId,
+            responseKeys: Object.keys(generated.value).sort(),
+          });
+        }
         const overallFeedback =
           typeof generated.value.overallFeedback === "string" &&
           generated.value.overallFeedback.trim().length > 0 &&
@@ -166,6 +176,40 @@ export function createReviewConversation(dependencies: {
       },
     });
   };
+}
+
+function normalizeReviewRubricCandidate(rubric: unknown, legacyScores: unknown) {
+  const parsedRubric = reviewRubricCandidateSchema.safeParse(rubric);
+  if (parsedRubric.success) return parsedRubric.data;
+
+  const rubricAsLegacyScores = reviewLegacyScoresCandidateSchema.safeParse(rubric);
+  const parsedLegacyScores = rubricAsLegacyScores.success
+    ? rubricAsLegacyScores
+    : reviewLegacyScoresCandidateSchema.safeParse(legacyScores);
+  if (!parsedLegacyScores.success) return null;
+
+  return Object.fromEntries(
+    Object.entries(parsedLegacyScores.data).map(([dimension, value]) => [
+      dimension,
+      typeof value === "number"
+        ? { score: value, comment: "保留旧分项评分。", evidence: [] }
+        : {
+            score: value.score,
+            comment: value.comment ?? "保留旧分项评分。",
+            evidence: value.evidence ?? [],
+          },
+    ]),
+  ) as ReturnType<typeof reviewRubricCandidateSchema.parse>;
+}
+
+function normalizeScoreCandidate(value: unknown) {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100) {
+    return value;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return normalizeScoreCandidate((value as { score?: unknown }).score);
+  }
+  return null;
 }
 
 function required(value: ProbedTextModel | undefined) {

@@ -119,6 +119,37 @@ export const reviewRubricCandidateSchema = z
   })
   .strip();
 
+const reviewLegacyScoreValueSchema = z.union([
+  z.number().int().min(0).max(100),
+  z
+    .object({
+      score: z.number().int().min(0).max(100),
+      comment: z.string().min(1).max(300).optional(),
+      evidence: z
+        .array(
+          z
+            .object({
+              sourceTurnId: z.string().min(1).max(128),
+              quote: z.string().min(1).max(2_000),
+            })
+            .strict(),
+        )
+        .max(2)
+        .optional(),
+    })
+    .strip(),
+]);
+
+/** Compatibility candidate for the older `{ overall, scores }` response. */
+export const reviewLegacyScoresCandidateSchema = z
+  .object({
+    fluency: reviewLegacyScoreValueSchema,
+    grammar: reviewLegacyScoreValueSchema,
+    vocabulary: reviewLegacyScoreValueSchema,
+    naturalness: reviewLegacyScoreValueSchema,
+  })
+  .strip();
+
 export const reviewSuggestionCandidateSchema = z
   .object({
     sourceTurnId: z.string().min(1).max(128),
@@ -133,6 +164,11 @@ export const reviewSuggestionCandidateSchema = z
 export const reviewResultSchema = z
   .object({
     rubric: z.unknown().optional(),
+    // Keep the previous speaking-assessment score names long enough for the
+    // application layer to normalize them into the Daily Story rubric.
+    overall: z.unknown().optional(),
+    score: z.unknown().optional(),
+    scores: z.unknown().optional(),
     suggestions: z.unknown().optional(),
     overallFeedback: z.unknown().optional(),
     // Optional metadata stays opaque here. Application code grounds it only

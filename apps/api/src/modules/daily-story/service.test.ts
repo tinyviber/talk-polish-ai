@@ -600,6 +600,36 @@ describe("Daily Story policy service", () => {
     });
   });
 
+  test("normalizes the previous overall/scores response alongside the current rubric", async () => {
+    const service = serviceFor([
+      {
+        overall: 88,
+        scores: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
+        suggestions: [],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 75,
+      rubric: {
+        fluency: { score: 91 },
+        grammar: { score: 80 },
+        vocabulary: { score: 70 },
+        naturalness: { score: 60 },
+      },
+    });
+  });
+
+  test("keeps a valid overall score when the provider omits all rubric fields", async () => {
+    const service = serviceFor([{ overall: 88, suggestions: [] }]);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 88,
+      comment: "本次表达整体稳定，针对细节继续打磨会更自然。",
+      rubric: null,
+    });
+  });
+
   test("keeps the review usable when a suggestion diff is invalid", async () => {
     const service = serviceFor([
       {

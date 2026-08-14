@@ -193,13 +193,27 @@ describe("Daily Story contracts", () => {
     expect(dailyStoryReviewSuggestionSchema.safeParse(withoutCategory).success).toBe(false);
   });
 
-  test("keeps new review fields optional for rolling API compatibility", () => {
+  test("requires a score and complete rubric on successful review responses", () => {
     expect(
-      dailyStoryReviewResponseSchema.parse({
+      dailyStoryReviewResponseSchema.safeParse({
         suggestions: [],
         requestId: "legacy-review",
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryReviewResponseSchema.parse({
+        score: 70,
+        comment: "表达基本清楚。",
+        rubric: {
+          fluency: { score: 70, comment: "表达连贯。", evidence: [] },
+          grammar: { score: 70, comment: "语法稳定。", evidence: [] },
+          vocabulary: { score: 70, comment: "词汇够用。", evidence: [] },
+          naturalness: { score: 70, comment: "表达自然。", evidence: [] },
+        },
+        suggestions: [],
+        requestId: "scored-review",
       }),
-    ).toEqual({ suggestions: [], requestId: "legacy-review" });
+    ).toMatchObject({ score: 70, requestId: "scored-review" });
 
     expect(
       dailyStoryReviewRequestSchema.parse({

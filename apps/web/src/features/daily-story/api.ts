@@ -48,7 +48,8 @@ const transcriptSchema = z.object({
   normalizedTranscript: z.string().optional(),
   changes: z.array(faithfulTranscriptChangeSchema).optional(),
 });
-// New scoring fields stay optional while old API instances roll forward.
+// Successful review responses are scored; nullable values are reserved for
+// historical local snapshots, not the API wire response.
 const reviewSchema = dailyStoryReviewResponseSchema;
 const checkSchema = z.object({
   capability: z.enum(["chat", "asr", "tts"]),
@@ -256,9 +257,9 @@ export async function reviewDailyStory(input: {
   );
   return {
     review: {
-      score: result.score ?? null,
-      comment: result.comment ?? null,
-      rubric: result.rubric ?? null,
+      score: result.score,
+      comment: result.comment,
+      rubric: result.rubric,
       overallFeedback: result.overallFeedback ?? null,
       suggestions: result.suggestions.map((suggestion) => ({
         sourceTurnId: suggestion.sourceTurnId,

@@ -376,9 +376,12 @@ export type DailyStoryReviewRequest = z.infer<typeof dailyStoryReviewRequestSche
 export const dailyStoryReviewResponseSchema = z
   .object({
     suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
-    score: dailyStoryReviewSchema.shape.score.nullable().optional(),
-    comment: dailyStoryReviewSchema.shape.comment.nullable().optional(),
-    rubric: dailyStoryReviewSchema.shape.rubric.nullable().optional(),
+    // A successful review response is never scoreless. Historical local
+    // sessions may still contain nullable review snapshots, but the API wire
+    // contract requires the newly generated score and rubric.
+    score: dailyStoryReviewSchema.shape.score,
+    comment: dailyStoryReviewSchema.shape.comment,
+    rubric: dailyStoryReviewSchema.shape.rubric,
     overallFeedback: z.string().min(1).max(600).nullable().optional(),
     title: z.string().min(1).max(80).optional(),
     requestId: z.string().min(1),

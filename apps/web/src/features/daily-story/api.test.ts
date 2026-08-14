@@ -35,13 +35,27 @@ describe("Daily Story transcription audio compatibility", () => {
     vi.restoreAllMocks();
   });
 
-  test("accepts a legacy review response while leaving scoring empty", async () => {
+  test("accepts only a scored review response", async () => {
     const fetchMock = vi.mocked(authenticatedApiFetch);
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ suggestions: [], requestId: "legacy-review" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({
+          score: 70,
+          comment: "表达基本清楚。",
+          rubric: {
+            fluency: { score: 70, comment: "表达连贯。", evidence: [] },
+            grammar: { score: 70, comment: "语法稳定。", evidence: [] },
+            vocabulary: { score: 70, comment: "词汇够用。", evidence: [] },
+            naturalness: { score: 70, comment: "表达自然。", evidence: [] },
+          },
+          suggestions: [],
+          requestId: "scored-review",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
     );
     vi.stubGlobal("window", {
       location: { origin: "http://localhost" },
@@ -59,10 +73,15 @@ describe("Daily Story transcription audio compatibility", () => {
       }),
     ).resolves.toEqual({
       review: {
-        score: null,
-        comment: null,
+        score: 70,
+        comment: "表达基本清楚。",
         overallFeedback: null,
-        rubric: null,
+        rubric: {
+          fluency: { score: 70, comment: "表达连贯。", evidence: [] },
+          grammar: { score: 70, comment: "语法稳定。", evidence: [] },
+          vocabulary: { score: 70, comment: "词汇够用。", evidence: [] },
+          naturalness: { score: 70, comment: "表达自然。", evidence: [] },
+        },
         suggestions: [],
       },
     });
@@ -76,6 +95,12 @@ describe("Daily Story transcription audio compatibility", () => {
           suggestions: [],
           score: 80,
           comment: "整体稳定。",
+          rubric: {
+            fluency: { score: 80, comment: "表达连贯。", evidence: [] },
+            grammar: { score: 80, comment: "语法稳定。", evidence: [] },
+            vocabulary: { score: 80, comment: "词汇够用。", evidence: [] },
+            naturalness: { score: 80, comment: "表达自然。", evidence: [] },
+          },
           overallFeedback: "主要意思表达清楚。",
           title: "学校会议",
           requestId: "review-with-title",

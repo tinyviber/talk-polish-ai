@@ -22,6 +22,32 @@ export type ReviewSuggestionCandidate = {
   explanationZh: string;
 };
 
+export function normalizeReviewSuggestionCandidate(
+  value: unknown,
+): ReviewSuggestionCandidate | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const category = candidate.category;
+  if (
+    typeof candidate.sourceTurnId !== "string" ||
+    candidate.sourceTurnId.length === 0 ||
+    typeof candidate.improved !== "string" ||
+    candidate.improved.length === 0 ||
+    (category !== "clarity" && category !== "grammar" && category !== "naturalness") ||
+    typeof candidate.explanationZh !== "string" ||
+    candidate.explanationZh.length === 0
+  ) {
+    return null;
+  }
+  return {
+    sourceTurnId: candidate.sourceTurnId,
+    diff: candidate.diff,
+    improved: candidate.improved,
+    category,
+    explanationZh: candidate.explanationZh,
+  };
+}
+
 export type ReviewEvidenceIssue = {
   sourceTurnId: string;
   reason: "unknown_source_turn" | "quote_not_in_source";

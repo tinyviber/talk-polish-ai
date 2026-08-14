@@ -451,6 +451,13 @@ describe("Daily Story policy service", () => {
     ).toBe(true);
     expect(
       reviewResultSchema.safeParse({
+        score: 75,
+        rubric: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
+        suggestions: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      reviewResultSchema.safeParse({
         rubric: { ...rubric(), grammar: null },
         overall: 88,
         scores: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
@@ -463,14 +470,14 @@ describe("Daily Story policy service", () => {
         rubric: { ...rubric(), fluency: { ...rubric().fluency, attachment: { bad: true } } },
         suggestions: [],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       reviewResultSchema.safeParse({
         score: 70,
         rubric: rubric(),
         suggestions: [{ sourceTurnId: "u1", improved: "x", category: "grammar", extra: true }],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       reviewResultSchema.safeParse({ score: { score: 70 }, rubric: rubric(), suggestions: [] })
         .success,
@@ -501,6 +508,34 @@ describe("Daily Story policy service", () => {
 
     await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
 
+    expect(requests).toHaveLength(1);
+  });
+
+  test("keeps a valid score when an optional suggestion field has the wrong type", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [
+        {
+          score: 70,
+          rubric: rubric(),
+          suggestions: [
+            {
+              sourceTurnId: "u1",
+              improved: "The meeting was long.",
+              category: "grammar",
+              explanationZh: 42,
+            },
+          ],
+        },
+      ],
+      requests,
+    );
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 70,
+      rubric: rubric(),
+      suggestions: [],
+    });
     expect(requests).toHaveLength(1);
   });
 
@@ -668,6 +703,26 @@ describe("Daily Story policy service", () => {
       {
         overall: 88,
         scores: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
+        suggestions: [],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 75,
+      rubric: {
+        fluency: { score: 91 },
+        grammar: { score: 80 },
+        vocabulary: { score: 70 },
+        naturalness: { score: 60 },
+      },
+    });
+  });
+
+  test("normalizes numeric rubric dimensions without losing the score", async () => {
+    const service = serviceFor([
+      {
+        score: 75,
+        rubric: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
         suggestions: [],
       },
     ]);

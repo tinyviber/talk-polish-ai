@@ -37,8 +37,11 @@ export class ApiError extends Error {
   static notFound(what: string) {
     return new ApiError(404, "not_found", `${what} was not found.`);
   }
-  static processingUnavailable(message = "Speech processing is temporarily unavailable.") {
-    return new ApiError(503, "processing_unavailable", message);
+  static processingUnavailable(
+    message = "Speech processing is temporarily unavailable.",
+    details?: string[],
+  ) {
+    return new ApiError(503, "processing_unavailable", message, details);
   }
   static storage(message = "Could not store the recording.") {
     return new ApiError(503, "storage_failure", message);
@@ -52,9 +55,51 @@ export class ApiError extends Error {
     return new ApiError(429, "rate_limited", message);
   }
 
-  static internal(message = "Something went wrong while processing the request.") {
-    return new ApiError(500, "internal_error", message);
+  static internal(
+    message = "Something went wrong while processing the request.",
+    details?: string[],
+  ) {
+    return new ApiError(500, "internal_error", message, details);
   }
+}
+
+const SAFE_ERROR_DETAIL_MAX_CHARS = 160;
+
+/** Convert unknown exceptions to short, user-presentable diagnostics. */
+export function safeErrorDetail(error: unknown) {
+  const raw = rawErrorText(error);
+  if (!raw) return "An unknown exception was raised.";
+  if (
+    /prompt|messages?|<story_|<history_|<learner_user_turns_|api[ _-]?key|authorization|bearer|token|secret|password/i.test(
+      raw,
+    )
+  ) {
+    return "Error details were redacted for safety.";
+  }
+  const compact = raw.replace(/\s+/g, " ").trim();
+  const redacted = compact.replace(
+    /((?:api[ _-]?key|authorization|bearer|token|secret|password)\s*[:=]\s*)[^,;\s]+/gi,
+    "$1[REDACTED]",
+  );
+  return redacted.length > SAFE_ERROR_DETAIL_MAX_CHARS
+    ? `${redacted.slice(0, SAFE_ERROR_DETAIL_MAX_CHARS)}…`
+    : redacted;
+}
+
+function rawErrorText(error: unknown) {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  if (typeof error === "string") return error;
+  if (error === null || error === undefined) return String(error);
+  if (typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
 }
 
 export function toErrorResponse(error: ApiError, requestId: string): ErrorResponse {

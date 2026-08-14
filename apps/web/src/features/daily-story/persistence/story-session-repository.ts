@@ -2,6 +2,7 @@ import { CURRENT, LEASE_STORE, SESSION_STORE, database } from "./internal/databa
 import { notifySession } from "./storage-events";
 import { SessionConflictError, StorySidecarPersistenceError } from "./errors";
 import { createId } from "../types";
+import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import { fromStoredSession, mergeReview, sessionRecord } from "./internal/codecs";
 import { leaseSchema, sessionSchema, type StoredSession } from "./internal/schemas";
 import { setResult, transaction } from "./internal/transaction";
@@ -115,6 +116,7 @@ export async function listStorySessions(): Promise<StorySessionSummary[]> {
         updatedAt: parsed.updatedAt,
         phase: parsed.phase,
         storyZh: parsed.storyZh,
+        title: session.title ?? deriveStableDailyStoryTitle(session.storyZh),
         review: session.review ? (mergeReview(session, review).review ?? null) : null,
       } satisfies StorySessionSummary;
     }),
@@ -222,6 +224,7 @@ export async function writeStorySession(
                       : {
                           score: null,
                           comment: null,
+                          overallFeedback: null,
                           rubric: null,
                           suggestions: snapshotReview.suggestions,
                         },
@@ -410,6 +413,9 @@ async function persistReviewSidecar(
       {
         score: review.score,
         comment: review.comment,
+        ...(review.overallFeedback !== undefined
+          ? { overallFeedback: review.overallFeedback }
+          : {}),
         rubric: review.rubric,
         sessionRevision,
         ...(sessionInstanceId ? { sessionInstanceId } : {}),

@@ -45,6 +45,8 @@ export type DailyMessage = {
   role: "assistant" | "user";
   text: string;
   source?: TurnSource;
+  /** Local ASR evidence only; API serializers must strip it. */
+  rawText?: string;
 };
 
 export type ReviewSuggestion = {
@@ -63,6 +65,7 @@ export type ReviewRubric = DailyStoryReviewRubric;
 export type DailyReview = {
   score: number | null;
   comment: string | null;
+  overallFeedback?: string | null;
   rubric: ReviewRubric | null;
   suggestions: ReviewSuggestion[];
 };
@@ -75,8 +78,9 @@ export type StorySession = {
   updatedAt: string;
   phase: "chatting" | "transcriptReady" | "review";
   storyZh: string;
+  title?: string;
   messages: DailyMessage[];
-  pendingAsrTranscript?: { id: string; text: string };
+  pendingAsrTranscript?: { id: string; text: string; rawText?: string };
   review?: DailyReview;
 };
 
@@ -91,7 +95,7 @@ export type StorySessionSnapshot = Omit<
 
 export type StorySessionSummary = Pick<
   StorySession,
-  "revision" | "updatedAt" | "phase" | "storyZh"
+  "revision" | "updatedAt" | "phase" | "storyZh" | "title"
 > & { id: string; review: DailyReview | null };
 
 export type ConnectionState = "idle" | "checking" | "connected" | "failed";

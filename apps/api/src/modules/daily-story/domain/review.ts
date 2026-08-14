@@ -9,6 +9,7 @@ import {
 } from "@kotoba/contracts";
 
 export const DAILY_STORY_REVIEW_HISTORY_CHARS = 12_000;
+export const DAILY_STORY_REVIEW_CONVERSATION_CHARS = 12_000;
 export const DAILY_STORY_REVIEW_MAX_SUGGESTIONS = 2;
 
 type ReviewUserTurn = Extract<DailyStoryHistoryMessage, { role: "user" }>;
@@ -66,6 +67,24 @@ export function selectReviewHistory(history: DailyStoryHistoryMessage[]) {
     if (chars >= DAILY_STORY_REVIEW_HISTORY_CHARS) break;
   }
   return selected;
+}
+
+/** Bounded role-aware context for overview only. */
+export function selectReviewConversation(history: DailyStoryHistoryMessage[]) {
+  const selected: DailyStoryHistoryMessage[] = [];
+  let chars = 0;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index]!;
+    if (chars > 0 && chars + message.text.length > DAILY_STORY_REVIEW_CONVERSATION_CHARS) continue;
+    selected.unshift(message);
+    chars += message.text.length;
+    if (chars >= DAILY_STORY_REVIEW_CONVERSATION_CHARS) break;
+  }
+  return selected.map((message) =>
+    message.role === "user"
+      ? { id: message.id, role: "user" as const, source: message.source, text: message.text }
+      : { id: message.id, role: "assistant" as const, text: message.text },
+  );
 }
 
 export function normalizeReviewEvidence(

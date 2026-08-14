@@ -5,6 +5,7 @@ import {
   normalizeProviderBaseUrl,
   type ProviderPresetId,
 } from "./provider-presets";
+import { faithfulTranscriptChangeSchema } from "./faithful-transcript";
 
 /**
  * Isolated Daily Story wire contract. Provider credentials are intentionally
@@ -16,6 +17,8 @@ export const DAILY_STORY_LIMITS = {
   assistantChars: 900,
   historyMessages: 40,
   historyChars: 18_000,
+  normalizationHistoryMessages: 8,
+  normalizationHistoryChars: 6_000,
   providerUrlChars: 2_048,
   providerKeyChars: 4_096,
   modelChars: 256,
@@ -182,6 +185,17 @@ export const dailyStoryHistorySchema = z
     }
   });
 
+export const dailyStoryNormalizationHistorySchema = z
+  .array(dailyStoryHistoryMessageSchema)
+  .max(DAILY_STORY_LIMITS.normalizationHistoryMessages)
+  .superRefine((messages, ctx) => {
+    const chars = messages.reduce((sum, message) => sum + message.text.length, 0);
+    if (chars > DAILY_STORY_LIMITS.normalizationHistoryChars) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Normalization history is too long." });
+    }
+  });
+export type DailyStoryNormalizationHistory = z.infer<typeof dailyStoryNormalizationHistorySchema>;
+
 export const dailyStoryStartRequestSchema = z
   .object({
     storyZh: boundedText(DAILY_STORY_LIMITS.storyZhChars),
@@ -191,17 +205,36 @@ export const dailyStoryStartRequestSchema = z
 export type DailyStoryStartRequest = z.infer<typeof dailyStoryStartRequestSchema>;
 
 export const dailyStoryStartResponseSchema = z
-  .object({ opening: dailyStoryAssistantTurnSchema, requestId: z.string().min(1) })
+  .object({
+    opening: dailyStoryAssistantTurnSchema,
+    title: z.string().min(1).max(80).optional(),
+    requestId: z.string().min(1),
+  })
   .strict();
 export type DailyStoryStartResponse = z.infer<typeof dailyStoryStartResponseSchema>;
 
 export const dailyStoryTranscribeResponseSchema = z
   .object({
     transcript: z.string().max(DAILY_STORY_LIMITS.turnChars),
+    rawTranscript: z.string().max(DAILY_STORY_LIMITS.turnChars).optional(),
+    normalizedTranscript: z.string().max(DAILY_STORY_LIMITS.turnChars).optional(),
+    changes: z.array(faithfulTranscriptChangeSchema).max(24).optional(),
     requestId: z.string().min(1),
   })
   .strict();
 export type DailyStoryTranscribeResponse = z.infer<typeof dailyStoryTranscribeResponseSchema>;
+
+export const dailyStoryTranscriptNormalizationRequestSchema = z
+  .object({
+    rawTranscript: boundedText(DAILY_STORY_LIMITS.turnChars),
+    storyZh: boundedText(DAILY_STORY_LIMITS.storyZhChars).optional(),
+    recentHistory: dailyStoryNormalizationHistorySchema.optional(),
+    chat: dailyStoryChatConfigSchema.optional(),
+  })
+  .strict();
+export type DailyStoryTranscriptNormalizationRequest = z.infer<
+  typeof dailyStoryTranscriptNormalizationRequestSchema
+>;
 
 export const dailyStoryUnderstandingSchema = z.enum(["understood", "clarify", "retry"]);
 export type DailyStoryUnderstanding = z.infer<typeof dailyStoryUnderstandingSchema>;
@@ -312,6 +345,7 @@ export const dailyStoryReviewSchema = z
   .object({
     score: z.number().int().min(0).max(100),
     comment: boundedText(300),
+    overallFeedback: z.string().min(1).max(600).nullable().optional(),
     rubric: dailyStoryReviewRubricSchema,
     suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
   })
@@ -339,9 +373,10 @@ export type DailyStoryReviewRequest = z.infer<typeof dailyStoryReviewRequestSche
 export const dailyStoryReviewResponseSchema = z
   .object({
     suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
-    score: dailyStoryReviewSchema.shape.score.optional(),
-    comment: dailyStoryReviewSchema.shape.comment.optional(),
-    rubric: dailyStoryReviewSchema.shape.rubric.optional(),
+    score: dailyStoryReviewSchema.shape.score.nullable().optional(),
+    comment: dailyStoryReviewSchema.shape.comment.nullable().optional(),
+    rubric: dailyStoryReviewSchema.shape.rubric.nullable().optional(),
+    overallFeedback: z.string().min(1).max(600).nullable().optional(),
     requestId: z.string().min(1),
   })
   .strict();

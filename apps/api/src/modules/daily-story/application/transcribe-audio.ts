@@ -1,5 +1,10 @@
 import { DailyStoryProviderNotConfiguredError } from "./ports";
-import type { DailyStoryAsrConfig } from "@kotoba/contracts";
+import { createFaithfulTranscriptNormalizer } from "./normalize-transcript";
+import type {
+  DailyStoryAsrConfig,
+  DailyStoryChatConfig,
+  DailyStoryNormalizationHistory,
+} from "@kotoba/contracts";
 import type {
   DailyStoryGuard,
   DailyStoryProviderFactory,
@@ -13,6 +18,7 @@ export function createTranscribeAudio(deps: {
   guard: DailyStoryGuard;
   safeProviderCall: SafeProviderCall;
 }) {
+  const normalize = createFaithfulTranscriptNormalizer(deps);
   return (input: {
     learnerId: string;
     ip?: string;
@@ -20,6 +26,9 @@ export function createTranscribeAudio(deps: {
     asr: DailyStoryAsrConfig;
     audio: Uint8Array;
     mimeType: string;
+    chat?: DailyStoryChatConfig;
+    storyZh?: string;
+    recentHistory?: DailyStoryNormalizationHistory;
   }) =>
     deps.guard({
       learnerId: input.learnerId,
@@ -39,7 +48,13 @@ export function createTranscribeAudio(deps: {
             requestId: input.requestId,
           });
         }, input.requestId);
-        return { transcript: transcript.text };
+        return normalize({
+          rawTranscript: transcript.text,
+          requestId: input.requestId,
+          ...(input.chat ? { chat: input.chat } : {}),
+          ...(input.storyZh ? { storyZh: input.storyZh } : {}),
+          ...(input.recentHistory ? { recentHistory: input.recentHistory } : {}),
+        });
       },
     });
 }

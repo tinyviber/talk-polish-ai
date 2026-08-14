@@ -640,6 +640,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         type: "startSuccess",
         operationId,
         settingsRevision: settings.revision,
+        ...(result.title ? { title: result.title } : {}),
         opening: { id: result.opening.id, role: "assistant", text: result.opening.text },
       });
     } catch (error) {
@@ -798,10 +799,14 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           const result = await transcribeDailyStory({
             audio,
             asr: settings.asr,
+            ...(settings.chat ? { chat: settings.chat } : {}),
+            storyZh: stateRef.current.storyZh,
+            history: stateRef.current.messages,
             directAsr: settings.local?.asrDirect ?? false,
             signal: controller.signal,
           });
-          const text = result.transcript;
+          const text = result.normalizedTranscript ?? result.transcript;
+          const rawTranscript = result.rawTranscript ?? result.transcript;
           if (!text.trim()) throw new Error("没有识别到语音。请重录后再试。");
           if (!operationToken || !isOperationCurrent(operationToken)) {
             await rollbackUploadingAudio(uploadingAttempt);
@@ -835,9 +840,15 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
             operationId,
             settingsRevision: settings.revision,
             readAloud,
-            transcript: { id: transcriptId, source: "asr", text },
+            transcript: { id: transcriptId, source: "asr", text, rawText: rawTranscript },
           });
-          return { succeeded: true, clientAttemptId, transcript: text, transcriptId };
+          return {
+            succeeded: true,
+            clientAttemptId,
+            transcript: text,
+            transcriptId,
+            ...(rawTranscript !== text ? { rawTranscript } : {}),
+          };
         } catch (error) {
           if (
             isDailyStoryAbortError(error) ||
@@ -939,7 +950,13 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         setStorageError(`文字输入最多 ${DAILY_STORY_TURN_MAX} 个字符。请缩短后再发送。`);
         return false;
       }
-      const turn = { id: stateRef.current.pendingTranscript?.id ?? createId(source), source, text };
+      const pending = stateRef.current.pendingTranscript;
+      const turn = {
+        id: pending?.id ?? createId(source),
+        source,
+        text,
+        ...(source === "asr" && pending?.rawText ? { rawText: pending.rawText } : {}),
+      };
       let operationId: string | undefined;
       let operationSettingsRevision: number | undefined;
       let operationToken: OperationToken | undefined;

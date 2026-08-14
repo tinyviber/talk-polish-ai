@@ -439,6 +439,12 @@ export function DailyStoryPage({
           <ConversationMissing onNewConversation={startNewConversation} />
         ) : (
           <>
+            {phase !== "compose" && phase !== "loading" && story.state.title ? (
+              <section className="mx-auto mb-6 max-w-2xl">
+                <p className="text-sm font-semibold text-primary">Daily Story</p>
+                <h1 className="mt-1 font-display text-3xl">{story.state.title}</h1>
+              </section>
+            ) : null}
             {phase === "loading" ? <Loading /> : null}
             {phase === "compose" ? (
               <section className="mx-auto max-w-2xl">

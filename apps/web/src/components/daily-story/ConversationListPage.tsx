@@ -189,7 +189,12 @@ export function ConversationListPage() {
                       <MessageCircle className="size-5" aria-hidden />
                     </span>
                     <div className="min-w-0 flex-1">
-                      <p className="line-clamp-2 font-medium leading-7">{session.storyZh}</p>
+                      <p className="line-clamp-2 font-medium leading-7">
+                        {session.title ?? session.storyZh}
+                      </p>
+                      <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">
+                        {session.storyZh}
+                      </p>
                       <p className="mt-2 text-xs text-muted-foreground">
                         {sessionLabel(session)} · {updatedLabel(session.updatedAt)}
                       </p>

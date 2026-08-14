@@ -3,6 +3,7 @@ import {
   dailyStoryAsrConfigSchema,
   dailyStoryChatConfigSchema,
   dailyStoryTtsConfigSchema,
+  deriveStableDailyStoryTitle,
   identifyProviderPreset,
   normalizeProviderBaseUrl,
 } from "@kotoba/contracts";
@@ -32,6 +33,7 @@ import {
 } from "./schemas";
 
 export type DailyReviewSidecar = Pick<DailyReview, "score" | "comment" | "rubric"> & {
+  overallFeedback?: string | null;
   sessionRevision?: number;
   sessionInstanceId?: string;
 };
@@ -91,18 +93,31 @@ export function fromStoredSession(value: StoredSession): StorySession {
     updatedAt: value.updatedAt,
     phase: value.phase,
     storyZh: value.storyZh,
+    title: value.title ?? deriveStableDailyStoryTitle(value.storyZh),
     messages: value.messages.map((item) => ({
       id: item.id,
       role: item.role,
       text: item.text,
       ...(item.source ? { source: item.source } : {}),
+      ...(item.rawText ? { rawText: item.rawText } : {}),
     })),
-    ...(value.pendingAsrTranscript ? { pendingAsrTranscript: value.pendingAsrTranscript } : {}),
+    ...(value.pendingAsrTranscript
+      ? {
+          pendingAsrTranscript: {
+            id: value.pendingAsrTranscript.id,
+            text: value.pendingAsrTranscript.text,
+            ...(value.pendingAsrTranscript.rawText
+              ? { rawText: value.pendingAsrTranscript.rawText }
+              : {}),
+          },
+        }
+      : {}),
     ...(value.review
       ? {
           review: {
             score: null,
             comment: null,
+            overallFeedback: null,
             rubric: null,
             suggestions: value.review.suggestions.map((suggestion) => ({
               sourceTurnId: suggestion.sourceTurnId,
@@ -122,7 +137,24 @@ export function sidecarRecord(
   conversationId: string,
   review: DailyReviewSidecar,
 ): StoredReviewSidecar {
-  return storedReviewSidecarSchema.parse({ conversationId, ...review });
+  const parsed = storedReviewSidecarSchema.parse({
+    conversationId,
+    score: review.score,
+    comment: review.comment,
+    rubric: review.rubric,
+    ...(review.overallFeedback !== undefined ? { overallFeedback: review.overallFeedback } : {}),
+    ...(review.sessionRevision !== undefined ? { sessionRevision: review.sessionRevision } : {}),
+    ...(review.sessionInstanceId ? { sessionInstanceId: review.sessionInstanceId } : {}),
+  });
+  return {
+    conversationId: parsed.conversationId,
+    score: parsed.score,
+    comment: parsed.comment,
+    rubric: parsed.rubric,
+    ...(parsed.overallFeedback !== undefined ? { overallFeedback: parsed.overallFeedback } : {}),
+    ...(parsed.sessionRevision !== undefined ? { sessionRevision: parsed.sessionRevision } : {}),
+    ...(parsed.sessionInstanceId ? { sessionInstanceId: parsed.sessionInstanceId } : {}),
+  };
 }
 
 export function mergeReview(
@@ -135,6 +167,7 @@ export function mergeReview(
     review: {
       score: sidecar?.score ?? null,
       comment: sidecar?.comment ?? null,
+      overallFeedback: sidecar?.overallFeedback ?? null,
       rubric: sidecar?.rubric ?? null,
       suggestions: session.review.suggestions,
     },
@@ -190,7 +223,9 @@ export function exportSessionRecord(
       role: message.role,
       text: message.text,
       ...(message.source ? { source: message.source } : {}),
+      ...(message.rawText ? { rawText: message.rawText } : {}),
     })),
+    ...(parsed.title ? { title: parsed.title } : {}),
     ...(parsed.pendingAsrTranscript ? { pendingAsrTranscript: parsed.pendingAsrTranscript } : {}),
     ...(parsed.review
       ? {
@@ -198,6 +233,9 @@ export function exportSessionRecord(
             ...parsed.review,
             score: reviewSidecar?.score ?? null,
             comment: reviewSidecar?.comment ?? null,
+            ...(reviewSidecar?.overallFeedback
+              ? { overallFeedback: reviewSidecar.overallFeedback }
+              : {}),
             rubric: reviewSidecar?.rubric ?? null,
           },
         }
@@ -215,6 +253,7 @@ export function importedSessionRecord(session: StoryExportSession): StoredSessio
     updatedAt: session.updatedAt,
     phase: session.phase,
     storyZh: session.storyZh,
+    ...(session.title ? { title: session.title } : {}),
     messages: session.messages,
     ...(session.pendingAsrTranscript ? { pendingAsrTranscript: session.pendingAsrTranscript } : {}),
     ...(session.review ? { review: { suggestions: session.review.suggestions } } : {}),
@@ -229,6 +268,7 @@ export function importedReviewSidecar(
   return {
     score: session.review.score ?? null,
     comment: session.review.comment ?? null,
+    overallFeedback: session.review.overallFeedback ?? null,
     rubric: session.review.rubric ?? null,
     sessionRevision: 1,
     ...(sessionInstanceId ? { sessionInstanceId } : {}),

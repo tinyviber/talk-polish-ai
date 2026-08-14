@@ -51,6 +51,7 @@ export const messageSchema = z
     role: z.enum(["assistant", "user"]),
     text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
     source: z.enum(["asr", "typed"]).optional(),
+    rawText: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars).optional(),
   })
   .strict();
 
@@ -63,11 +64,13 @@ export const sessionSchema = z
     updatedAt: z.string().datetime(),
     phase: z.enum(["chatting", "transcriptReady", "review"]),
     storyZh: z.string().min(1).max(4_000),
+    title: z.string().min(1).max(80).optional(),
     messages: z.array(messageSchema).max(DAILY_STORY_LIMITS.historyMessages),
     pendingAsrTranscript: z
       .object({
         id: z.string().min(1).max(128),
         text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+        rawText: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars).optional(),
       })
       .strict()
       .optional(),
@@ -123,6 +126,7 @@ const storyExportMessageSchema = z
     role: z.enum(["assistant", "user"]),
     text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
     source: z.enum(["asr", "typed"]).optional(),
+    rawText: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars).optional(),
   })
   .strict();
 
@@ -150,6 +154,7 @@ const storyExportReviewV2Schema = storyExportReviewSchema
     score: z.number().int().min(0).max(100).nullable().optional(),
     comment: z.string().min(1).max(300).nullable().optional(),
     rubric: dailyStoryReviewRubricSchema.nullable().optional(),
+    overallFeedback: z.string().min(1).max(600).nullable().optional(),
   })
   .strict();
 
@@ -161,11 +166,13 @@ export const storyExportSessionSchema = z
     updatedAt: z.string().datetime(),
     phase: z.enum(["chatting", "transcriptReady", "review"]),
     storyZh: z.string().min(1).max(4_000),
+    title: z.string().min(1).max(80).optional(),
     messages: z.array(storyExportMessageSchema).max(DAILY_STORY_LIMITS.historyMessages),
     pendingAsrTranscript: z
       .object({
         id: safeTransferId(128),
         text: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars),
+        rawText: z.string().min(1).max(DAILY_STORY_LIMITS.turnChars).optional(),
       })
       .strict()
       .optional(),
@@ -257,6 +264,7 @@ export const storedReviewSidecarSchema = z
     score: z.number().int().min(0).max(100).nullable(),
     comment: z.string().min(1).max(300).nullable(),
     rubric: dailyStoryReviewRubricSchema.nullable(),
+    overallFeedback: z.string().min(1).max(600).nullable().optional(),
     sessionRevision: z.number().int().positive().optional(),
     sessionInstanceId: z.string().min(1).max(160).optional(),
   })
@@ -271,6 +279,7 @@ export type StoredReviewSidecar = {
   score: number | null;
   comment: string | null;
   rubric: ReviewRubric | null;
+  overallFeedback?: string | null;
   sessionRevision?: number | undefined;
   sessionInstanceId?: string | undefined;
 };

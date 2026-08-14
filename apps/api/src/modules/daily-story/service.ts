@@ -3,6 +3,7 @@ import { createReplyToTurn } from "./application/reply-to-turn";
 import { createStartConversation } from "./application/start-conversation";
 import { createSynthesizeSpeech } from "./application/synthesize-speech";
 import { createTranscribeAudio } from "./application/transcribe-audio";
+import { createNormalizeTranscript } from "./application/normalize-transcript";
 import {
   createReviewConversation,
   reviewConversationPolicy,
@@ -38,6 +39,7 @@ export function createDailyStoryService(dependencies: DailyStoryApplicationDepen
   return {
     start: createStartConversation(common),
     transcribe: createTranscribeAudio(common),
+    normalizeTranscript: createNormalizeTranscript(common),
     reply: createReplyToTurn(common),
     review: createReviewConversation({
       ...common,

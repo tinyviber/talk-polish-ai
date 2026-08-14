@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { DailyStoryChatConfig } from "@kotoba/contracts";
+import {
+  acceptGroundedDailyStoryTitle,
+  deriveStableDailyStoryTitle,
+  type DailyStoryChatConfig,
+} from "@kotoba/contracts";
 import { createStructuredGenerator } from "../../../capabilities/structured-generator";
 import {
   conversationSystemPrompt,
@@ -48,8 +52,15 @@ export function createStartConversation(deps: {
             maxTokens: DAILY_STORY_OPENING_MAX_TOKENS,
           });
         }, input.requestId);
+        const title =
+          acceptGroundedDailyStoryTitle(
+            input.storyZh,
+            generated.value.title,
+            generated.value.titleBasis,
+          ) ?? deriveStableDailyStoryTitle(input.storyZh);
         return {
           opening: { id: randomUUID(), role: "assistant" as const, text: generated.value.reply },
+          title,
         };
       },
     });

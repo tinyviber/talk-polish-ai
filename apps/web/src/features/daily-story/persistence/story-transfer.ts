@@ -178,7 +178,10 @@ export async function importStorySessions(jsonText: string): Promise<{
     const sidecar = importedSidecars[index];
     if (
       sidecar &&
-      (sidecar.score !== null || sidecar.comment !== null || sidecar.rubric !== null)
+      (sidecar.score !== null ||
+        sidecar.comment !== null ||
+        sidecar.overallFeedback !== null ||
+        sidecar.rubric !== null)
     ) {
       await writeDailyStoryReview(id, sidecar);
     } else {

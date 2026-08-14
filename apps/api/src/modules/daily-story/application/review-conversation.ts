@@ -1,13 +1,20 @@
 import type { DailyStoryChatConfig, DailyStoryHistoryMessage } from "@kotoba/contracts";
 import { dailyStoryValidation } from "./errors";
 import { createStructuredGenerator } from "../../../capabilities/structured-generator";
-import { reviewResultSchema, reviewSystemPrompt, reviewUserPrompt } from "../policy";
+import {
+  reviewResultSchema,
+  reviewRubricCandidateSchema,
+  reviewSuggestionCandidateSchema,
+  reviewSystemPrompt,
+  reviewUserPrompt,
+} from "../policy";
 import {
   calculateReviewScore,
   dailyStoryReviewComment,
   normalizeReviewRubric,
   normalizeReviewSuggestions,
   selectReviewHistory,
+  selectReviewConversation,
   selectReviewSourceTurns,
 } from "../domain/review";
 import { DailyStoryProviderNotConfiguredError } from "./ports";
@@ -71,7 +78,8 @@ export function createReviewConversation(dependencies: {
         if (sourceTurns.size === 0) {
           throw dailyStoryValidation("Conversation needs a user turn before review.");
         }
-        const reviewHistory = selectReviewHistory(input.history);
+        const scoringHistory = selectReviewHistory(input.history);
+        const conversation = selectReviewConversation(input.history);
         const generated = await dependencies.safeProviderCall(() => {
           const chat = required(dependencies.providerFactory({ chat: input.chat }).chat);
           return createStructuredGenerator(chat).generate({
@@ -83,7 +91,8 @@ export function createReviewConversation(dependencies: {
                 role: "user",
                 content: dependencies.policy.userPrompt({
                   storyZh: input.storyZh,
-                  history: reviewHistory,
+                  conversation,
+                  scoringHistory,
                 }),
               },
             ],
@@ -91,7 +100,13 @@ export function createReviewConversation(dependencies: {
             maxTokens: dependencies.policy.maxTokens,
           });
         }, input.requestId);
-        const suggestions = normalizeReviewSuggestions(generated.value.suggestions, sourceTurns);
+        const suggestionCandidates = Array.isArray(generated.value.suggestions)
+          ? generated.value.suggestions.flatMap((candidate) => {
+              const parsed = reviewSuggestionCandidateSchema.safeParse(candidate);
+              return parsed.success ? [parsed.data] : [];
+            })
+          : [];
+        const suggestions = normalizeReviewSuggestions(suggestionCandidates, sourceTurns);
         for (const skipped of suggestions.skippedSuggestions) {
           console.warn("[daily-story review suggestion skipped]", {
             requestId: input.requestId,
@@ -106,19 +121,29 @@ export function createReviewConversation(dependencies: {
             diffSegments: fallback.diffSegments,
           });
         }
-        const rubric = normalizeReviewRubric(generated.value.rubric, sourceTurns);
-        for (const skipped of rubric.skippedEvidence) {
+        const parsedRubric = reviewRubricCandidateSchema.safeParse(generated.value.rubric);
+        const rubric = parsedRubric.success
+          ? normalizeReviewRubric(parsedRubric.data, sourceTurns)
+          : null;
+        for (const skipped of rubric?.skippedEvidence ?? []) {
           console.warn("[daily-story review evidence skipped]", {
             requestId: input.requestId,
             dimension: skipped.dimension,
             reason: skipped.reason,
           });
         }
-        const score = calculateReviewScore(rubric.rubric);
+        const score = rubric ? calculateReviewScore(rubric.rubric) : null;
+        const overallFeedback =
+          typeof generated.value.overallFeedback === "string" &&
+          generated.value.overallFeedback.trim().length > 0 &&
+          generated.value.overallFeedback.length <= 600
+            ? generated.value.overallFeedback.trim()
+            : null;
         return {
           score,
-          comment: dailyStoryReviewComment(score),
-          rubric: rubric.rubric,
+          comment: score === null ? null : dailyStoryReviewComment(score),
+          overallFeedback,
+          rubric: rubric?.rubric ?? null,
           suggestions: suggestions.suggestions,
         };
       },

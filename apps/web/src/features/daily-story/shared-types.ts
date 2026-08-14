@@ -21,6 +21,7 @@ export type DailyStoryTranscribeResult =
       clientAttemptId: string;
       transcript: string;
       transcriptId: string;
+      rawTranscript?: string;
     }
   | {
       succeeded: false;

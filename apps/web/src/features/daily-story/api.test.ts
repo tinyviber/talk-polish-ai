@@ -57,7 +57,13 @@ describe("Daily Story transcription audio compatibility", () => {
         history: [{ id: "u1", role: "user", source: "typed", text: "I was busy." }],
         chat: { baseUrl: "https://api.example.com", apiKey: "test-key", model: "fixture" },
       }),
-    ).resolves.toEqual({ score: null, comment: null, rubric: null, suggestions: [] });
+    ).resolves.toEqual({
+      score: null,
+      comment: null,
+      overallFeedback: null,
+      rubric: null,
+      suggestions: [],
+    });
   });
 
   test("keeps mp4 for an ordinary provider when no WAV conversion capability exists", async () => {

@@ -10,6 +10,7 @@ import {
   dailyStoryReviewResponseSchema,
   dailyStoryStartRequestSchema,
   dailyStoryStartResponseSchema,
+  dailyStoryTranscriptNormalizationRequestSchema,
   dailyStoryTranscribeResponseSchema,
   dailyStoryTtsRequestSchema,
   errorResponseSchema,
@@ -86,6 +87,39 @@ export async function dailyStoryRoutes(
           asr: multipart.asr,
           audio: multipart.audio,
           mimeType: multipart.mimeType,
+          ...(multipart.chat ? { chat: multipart.chat } : {}),
+          ...(multipart.storyZh ? { storyZh: multipart.storyZh } : {}),
+          ...(multipart.recentHistory ? { recentHistory: multipart.recentHistory } : {}),
+        }),
+      );
+      return { ...result, requestId: request.id };
+    },
+  );
+
+  app.post(
+    "/api/daily-story/normalize-transcript",
+    {
+      schema: {
+        tags: ["daily-story"],
+        summary: "Faithfully format one ASR transcript",
+        body: dailyStoryTranscriptNormalizationRequestSchema,
+        response: {
+          200: dailyStoryTranscribeResponseSchema,
+          401: errorResponseSchema,
+          422: errorResponseSchema,
+          429: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => {
+      const learner = await requireLearnerAuth(request);
+      const body = dailyStoryTranscriptNormalizationRequestSchema.parse(request.body);
+      const result = await runDailyStory(() =>
+        service.normalizeTranscript({
+          ...body,
+          learnerId: learner.id,
+          ip: request.ip,
+          requestId: request.id,
         }),
       );
       return { ...result, requestId: request.id };
@@ -247,6 +281,9 @@ async function readDailyStoryMultipart(request: FastifyRequest) {
   let audio: Uint8Array | undefined;
   let mimeType: string | undefined;
   let asrRaw: string | undefined;
+  let chatRaw: string | undefined;
+  let storyZh: string | undefined;
+  let recentHistoryRaw: string | undefined;
   try {
     for await (const part of request.parts()) {
       if (part.type === "file") {
@@ -264,10 +301,19 @@ async function readDailyStoryMultipart(request: FastifyRequest) {
         audio = new Uint8Array(buffer);
         mimeType = normalizedMime;
       } else {
-        if (part.fieldname !== "asr" || asrRaw !== undefined) {
+        if (
+          !["asr", "chat", "storyZh", "recentHistory"].includes(part.fieldname) ||
+          (part.fieldname === "asr" && asrRaw !== undefined) ||
+          (part.fieldname === "chat" && chatRaw !== undefined) ||
+          (part.fieldname === "storyZh" && storyZh !== undefined) ||
+          (part.fieldname === "recentHistory" && recentHistoryRaw !== undefined)
+        ) {
           throw ApiError.badRequest("Daily Story multipart fields are invalid.");
         }
-        asrRaw = String(part.value);
+        if (part.fieldname === "asr") asrRaw = String(part.value);
+        if (part.fieldname === "chat") chatRaw = String(part.value);
+        if (part.fieldname === "storyZh") storyZh = String(part.value);
+        if (part.fieldname === "recentHistory") recentHistoryRaw = String(part.value);
       }
     }
   } catch (error) {
@@ -285,7 +331,35 @@ async function readDailyStoryMultipart(request: FastifyRequest) {
   }
   const parsedAsr = dailyStoryAsrConfigSchema.safeParse(asrJson);
   if (!parsedAsr.success) throw ApiError.validation("Daily Story ASR settings are invalid.");
-  return { audio, mimeType, asr: parsedAsr.data };
+  const parseOptionalJson = (value: string | undefined, message: string) => {
+    if (value === undefined) return undefined;
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      throw ApiError.validation(message);
+    }
+  };
+  const chat = parseOptionalJson(chatRaw, "Daily Story Chat settings are invalid.");
+  const recentHistory = parseOptionalJson(
+    recentHistoryRaw,
+    "Daily Story conversation context is invalid.",
+  );
+  const context = dailyStoryTranscriptNormalizationRequestSchema.safeParse({
+    rawTranscript: "placeholder",
+    ...(storyZh !== undefined ? { storyZh } : {}),
+    ...(chat !== undefined ? { chat } : {}),
+    ...(recentHistory !== undefined ? { recentHistory } : {}),
+  });
+  if (!context.success)
+    throw ApiError.validation("Daily Story normalization settings are invalid.");
+  return {
+    audio,
+    mimeType,
+    asr: parsedAsr.data,
+    ...(context.data.chat ? { chat: context.data.chat } : {}),
+    ...(context.data.storyZh ? { storyZh: context.data.storyZh } : {}),
+    ...(context.data.recentHistory ? { recentHistory: context.data.recentHistory } : {}),
+  };
 }
 
 function isMultipartLimitError(error: unknown) {

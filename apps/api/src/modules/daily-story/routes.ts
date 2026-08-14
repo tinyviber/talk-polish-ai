@@ -17,7 +17,7 @@ import {
 } from "@kotoba/contracts";
 import type { FastifyInstance, FastifyPluginOptions, FastifyRequest } from "fastify";
 import { requireLearnerAuth } from "../../auth";
-import { ApiError } from "../../http/errors";
+import { ApiError, safeErrorDetail } from "../../http/errors";
 import { DailyStoryApplicationError } from "./application/errors";
 import type { DailyStoryService } from "./service";
 
@@ -273,7 +273,8 @@ async function runDailyStory<T>(run: () => Promise<T>): Promise<T> {
     if (error instanceof DailyStoryApplicationError) {
       throw new ApiError(error.statusCode, error.code, error.message, error.details);
     }
-    throw error;
+    if (error instanceof ApiError) throw error;
+    throw ApiError.internal("Daily Story request failed.", [safeErrorDetail(error)]);
   }
 }
 

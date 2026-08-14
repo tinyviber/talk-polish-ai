@@ -146,6 +146,26 @@ describe("Daily Story reducer", () => {
     expect(dailyReducer(recording, { type: "recordingCancelled" }).phase).toBe("chatting");
   });
 
+  test("carries review API error details into the stable error state", () => {
+    const reviewing = dailyReducer(
+      { ...initialDailyState, phase: "chatting" as const, storyZh: "故事" },
+      { type: "reviewRequest", ...op },
+    );
+    const failed = dailyReducer(reviewing, {
+      type: "failure",
+      ...op,
+      kind: "review",
+      resumePhase: "chatting",
+      message: "服务暂时不可用。",
+      details: ["first rubric: Required", "repair rubric: Required"],
+    });
+
+    expect(failed.error).toMatchObject({
+      kind: "review",
+      details: ["first rubric: Required", "repair rubric: Required"],
+    });
+  });
+
   test("moves between recording and draft-ready phases without losing context", () => {
     const chatting = { ...initialDailyState, phase: "chatting" as const, storyZh: "故事" };
     const recording = dailyReducer(chatting, { type: "recording" });

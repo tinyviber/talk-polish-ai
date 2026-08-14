@@ -4,7 +4,7 @@ import {
   DailyProviderRequestError,
 } from "../../../platform/ai/transport";
 import { StructuredGenerationError } from "../../../capabilities/structured-generator";
-import { ApiError } from "../../../http/errors";
+import { ApiError, safeErrorDetail } from "../../../http/errors";
 import { ProviderConfigurationError, ProviderRequestError } from "../../../providers/http";
 import type { SafeProviderCall } from "../application/ports";
 import { DailyStoryApplicationError, dailyStoryValidation } from "../application/errors";
@@ -16,6 +16,7 @@ export function createSafeProviderCall(nodeEnv: string): SafeProviderCall {
       return await run();
     } catch (error) {
       if (error instanceof DailyStoryApplicationError) throw error;
+      const details = providerErrorDetails(error);
       if (error instanceof Error) {
         console.warn("[daily-story provider error]", {
           ...(requestId ? { requestId } : {}),
@@ -27,6 +28,12 @@ export function createSafeProviderCall(nodeEnv: string): SafeProviderCall {
           ...(error instanceof StructuredGenerationError
             ? { schemaIssues: structuredSchemaIssues(error.cause) }
             : {}),
+          details,
+        });
+      } else {
+        console.warn("[daily-story provider exception]", {
+          ...(requestId ? { requestId } : {}),
+          details,
         });
       }
       if (
@@ -35,7 +42,7 @@ export function createSafeProviderCall(nodeEnv: string): SafeProviderCall {
         error instanceof ProviderConfigurationError ||
         (error instanceof Error && error.name === "DailyStoryProviderNotConfiguredError")
       ) {
-        throw ApiError.validation("Daily Story provider configuration is invalid.");
+        throw ApiError.validation("Daily Story provider configuration is invalid.", details);
       }
       if (error instanceof DailyProviderRequestError || error instanceof ProviderRequestError) {
         if (error.status === 401 || error.status === 403)
@@ -49,14 +56,29 @@ export function createSafeProviderCall(nodeEnv: string): SafeProviderCall {
             nodeEnv !== "production" && error instanceof DailyProviderRequestError && error.reason
               ? `Daily Story provider rejected the request: ${error.reason}`
               : "Daily Story provider configuration is invalid.",
+            details,
           );
         }
         if (error instanceof DailyProviderRequestError && error.code === "unsupported_media")
           throw ApiError.unsupportedMedia("Fun-ASR 仅支持 WAV 或 MP3 音频。请重新录音后重试。");
       }
-      throw ApiError.processingUnavailable("Daily Story provider is temporarily unavailable.");
+      throw ApiError.processingUnavailable(
+        "Daily Story provider is temporarily unavailable.",
+        details,
+      );
     }
   };
+}
+
+function providerErrorDetails(error: unknown) {
+  if (!(error instanceof StructuredGenerationError)) return [safeErrorDetail(error)];
+  const issues = structuredSchemaIssues(error.cause);
+  if (issues.length === 0) return ["Structured model output failed schema validation."];
+  return issues.slice(0, 8).map((issue) => {
+    if ("shape" in issue) return `${issue.attempt}: model output shape was invalid.`;
+    const path = issue.path.length > 0 ? issue.path.join(".") : "$";
+    return `${issue.attempt} ${path}: ${issue.message ?? issue.code}`;
+  });
 }
 
 function structuredSchemaIssues(cause: unknown) {
@@ -70,12 +92,16 @@ function structuredSchemaIssues(cause: unknown) {
     if (!Array.isArray(issues)) return [];
     const result = issues.slice(0, 8).flatMap((issue) => {
       if (!issue || typeof issue !== "object") return [];
-      const issueRecord = issue as { path?: unknown; code?: unknown };
+      const issueRecord = issue as { path?: unknown; code?: unknown; message?: unknown };
       return [
         {
           attempt,
           path: Array.isArray(issueRecord.path) ? issueRecord.path.slice(0, 6) : [],
           code: typeof issueRecord.code === "string" ? issueRecord.code : "unknown",
+          message:
+            typeof issueRecord.message === "string"
+              ? safeErrorDetail(issueRecord.message)
+              : undefined,
         },
       ];
     });

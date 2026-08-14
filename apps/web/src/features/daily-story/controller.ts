@@ -8,6 +8,7 @@ import {
   synthesizeDailyStory,
   transcribeDailyStory,
   isDailyStoryAbortError,
+  DailyApiError,
 } from "./api";
 import {
   readProviderSettings,
@@ -63,6 +64,10 @@ type AudioOutboxUploadingAttempt = { clientAttemptId: string; updatedAt: number 
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成。请重试。";
+}
+
+function errorDetails(error: unknown) {
+  return error instanceof DailyApiError ? error.details : undefined;
 }
 
 export function getLeaseProtectedMutationToken(
@@ -654,6 +659,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         message: message(error),
         resumePhase: "chatting",
         kind: "start",
+        ...(errorDetails(error) !== undefined ? { details: errorDetails(error) } : {}),
         ...(operationId && operationSettingsRevision !== undefined
           ? { operationId, settingsRevision: operationSettingsRevision }
           : {}),
@@ -885,6 +891,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
             message: errorMessage,
             resumePhase: readAloud ? "review" : "chatting",
             kind: "transcribe",
+            ...(errorDetails(error) !== undefined ? { details: errorDetails(error) } : {}),
             ...(operationId && operationSettingsRevision !== undefined
               ? { operationId, settingsRevision: operationSettingsRevision }
               : {}),
@@ -1001,6 +1008,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
           message: message(error),
           resumePhase: "chatting",
           kind: "reply",
+          ...(errorDetails(error) !== undefined ? { details: errorDetails(error) } : {}),
           ...(operationId && operationSettingsRevision !== undefined
             ? { operationId, settingsRevision: operationSettingsRevision }
             : {}),
@@ -1059,6 +1067,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         message: message(error),
         resumePhase: current.review ? "review" : "chatting",
         kind: "review",
+        ...(errorDetails(error) !== undefined ? { details: errorDetails(error) } : {}),
         ...(operationId && operationSettingsRevision !== undefined
           ? { operationId, settingsRevision: operationSettingsRevision }
           : {}),

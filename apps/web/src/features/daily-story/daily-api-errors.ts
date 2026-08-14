@@ -1,12 +1,17 @@
 import { ApiClientError } from "@/lib/practice/api";
 
+/** Safe, server-provided diagnostic data for a Daily Story request. */
+export type DailyApiErrorDetails = unknown;
+
 export class DailyApiError extends Error {
   readonly status: number;
+  readonly details: DailyApiErrorDetails;
 
-  constructor(status: number, message = dailyErrorMessage(status)) {
+  constructor(status: number, message = dailyErrorMessage(status), details?: DailyApiErrorDetails) {
     super(message);
     this.name = "DailyApiError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -33,6 +38,30 @@ export function dailyApiErrorFromTransport(error: unknown, signal?: AbortSignal)
   if (signal?.aborted || isDailyStoryAbortError(error)) return new DailyApiAbortedError();
   if (error instanceof ApiClientError) return new DailyApiError(error.status);
   return new DailyApiError(0);
+}
+
+/**
+ * Keep the API's safe `error.details` (and older/raw `errors` fields) visible
+ * to the feature without coupling the browser to the server error schema.
+ */
+export function dailyApiErrorDetailsFromPayload(payload: unknown): DailyApiErrorDetails {
+  if (!isRecord(payload)) return undefined;
+  const error = isRecord(payload["error"]) ? payload["error"] : payload;
+  return (
+    firstPresent(error, ["details", "errors", "rawErrors"]) ??
+    firstPresent(payload, ["details", "errors", "rawErrors"])
+  );
+}
+
+function firstPresent(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    if (key in record && record[key] !== null && record[key] !== undefined) return record[key];
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function dailyErrorMessage(status: number) {

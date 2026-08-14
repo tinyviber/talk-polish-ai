@@ -19,6 +19,7 @@ import {
   dailyStoryReviewComment,
   normalizeReviewRubric,
   normalizeReviewSuggestions,
+  normalizeReviewSuggestionCandidate,
   selectReviewHistory,
   selectReviewConversation,
   selectReviewSourceTurns,
@@ -111,7 +112,16 @@ export function createReviewConversation(dependencies: {
         const suggestionCandidates = Array.isArray(generated.value.suggestions)
           ? generated.value.suggestions.flatMap((candidate) => {
               const parsed = reviewSuggestionCandidateSchema.safeParse(candidate);
-              return parsed.success ? [parsed.data] : [];
+              if (!parsed.success) return [];
+              const normalized = normalizeReviewSuggestionCandidate(parsed.data);
+              if (!normalized) {
+                console.warn("[daily-story review suggestion skipped]", {
+                  requestId: input.requestId,
+                  reason: "invalid_shape",
+                });
+                return [];
+              }
+              return [normalized];
             })
           : [];
         const suggestions = normalizeReviewSuggestions(suggestionCandidates, sourceTurns);
@@ -187,7 +197,10 @@ function normalizeReviewRubricCandidate(rubric: unknown, legacyScores: unknown) 
   const parsedRubric = reviewRubricCandidateSchema.safeParse(rubric);
   if (parsedRubric.success) return parsedRubric.data;
 
-  const parsedLegacyScores = reviewLegacyScoresCandidateSchema.safeParse(legacyScores);
+  const parsedRubricAsLegacyScores = reviewLegacyScoresCandidateSchema.safeParse(rubric);
+  const parsedLegacyScores = parsedRubricAsLegacyScores.success
+    ? parsedRubricAsLegacyScores
+    : reviewLegacyScoresCandidateSchema.safeParse(legacyScores);
   if (!parsedLegacyScores.success) return null;
 
   return Object.fromEntries(

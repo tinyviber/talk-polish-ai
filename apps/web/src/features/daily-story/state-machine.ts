@@ -5,6 +5,7 @@ import type {
   StorySessionSnapshot,
   TurnSource,
 } from "./types";
+import type { DailyApiErrorDetails } from "./daily-api-errors";
 import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 
 export type DailyPhase =
@@ -39,7 +40,12 @@ export type DailyState = {
   revision: number | null;
   settingsRevision: number;
   operation: { id: string; settingsRevision: number } | null;
-  error: { message: string; resumePhase: StablePhase; kind?: DailyErrorKind } | null;
+  error: {
+    message: string;
+    resumePhase: StablePhase;
+    kind?: DailyErrorKind;
+    details?: DailyApiErrorDetails;
+  } | null;
   readAloudTranscript: string | null;
   readAloudTarget: string | null;
 };
@@ -96,6 +102,7 @@ export type DailyAction =
       message: string;
       resumePhase: StablePhase;
       kind?: DailyErrorKind;
+      details?: DailyApiErrorDetails;
     } & Partial<Operation>)
   | { type: "retry" };
 
@@ -354,6 +361,7 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
             message: action.message,
             resumePhase: "review",
             kind: "review",
+            ...(action.details !== undefined ? { details: action.details } : {}),
           },
         };
       }
@@ -365,6 +373,7 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
           message: action.message,
           resumePhase: action.resumePhase,
           ...(action.kind ? { kind: action.kind } : {}),
+          ...(action.details !== undefined ? { details: action.details } : {}),
         },
       };
     }

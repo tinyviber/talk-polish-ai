@@ -1192,6 +1192,20 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     dispatch({ type: "editTranscript", text });
     return true;
   }, []);
+  const editTitle = useCallback((rawTitle: string) => {
+    if (
+      !getLeaseProtectedMutationToken(
+        coordinatorRef.current.canEdit,
+        coordinatorRef.current.isPageActive(),
+        leaseClaimTokenRef.current,
+      )
+    )
+      return false;
+    const title = trimBounded(rawTitle, 80);
+    if (!title) return false;
+    dispatch({ type: "editTitle", title });
+    return true;
+  }, []);
   const beginReadAloud = useCallback((target: string) => {
     blobRef.current = null;
     audioOutboxAttemptRef.current = null;
@@ -1283,6 +1297,7 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
     conversationAudios,
     conversationAudiosLoading,
     setDraft: (draft: string) => dispatch({ type: "draft", draft }),
+    editTitle,
     start,
     beginRecording,
     recordingDraftReady,

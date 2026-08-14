@@ -14,6 +14,7 @@ export function useDailyStory(conversationId: string, allowCompose = false) {
     start: story.start,
     transcribe: story.transcribe,
     send: (source, text) => (source === "asr" ? story.sendAsr(text) : story.sendTyped(text)),
+    editTitle: story.editTitle,
     finish: story.finish,
     cancelReview: story.cancelReview,
     newStory: story.newStory,

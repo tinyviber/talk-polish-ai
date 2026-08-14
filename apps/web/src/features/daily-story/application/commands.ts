@@ -12,6 +12,7 @@ export type DailyStoryCommandDependencies = {
     clientAttemptId?: string,
   ) => Promise<DailyStoryTranscribeResult>;
   send: (source: TurnSource, text: string) => Promise<boolean>;
+  editTitle: (title: string) => boolean;
   finish: () => Promise<void>;
   cancelReview: () => void;
   newStory: () => Promise<void>;
@@ -40,6 +41,7 @@ export function createDailyStoryCommands(deps: DailyStoryCommandDependencies) {
     send: (text: string, source: TurnSource = "typed") => deps.send(source, text),
     sendTyped: (text: string) => deps.send("typed", text),
     sendAsr: (text: string) => deps.send("asr", text),
+    editTitle: deps.editTitle,
     finish: deps.finish,
     cancel: deps.cancelReview,
     beginReadAloud: deps.beginReadAloud,

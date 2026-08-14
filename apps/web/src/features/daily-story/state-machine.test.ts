@@ -65,6 +65,15 @@ describe("Daily Story reducer", () => {
     expect(unchanged.title).toBe("原稳定标题");
   });
 
+  test("allows a non-empty title edit and persists the edited value", () => {
+    const state = { ...initialDailyState, phase: "review" as const, storyZh: "故事" };
+    const edited = dailyReducer(state, { type: "editTitle", title: "  我改的标题  " });
+
+    expect(edited.title).toBe("我改的标题");
+    expect(snapshotDailyState(edited)?.title).toBe("我改的标题");
+    expect(dailyReducer(edited, { type: "editTitle", title: "   " })).toBe(edited);
+  });
+
   test("keeps existing rubric when a newer review only returns the overall score", () => {
     const previousReview = {
       score: 74,

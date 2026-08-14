@@ -18,6 +18,10 @@ describe("Daily Story application commands", () => {
         calls.push(`${source}:${text}`);
         return true;
       },
+      editTitle: (title) => {
+        calls.push(`title:${title}`);
+        return true;
+      },
       finish: async () => {
         calls.push("finish");
       },
@@ -51,6 +55,7 @@ describe("Daily Story application commands", () => {
     commands.beginReadAloud("a1");
     await commands.newStory();
     commands.retryCachedAudio();
+    expect(commands.editTitle("新标题")).toBe(true);
 
     expect(calls).toEqual([
       "start",
@@ -62,6 +67,7 @@ describe("Daily Story application commands", () => {
       "read:a1",
       "new",
       "retry",
+      "title:新标题",
     ]);
   });
 });

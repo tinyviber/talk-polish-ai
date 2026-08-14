@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { RotateCcw, Send } from "lucide-react";
+import { Check, Pencil, RotateCcw, Send, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -12,6 +12,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useRecorder, type RecorderDraft } from "@/lib/practice/useRecorder";
 import { mergeRecordedAudio } from "@/lib/practice/audio-format";
@@ -60,6 +61,8 @@ export function DailyStoryPage({
   const commands = story.commands;
   const navigate = useNavigate();
   const [typed, setTyped] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const [transcriptDraft, setTranscriptDraft] = useState("");
   const [cachedAudioUrl, setCachedAudioUrl] = useState<string | null>(null);
   const [conversationAudioUrls, setConversationAudioUrls] = useState<Record<string, string>>({});
@@ -79,6 +82,7 @@ export function DailyStoryPage({
   const finishConfirmingRef = useRef(false);
   const sentRecordingRef = useRef<Blob | null>(null);
   const phase = story.state.phase;
+  const displayedTitle = story.state.title ?? deriveStableDailyStoryTitle(story.state.storyZh);
   const transcribe = commands.transcribe;
   const cancelRecording = commands.cancelRecording;
   const draftAppendRef = useRef<Blob | null>(null);
@@ -87,6 +91,15 @@ export function DailyStoryPage({
   const phaseRef = useRef(phase);
   const mountedRef = useRef(true);
   phaseRef.current = phase;
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(displayedTitle);
+  }, [displayedTitle, editingTitle]);
+
+  const saveTitle = () => {
+    if (!titleDraft.trim() || !story.commands.editTitle(titleDraft)) return;
+    setEditingTitle(false);
+  };
 
   useEffect(
     () => () => {
@@ -136,7 +149,7 @@ export function DailyStoryPage({
         if (mountedRef.current) setDraftSaving(false);
       }
     },
-    [conversationId, story],
+    [commands, conversationId, story.state.readAloudTarget],
   );
 
   const recorder = useRecorder({ mode: "api", onInterruptedRecording: appendDraftSegment });
@@ -443,9 +456,65 @@ export function DailyStoryPage({
             {phase !== "compose" && phase !== "loading" && story.state.storyZh ? (
               <section className="mx-auto mb-6 max-w-2xl">
                 <p className="text-sm font-semibold text-primary">Daily Story</p>
-                <h1 className="mt-1 font-display text-3xl">
-                  {story.state.title ?? deriveStableDailyStoryTitle(story.state.storyZh)}
-                </h1>
+                {editingTitle ? (
+                  <form
+                    className="mt-2 flex items-center gap-2"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveTitle();
+                    }}
+                  >
+                    <Input
+                      autoFocus
+                      value={titleDraft}
+                      onChange={(event) => setTitleDraft(event.target.value.slice(0, 80))}
+                      maxLength={80}
+                      aria-label="故事标题"
+                      className="h-12 rounded-2xl bg-card font-display text-2xl shadow-lift"
+                      disabled={!story.canEdit}
+                    />
+                    <Button
+                      type="submit"
+                      size="icon"
+                      className="rounded-full"
+                      disabled={!story.canEdit || !titleDraft.trim()}
+                      aria-label="保存标题"
+                    >
+                      <Check className="size-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="rounded-full"
+                      onClick={() => {
+                        setTitleDraft(displayedTitle);
+                        setEditingTitle(false);
+                      }}
+                      aria-label="取消编辑标题"
+                    >
+                      <X className="size-4" />
+                    </Button>
+                  </form>
+                ) : (
+                  <div className="mt-1 flex items-center gap-2">
+                    <h1 className="font-display text-3xl">{displayedTitle}</h1>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="rounded-full"
+                      onClick={() => {
+                        setTitleDraft(displayedTitle);
+                        setEditingTitle(true);
+                      }}
+                      disabled={!story.canEdit}
+                      aria-label="编辑故事标题"
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                  </div>
+                )}
               </section>
             ) : null}
             {phase === "loading" ? <Loading /> : null}

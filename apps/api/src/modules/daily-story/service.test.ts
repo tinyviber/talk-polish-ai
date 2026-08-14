@@ -440,7 +440,7 @@ describe("Daily Story policy service", () => {
 
   test("requires a complete rubric when there are no suggestions", () => {
     expect(reviewResultSchema.safeParse({ rubric: rubric(), suggestions: [] }).success).toBe(true);
-    expect(reviewResultSchema.safeParse({ suggestions: [] }).success).toBe(true);
+    expect(reviewResultSchema.safeParse({ suggestions: [] }).success).toBe(false);
     expect(reviewSystemPrompt).toContain(
       "still return the complete rubric with all four dimensions: fluency, grammar, vocabulary, and naturalness",
     );
@@ -460,14 +460,15 @@ describe("Daily Story policy service", () => {
       {
         overallFeedback:
           "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
+        overall: 68,
         rubric: { grammar: "malformed" },
         suggestions: [{ sourceTurnId: "u1" }],
       },
     ]);
 
     await expect(service.review(reviewInput())).resolves.toEqual({
-      score: null,
-      comment: null,
+      score: 68,
+      comment: "本次表达基本清楚，继续针对分项薄弱处练习。",
       overallFeedback:
         "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
       rubric: null,
@@ -517,16 +518,19 @@ describe("Daily Story policy service", () => {
     expect(requests[0]?.messages[1]?.content).toContain("Do not return title metadata");
   });
 
-  test("salvages an incomplete no-suggestion result without a second request", async () => {
+  test("repairs a scoreless no-suggestion result before returning", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
-      [{ suggestions: [] }, { rubric: rubric(), suggestions: [] }],
+      [
+        { rubric: null, overallFeedback: "暂缺分项评分。", suggestions: [] },
+        { rubric: rubric(), suggestions: [] },
+      ],
       requests,
     );
 
     await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
 
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
   });
 
   test("restores review originals from submitted history", async () => {

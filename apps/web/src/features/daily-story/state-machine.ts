@@ -67,6 +67,7 @@ export type DailyAction =
   | { type: "persisted"; session: StorySession }
   | { type: "settingsRevisionChanged"; settingsRevision: number }
   | { type: "draft"; draft: string }
+  | { type: "editTitle"; title: string }
   | ({ type: "startRequest"; storyZh: string } & Operation)
   | ({ type: "startSuccess"; opening: DailyMessage; title?: string } & Operation)
   | { type: "recording" }
@@ -156,6 +157,16 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
     }
     case "draft":
       return state.phase === "compose" ? { ...state, draft: action.draft } : state;
+    case "editTitle": {
+      if (
+        state.phase !== "chatting" &&
+        state.phase !== "transcriptReady" &&
+        state.phase !== "review"
+      )
+        return state;
+      const title = action.title.trim().slice(0, 80);
+      return title ? { ...state, title } : state;
+    }
     case "startRequest":
       return state.phase === "compose" || state.phase === "error"
         ? {

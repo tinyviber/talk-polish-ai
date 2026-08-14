@@ -135,6 +135,10 @@ export const reviewResultSchema = z
     rubric: z.unknown().optional(),
     suggestions: z.unknown().optional(),
     overallFeedback: z.unknown().optional(),
+    // Optional metadata stays opaque here. Application code grounds it only
+    // when caller explicitly asks to fill a missing title.
+    title: z.unknown().optional(),
+    titleBasis: z.unknown().optional(),
   })
   .strip();
 
@@ -194,6 +198,7 @@ export function reviewUserPrompt(input: {
   storyZh: string;
   conversation: unknown;
   scoringHistory: unknown;
+  includeTitle?: boolean;
 }) {
   return [
     "<STORY_ZH_UNTRUSTED>",
@@ -205,6 +210,10 @@ export function reviewUserPrompt(input: {
     "<LEARNER_USER_TURNS_FOR_SCORING_ONLY>",
     JSON.stringify(input.scoringHistory),
     "</LEARNER_USER_TURNS_FOR_SCORING_ONLY>",
-    "Review now.",
+    ...(input.includeTitle
+      ? [
+          "Also return an optional short Chinese title based only on STORY_ZH and titleBasis as an exact source phrase from STORY_ZH. Do not use conversation details. If uncertain, omit title.",
+        ]
+      : ["Review now. Do not return title metadata."]),
   ].join("\n");
 }

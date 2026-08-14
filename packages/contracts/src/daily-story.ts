@@ -357,6 +357,9 @@ export const dailyStoryReviewRequestSchema = z
     storyZh: boundedText(DAILY_STORY_LIMITS.storyZhChars),
     history: dailyStoryHistorySchema,
     chat: dailyStoryChatConfigSchema,
+    // Ask review generation to opportunistically fill missing stable metadata.
+    // Optional for backwards-compatible clients and servers.
+    includeTitle: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -377,6 +380,7 @@ export const dailyStoryReviewResponseSchema = z
     comment: dailyStoryReviewSchema.shape.comment.nullable().optional(),
     rubric: dailyStoryReviewSchema.shape.rubric.nullable().optional(),
     overallFeedback: z.string().min(1).max(600).nullable().optional(),
+    title: z.string().min(1).max(80).optional(),
     requestId: z.string().min(1),
   })
   .strict();

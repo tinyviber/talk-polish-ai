@@ -475,6 +475,48 @@ describe("Daily Story policy service", () => {
     });
   });
 
+  test("fills a missing title in the same structured review request", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ rubric: rubric(), suggestions: [], title: "开会", titleBasis: "开会" }],
+      requests,
+    );
+
+    await expect(service.review({ ...reviewInput(), includeTitle: true })).resolves.toMatchObject({
+      title: "开会",
+      score: 70,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages[1]?.content).toContain("short Chinese title");
+  });
+
+  test("uses deterministic fallback for malformed review title without breaking review", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ rubric: rubric(), suggestions: [], title: 42, titleBasis: { nope: true } }],
+      requests,
+    );
+
+    await expect(service.review({ ...reviewInput(), includeTitle: true })).resolves.toMatchObject({
+      title: "今天开会",
+      score: 70,
+    });
+    expect(requests).toHaveLength(1);
+  });
+
+  test("ignores model title when persisted title is already stable", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ rubric: rubric(), suggestions: [], title: "模型新标题", titleBasis: "今天" }],
+      requests,
+    );
+
+    const result = await service.review({ ...reviewInput(), includeTitle: false });
+    expect(result).not.toHaveProperty("title");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages[1]?.content).toContain("Do not return title metadata");
+  });
+
   test("salvages an incomplete no-suggestion result without a second request", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(

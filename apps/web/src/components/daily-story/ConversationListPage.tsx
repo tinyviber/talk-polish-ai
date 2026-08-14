@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowRight, Download, Loader2, MessageCircle, Plus, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import {
   exportStorySessions,
   importStorySessions,
@@ -190,7 +191,7 @@ export function ConversationListPage() {
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="line-clamp-2 font-medium leading-7">
-                        {session.title ?? session.storyZh}
+                        {session.title ?? deriveStableDailyStoryTitle(session.storyZh)}
                       </p>
                       <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">
                         {session.storyZh}

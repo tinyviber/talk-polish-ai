@@ -1,4 +1,9 @@
-import type { DailyStoryChatConfig, DailyStoryHistoryMessage } from "@kotoba/contracts";
+import {
+  acceptGroundedDailyStoryTitle,
+  deriveStableDailyStoryTitle,
+  type DailyStoryChatConfig,
+  type DailyStoryHistoryMessage,
+} from "@kotoba/contracts";
 import { dailyStoryValidation } from "./errors";
 import { createStructuredGenerator } from "../../../capabilities/structured-generator";
 import {
@@ -41,6 +46,7 @@ export type ReviewConversationInput = {
   storyZh: string;
   history: DailyStoryHistoryMessage[];
   chat: DailyStoryChatConfig;
+  includeTitle?: boolean;
 };
 
 export type ReviewConversationPolicy = {
@@ -93,6 +99,7 @@ export function createReviewConversation(dependencies: {
                   storyZh: input.storyZh,
                   conversation,
                   scoringHistory,
+                  includeTitle: input.includeTitle,
                 }),
               },
             ],
@@ -145,6 +152,16 @@ export function createReviewConversation(dependencies: {
           overallFeedback,
           rubric: rubric?.rubric ?? null,
           suggestions: suggestions.suggestions,
+          ...(input.includeTitle
+            ? {
+                title:
+                  acceptGroundedDailyStoryTitle(
+                    input.storyZh,
+                    generated.value.title,
+                    generated.value.titleBasis,
+                  ) ?? deriveStableDailyStoryTitle(input.storyZh),
+              }
+            : {}),
         };
       },
     });

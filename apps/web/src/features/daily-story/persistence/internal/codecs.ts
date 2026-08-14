@@ -3,7 +3,6 @@ import {
   dailyStoryAsrConfigSchema,
   dailyStoryChatConfigSchema,
   dailyStoryTtsConfigSchema,
-  deriveStableDailyStoryTitle,
   identifyProviderPreset,
   normalizeProviderBaseUrl,
 } from "@kotoba/contracts";
@@ -93,7 +92,7 @@ export function fromStoredSession(value: StoredSession): StorySession {
     updatedAt: value.updatedAt,
     phase: value.phase,
     storyZh: value.storyZh,
-    title: value.title ?? deriveStableDailyStoryTitle(value.storyZh),
+    ...(value.title ? { title: value.title } : {}),
     messages: value.messages.map((item) => ({
       id: item.id,
       role: item.role,

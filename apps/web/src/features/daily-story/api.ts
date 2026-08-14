@@ -244,8 +244,9 @@ export async function reviewDailyStory(input: {
   storyZh: string;
   history: DailyMessage[];
   chat: ChatProvider;
+  includeTitle?: boolean;
   signal?: AbortSignal;
-}): Promise<DailyReview> {
+}): Promise<{ review: DailyReview; title?: string }> {
   const { signal, ...body } = input;
   const result = await request(
     "/api/daily-story/review",
@@ -254,18 +255,21 @@ export async function reviewDailyStory(input: {
     signal,
   );
   return {
-    score: result.score ?? null,
-    comment: result.comment ?? null,
-    rubric: result.rubric ?? null,
-    overallFeedback: result.overallFeedback ?? null,
-    suggestions: result.suggestions.map((suggestion) => ({
-      sourceTurnId: suggestion.sourceTurnId,
-      original: suggestion.original,
-      improved: suggestion.improved,
-      category: suggestion.category,
-      explanationZh: suggestion.explanationZh,
-      ...(suggestion.diff ? { diff: suggestion.diff } : {}),
-    })),
+    review: {
+      score: result.score ?? null,
+      comment: result.comment ?? null,
+      rubric: result.rubric ?? null,
+      overallFeedback: result.overallFeedback ?? null,
+      suggestions: result.suggestions.map((suggestion) => ({
+        sourceTurnId: suggestion.sourceTurnId,
+        original: suggestion.original,
+        category: suggestion.category,
+        explanationZh: suggestion.explanationZh,
+        improved: suggestion.improved,
+        ...(suggestion.diff ? { diff: suggestion.diff } : {}),
+      })),
+    },
+    ...(result.title ? { title: result.title } : {}),
   };
 }
 

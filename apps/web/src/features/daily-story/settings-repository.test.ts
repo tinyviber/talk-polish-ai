@@ -28,6 +28,7 @@ import {
   renewStoryLeaseToken,
   writeDailyStoryReview,
 } from "./persistence";
+import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import {
   __closeDailyStorageConnectionForTests,
   __resetDailyStorageForTests,
@@ -619,6 +620,36 @@ describe("Daily Story IndexedDB", () => {
     expect((await readStorySession(migrated[0]!.id))?.storyZh).toBe("今天下雨");
   });
 
+  test("keeps legacy missing title unpersisted until review fills it", async () => {
+    const legacy = await writeStorySession(
+      "conversation-without-title",
+      {
+        phase: "chatting",
+        storyZh: "今天学校开会",
+        messages: [{ id: "ai-title", role: "assistant", text: "Tell me more." }],
+      },
+      null,
+    );
+    expect(legacy.title).toBeUndefined();
+    expect((await readStorySession("conversation-without-title"))?.title).toBeUndefined();
+    expect(
+      (await listStorySessions()).find((item) => item.id === "conversation-without-title")?.title,
+    ).toBe("今天学校开会");
+
+    await writeStorySession(
+      "conversation-without-title",
+      {
+        phase: "review",
+        storyZh: "今天学校开会",
+        title: "学校会议",
+        messages: [{ id: "ai-title", role: "assistant", text: "Tell me more." }],
+        review: { score: null, comment: null, rubric: null, suggestions: [] },
+      },
+      legacy.revision,
+    );
+    expect((await readStorySession("conversation-without-title"))?.title).toBe("学校会议");
+  });
+
   test("leases are isolated per conversation", async () => {
     const tokenA = await claimStoryLeaseToken("conversation-a", "owner-a");
     const tokenB = await claimStoryLeaseToken("conversation-b", "owner-b");
@@ -847,7 +878,49 @@ describe("Daily Story IndexedDB", () => {
         suggestions: [{ sourceTurnId: "legacy-v1-user" }],
       },
     });
-    await expect(exportStorySessions()).resolves.toContain('"version":2');
+    const expectedFallback = deriveStableDailyStoryTitle("今天下雨");
+    const listed = (await listStorySessions()).find((session) => session.id === "legacy-v1");
+    expect(listed?.title).toBe(expectedFallback);
+
+    const exported = JSON.parse(await exportStorySessions()) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    expect(exported.sessions[0]).not.toHaveProperty("title");
+    expect(exported).toMatchObject({ version: 2 });
+
+    await deleteStorySession("legacy-v1", 1);
+    await importStorySessions(JSON.stringify(exported));
+    expect((await readStorySession("legacy-v1"))?.title).toBeUndefined();
+    expect((await listStorySessions()).find((session) => session.id === "legacy-v1")?.title).toBe(
+      expectedFallback,
+    );
+
+    const stable = await writeStorySession(
+      "legacy-v1",
+      {
+        phase: "review",
+        storyZh: "今天下雨",
+        title: "稳定标题",
+        messages: [
+          { id: "legacy-v1-ai", role: "assistant", text: "How was your day?" },
+          { id: "legacy-v1-user", role: "user", source: "typed", text: "I stayed home." },
+        ],
+        review: { score: null, comment: null, rubric: null, suggestions: [] },
+      },
+      1,
+    );
+    expect(stable.title).toBe("稳定标题");
+    const stableExport = JSON.parse(await exportStorySessions()) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    expect(stableExport.sessions[0]?.["title"]).toBe("稳定标题");
+
+    await deleteStorySession("legacy-v1", stable.revision);
+    await importStorySessions(JSON.stringify(stableExport));
+    expect((await readStorySession("legacy-v1"))?.title).toBe("稳定标题");
+    expect((await listStorySessions()).find((session) => session.id === "legacy-v1")?.title).toBe(
+      "稳定标题",
+    );
     await deleteStorySession("legacy-v1", 1);
   });
 

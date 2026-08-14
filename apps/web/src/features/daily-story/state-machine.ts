@@ -84,7 +84,7 @@ export type DailyAction =
   | ({ type: "replySuccess"; turn: PendingTurn; assistant: DailyMessage } & Operation)
   | { type: "editTranscript"; text: string }
   | ({ type: "reviewRequest" } & Operation)
-  | ({ type: "reviewSuccess"; review: DailyReview } & Operation)
+  | ({ type: "reviewSuccess"; review: DailyReview; title?: string } & Operation)
   | { type: "reviewCancelled" }
   | { type: "readAloudRecording"; target: string }
   | { type: "resetReadAloud" }
@@ -112,7 +112,8 @@ function stableFromSession(session: StorySession, settingsRevision: number): Dai
     phase: session.phase,
     draft: session.storyZh,
     storyZh: session.storyZh,
-    title: session.title ?? deriveStableDailyStoryTitle(session.storyZh),
+    // Keep missing persisted metadata distinguishable from display fallback.
+    title: session.title ?? null,
     messages: session.messages,
     pendingTranscript: session.pendingAsrTranscript
       ? { ...session.pendingAsrTranscript, source: "asr" }
@@ -290,7 +291,15 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         : state;
     case "reviewSuccess":
       return sameOperation(state, action)
-        ? { ...state, phase: "review", review: action.review, operation: null, error: null }
+        ? {
+            ...state,
+            phase: "review",
+            review: action.review,
+            // Stable title wins. A review response can only fill a missing one.
+            title: state.title ?? action.title ?? null,
+            operation: null,
+            error: null,
+          }
         : state;
     case "reviewCancelled":
       return state.phase === "reviewing"

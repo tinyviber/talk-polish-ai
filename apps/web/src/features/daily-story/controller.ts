@@ -47,6 +47,7 @@ import {
   type DailyStoryTranscribeResult,
 } from "./shared-types";
 import { DailyStoryCoordinator, type OperationToken } from "./coordinator";
+import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 
 export {
   isDailyStoryCachedAudioRetryCurrent,
@@ -76,6 +77,7 @@ function persistenceSignature(session: {
   phase: string;
   storyZh: string;
   messages: unknown;
+  title?: string | null;
   revision: number | null;
   pendingAsrTranscript?: unknown;
   review?: unknown;
@@ -83,6 +85,7 @@ function persistenceSignature(session: {
   return JSON.stringify({
     phase: session.phase,
     storyZh: session.storyZh,
+    title: session.title ?? null,
     messages: session.messages,
     ...(session.pendingAsrTranscript ? { pendingAsrTranscript: session.pendingAsrTranscript } : {}),
     ...(session.review ? { review: session.review } : {}),
@@ -1033,10 +1036,21 @@ export function useDailyStoryController(conversationId: string, allowCompose = f
         storyZh: current.storyZh,
         history: current.messages,
         chat: settings.chat,
+        includeTitle: current.title === null,
         signal: controller.signal,
       });
       if (!operationToken || !isOperationCurrent(operationToken)) return;
-      dispatch({ type: "reviewSuccess", operationId, settingsRevision: settings.revision, review });
+      const title =
+        current.title === null
+          ? (review.title ?? deriveStableDailyStoryTitle(current.storyZh))
+          : undefined;
+      dispatch({
+        type: "reviewSuccess",
+        operationId,
+        settingsRevision: settings.revision,
+        review: review.review,
+        ...(title ? { title } : {}),
+      });
     } catch (error) {
       if (isDailyStoryAbortError(error) || !operationToken || !isOperationCurrent(operationToken))
         return;

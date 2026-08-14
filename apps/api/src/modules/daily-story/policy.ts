@@ -92,7 +92,10 @@ export const conversationResultSchema = z.preprocess((value) => {
 export const reviewRubricItemCandidateSchema = z
   .object({
     score: z.number().int().min(0).max(100),
-    comment: z.string().min(1).max(300),
+    // Comments and evidence enrich the score but are not required for a
+    // usable review. Default malformed optional fields so one weak rubric
+    // annotation cannot turn the entire scored response into a repair.
+    comment: z.string().min(1).max(300).catch("暂无分项说明。"),
     evidence: z
       .array(
         z
@@ -102,7 +105,8 @@ export const reviewRubricItemCandidateSchema = z
           })
           .strict(),
       )
-      .max(2),
+      .max(2)
+      .catch([]),
   })
   .strip();
 
@@ -219,16 +223,9 @@ const reviewResultValidator = z
           message: "Canonical review output must include a top-level integer score from 0 to 100.",
         });
       }
-      if (canonicalRubric.success && hasCanonicalScoreSignal(value.score)) {
-        const expectedScore = calculateCandidateScore(canonicalRubric.data);
-        if (value.score !== expectedScore) {
-          context.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["score"],
-            message: "Top-level score must equal the rounded average of the four rubric scores.",
-          });
-        }
-      }
+      // The application calculates the persisted score from rubric scores.
+      // Accept a provider's independently rounded total so a harmless
+      // mismatch does not force a second model call and another 503.
       return;
     }
 
@@ -259,21 +256,6 @@ function hasScoreSignal(value: unknown) {
 
 function hasCanonicalScoreSignal(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100;
-}
-
-function calculateCandidateScore(rubric: {
-  fluency: { score: number };
-  grammar: { score: number };
-  vocabulary: { score: number };
-  naturalness: { score: number };
-}) {
-  return Math.round(
-    (rubric.fluency.score +
-      rubric.grammar.score +
-      rubric.vocabulary.score +
-      rubric.naturalness.score) /
-      4,
-  );
 }
 
 export const conversationSystemPrompt = `You are a warm English-speaking friend having a casual Daily Story Conversation.

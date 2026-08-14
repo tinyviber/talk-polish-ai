@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useReducer, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Check, Pencil, RotateCcw, Send, X } from "lucide-react";
 import {
@@ -33,6 +33,7 @@ import {
 } from "@/features/daily-story/recording-drafts";
 import type { DailyStoryAudioPurpose } from "@/features/daily-story/audio-outbox";
 import { createConversationId } from "@/features/daily-story/types";
+import { formatDailyReviewErrorDetails } from "@/features/daily-story/review-error-details";
 import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import { DailyStoryHeader } from "./AppHeader";
 import { resolveDailyStoryErrorRetryUi } from "./daily-story-error-retry";
@@ -48,6 +49,40 @@ function statusLabel(phase: string) {
   if (phase === "waitingForAi") return "正在回复…";
   if (phase === "reviewing") return "正在生成复盘…";
   return "处理中…";
+}
+
+function ErrorDetails({ details }: { details: unknown }) {
+  const lines = formatDailyReviewErrorDetails(details);
+  const [open, setOpen] = useState(false);
+  const detailsId = useId();
+
+  useEffect(() => {
+    setOpen(false);
+  }, [details]);
+
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-3 text-left">
+      <Button
+        type="button"
+        variant="link"
+        size="sm"
+        className="h-auto px-0 text-destructive"
+        aria-expanded={open}
+        aria-controls={detailsId}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {open ? "隐藏详情" : "显示详情"}
+      </Button>
+      {open ? (
+        <ul id={detailsId} className="mt-2 list-disc space-y-1 pl-5 text-xs break-words">
+          {lines.map((line, index) => (
+            <li key={`${line}:${index}`}>{line}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
 }
 
 export function DailyStoryPage({
@@ -694,6 +729,7 @@ export function DailyStoryPage({
               <section className="mx-auto max-w-xl rounded-3xl border border-destructive/30 bg-card p-6 text-center shadow-lift">
                 <h1 className="font-display text-2xl">操作没有完成</h1>
                 <p className="mt-3 text-sm text-muted-foreground">{story.state.error?.message}</p>
+                <ErrorDetails details={story.state.error?.details} />
                 {errorRetryUi.showCachedAudioRetry ? (
                   <>
                     {cachedAudioUrl ? (

@@ -488,7 +488,19 @@ describe("Daily Story policy service", () => {
         rubric: rubric(),
         suggestions: [],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      reviewResultSchema.safeParse({
+        score: 70,
+        rubric: {
+          fluency: { score: 70 },
+          grammar: { score: 70 },
+          vocabulary: { score: 70 },
+          naturalness: { score: 70 },
+        },
+        suggestions: [],
+      }).success,
+    ).toBe(true);
     expect(reviewResultSchema.safeParse({ rubric: null, suggestions: [] }).success).toBe(false);
     expect(reviewResultSchema.safeParse({ overall: 88, suggestions: [] }).success).toBe(false);
     expect(
@@ -734,6 +746,31 @@ describe("Daily Story policy service", () => {
         grammar: { score: 80 },
         vocabulary: { score: 70 },
         naturalness: { score: 60 },
+      },
+    });
+  });
+
+  test("defaults missing optional rubric explanations without losing the score", async () => {
+    const service = serviceFor([
+      {
+        score: 70,
+        rubric: {
+          fluency: { score: 70 },
+          grammar: { score: 70 },
+          vocabulary: { score: 70 },
+          naturalness: { score: 70 },
+        },
+        suggestions: [],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 70,
+      rubric: {
+        fluency: { score: 70, evidence: [] },
+        grammar: { score: 70, evidence: [] },
+        vocabulary: { score: 70, evidence: [] },
+        naturalness: { score: 70, evidence: [] },
       },
     });
   });

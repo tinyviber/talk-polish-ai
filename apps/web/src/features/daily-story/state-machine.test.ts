@@ -65,6 +65,35 @@ describe("Daily Story reducer", () => {
     expect(unchanged.title).toBe("原稳定标题");
   });
 
+  test("keeps existing rubric when a newer review only returns the overall score", () => {
+    const previousReview = {
+      score: 74,
+      comment: "继续保持。",
+      rubric: {
+        fluency: { score: 76, comment: "流畅。", evidence: [] },
+        grammar: { score: 72, comment: "语法稳定。", evidence: [] },
+        vocabulary: { score: 70, comment: "词汇够用。", evidence: [] },
+        naturalness: { score: 78, comment: "自然。", evidence: [] },
+      },
+      suggestions: [],
+    };
+    const reviewing = dailyReducer(
+      { ...initialDailyState, phase: "review" as const, storyZh: "故事", review: previousReview },
+      { type: "reviewRequest", ...op },
+    );
+    const updated = dailyReducer(reviewing, {
+      type: "reviewSuccess",
+      ...op,
+      review: { score: 80, comment: "整体更好。", rubric: null, suggestions: [] },
+    });
+
+    expect(updated.review).toMatchObject({
+      score: 80,
+      comment: "整体更好。",
+      rubric: previousReview.rubric,
+    });
+  });
+
   test("keeps ASR transcript readonly until user explicitly sends", () => {
     const recording = { ...initialDailyState, phase: "recording" as const, storyZh: "故事" };
     const transcribing = dailyReducer(recording, { type: "transcribeRequest", ...op });

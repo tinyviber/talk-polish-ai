@@ -106,6 +106,10 @@ function sameOperation(state: DailyState, action: Operation) {
   );
 }
 
+function preserveReviewRubric(previous: DailyReview | null, next: DailyReview) {
+  return next.rubric || !previous?.rubric ? next : { ...next, rubric: previous.rubric };
+}
+
 function stableFromSession(session: StorySession, settingsRevision: number): DailyState {
   return {
     ...initialDailyState,
@@ -294,7 +298,9 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         ? {
             ...state,
             phase: "review",
-            review: action.review,
+            // A newer response may contain only the overall score. Keep the
+            // previously generated legacy dimensions instead of erasing them.
+            review: preserveReviewRubric(state.review, action.review),
             // Stable title wins. A review response can only fill a missing one.
             title: state.title ?? action.title ?? null,
             operation: null,

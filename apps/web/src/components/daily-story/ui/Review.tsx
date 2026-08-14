@@ -379,41 +379,46 @@ function ScoreReview({
   onRetryReview,
   canEdit,
 }: ReviewProps) {
+  const score = review?.score ?? null;
+  const rubric = review?.rubric ?? null;
+  const hasScore = score !== null;
+  const hasRubric = rubric !== null;
+  const hasOverallFeedback = Boolean(review?.overallFeedback);
+
   return (
     <section className="mx-auto max-w-2xl">
       <p className="text-sm font-semibold text-primary">水平评分</p>
       <h1 className="mt-2 font-display text-3xl">这次表达的整体表现</h1>
-      {review?.overallFeedback ? (
+      {hasOverallFeedback ? (
         <div className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-lift">
           <p className="text-sm font-semibold text-primary">整体评价</p>
-          <p className="mt-2 text-sm leading-7">{review.overallFeedback}</p>
+          <p className="mt-2 text-sm leading-7">{review?.overallFeedback}</p>
         </div>
       ) : null}
-      {review?.score === null || !review?.rubric ? (
-        review?.overallFeedback ? null : (
-          <div className="mt-6 rounded-3xl border border-dashed border-border bg-card p-6 text-center shadow-lift">
-            <p className="font-medium">暂无评分/评论</p>
-            <p className="mt-2 text-sm text-muted-foreground">点击重新复盘后生成。</p>
-          </div>
-        )
-      ) : (
-        <>
-          <div className="mt-6 rounded-3xl border border-border bg-card p-6 text-center shadow-lift">
-            <p className="text-sm text-muted-foreground">总分</p>
-            <p className="mt-1 font-display text-6xl leading-none text-primary">
-              {review.score}
-              <span className="text-2xl text-muted-foreground">/100</span>
-            </p>
-            {review.comment ? <p className="mt-4 text-sm leading-7">{review.comment}</p> : null}
-          </div>
-          <div className="mt-4 space-y-3">
-            <RubricCard label="流利度" item={review.rubric.fluency} />
-            <RubricCard label="语法" item={review.rubric.grammar} />
-            <RubricCard label="词汇" item={review.rubric.vocabulary} />
-            <RubricCard label="自然度" item={review.rubric.naturalness} />
-          </div>
-        </>
-      )}
+      {hasScore ? (
+        <div className="mt-6 rounded-3xl border border-border bg-card p-6 text-center shadow-lift">
+          <p className="text-sm text-muted-foreground">总分</p>
+          <p className="mt-1 font-display text-6xl leading-none text-primary">
+            {score}
+            <span className="text-2xl text-muted-foreground">/100</span>
+          </p>
+          {review?.comment ? <p className="mt-4 text-sm leading-7">{review.comment}</p> : null}
+        </div>
+      ) : null}
+      {hasRubric ? (
+        <div className="mt-4 space-y-3">
+          <RubricCard label="流利度" item={rubric.fluency} />
+          <RubricCard label="语法" item={rubric.grammar} />
+          <RubricCard label="词汇" item={rubric.vocabulary} />
+          <RubricCard label="自然度" item={rubric.naturalness} />
+        </div>
+      ) : null}
+      {!hasScore && !hasRubric && !hasOverallFeedback ? (
+        <div className="mt-6 rounded-3xl border border-dashed border-border bg-card p-6 text-center shadow-lift">
+          <p className="font-medium">暂无评分/评论</p>
+          <p className="mt-2 text-sm text-muted-foreground">点击重新复盘后生成。</p>
+        </div>
+      ) : null}
       <ReviewActionBar
         review={review}
         reviewBusy={reviewBusy}

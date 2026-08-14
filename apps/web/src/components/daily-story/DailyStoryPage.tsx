@@ -382,6 +382,8 @@ export function DailyStoryPage({
     suggestions: story.state.review?.suggestions ?? [],
     reviewBusy: phase === "reviewing",
     reviewError: story.state.error?.kind === "review" ? story.state.error.message : null,
+    reviewErrorDetails:
+      story.state.error?.kind === "review" ? story.state.error.details : undefined,
     onReReview: () => void commands.finish(),
     onCancelReview: commands.cancel,
     onRetryReview: commands.retry,

@@ -1,7 +1,10 @@
+import { useEffect, useId, useState } from "react";
 import { Loader2, Mic, RotateCcw, Square, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { DailyStoryCachedAudio } from "@/features/daily-story/shared-types";
+import type { DailyApiErrorDetails } from "@/features/daily-story/daily-api-errors";
+import { formatDailyReviewErrorDetails } from "@/features/daily-story/review-error-details";
 import type { DailyReview, ReviewRubric, ReviewSuggestion } from "@/features/daily-story/types";
 import { reviewOriginalDiffSegments } from "@/features/daily-story/review-diff";
 import type { RecordingDraft } from "@/features/daily-story/recording-drafts";
@@ -15,6 +18,7 @@ export type ReviewProps = {
   suggestions: ReviewSuggestion[];
   reviewBusy: boolean;
   reviewError: string | null;
+  reviewErrorDetails?: DailyApiErrorDetails;
   onReReview: () => void;
   onCancelReview: () => void;
   onRetryReview: () => void;
@@ -155,6 +159,7 @@ export function Review({
   suggestions,
   reviewBusy,
   reviewError,
+  reviewErrorDetails,
   onReReview,
   onCancelReview,
   onRetryReview,
@@ -313,6 +318,7 @@ export function Review({
         review={review}
         reviewBusy={reviewBusy}
         reviewError={reviewError}
+        reviewErrorDetails={reviewErrorDetails}
         onReReview={onReReview}
         onCancelReview={onCancelReview}
         onRetryReview={onRetryReview}
@@ -327,23 +333,60 @@ export function Review({
 
 type ReviewActionProps = Pick<
   ReviewProps,
-  "review" | "reviewBusy" | "reviewError" | "onReReview" | "onCancelReview" | "onRetryReview"
+  | "review"
+  | "reviewBusy"
+  | "reviewError"
+  | "reviewErrorDetails"
+  | "onReReview"
+  | "onCancelReview"
+  | "onRetryReview"
 > & { canEdit: boolean };
 
 function ReviewActionBar({
   reviewBusy,
   reviewError,
+  reviewErrorDetails,
   onReReview,
   onCancelReview,
   onRetryReview,
   canEdit,
 }: ReviewActionProps) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
+  const detailLines = formatDailyReviewErrorDetails(reviewErrorDetails);
+
+  useEffect(() => {
+    setDetailsOpen(false);
+  }, [reviewError, reviewErrorDetails]);
+
   return (
     <div className="mt-6 rounded-3xl border border-border bg-card p-5 text-center shadow-lift">
       {reviewError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {reviewError}
-        </p>
+        <div role="alert" className="text-sm text-destructive">
+          <p>{reviewError}</p>
+          {detailLines.length ? (
+            <div className="mt-3 text-left">
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto px-0 text-destructive"
+                aria-expanded={detailsOpen}
+                aria-controls={detailsId}
+                onClick={() => setDetailsOpen((open) => !open)}
+              >
+                {detailsOpen ? "隐藏详情" : "显示详情"}
+              </Button>
+              {detailsOpen ? (
+                <ul id={detailsId} className="mt-2 list-disc space-y-1 pl-5 text-xs break-words">
+                  {detailLines.map((detail, index) => (
+                    <li key={`${detail}:${index}`}>{detail}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       ) : null}
       {reviewBusy ? (
         <div className="flex flex-wrap items-center justify-center gap-3">
@@ -374,6 +417,7 @@ function ScoreReview({
   review,
   reviewBusy,
   reviewError,
+  reviewErrorDetails,
   onReReview,
   onCancelReview,
   onRetryReview,
@@ -423,6 +467,7 @@ function ScoreReview({
         review={review}
         reviewBusy={reviewBusy}
         reviewError={reviewError}
+        reviewErrorDetails={reviewErrorDetails}
         onReReview={onReReview}
         onCancelReview={onCancelReview}
         onRetryReview={onRetryReview}

@@ -10,10 +10,12 @@ import { MAX_NORMALIZED_AUDIO_BYTES, normalizeRecordedAudio } from "@/lib/practi
 import { apiBaseUrl } from "@/lib/practice/mode";
 export {
   dailyApiErrorFromTransport,
+  dailyApiErrorDetailsFromPayload,
   DailyApiError,
   isDailyStoryAbortError,
 } from "./daily-api-errors";
 import {
+  dailyApiErrorDetailsFromPayload,
   dailyApiErrorFromTransport,
   DailyApiError,
   isDailyStoryAbortError,
@@ -99,14 +101,15 @@ async function request<T>(
       typeof payload.error.message === "string"
         ? payload.error.message
         : undefined;
+    const details = dailyApiErrorDetailsFromPayload(payload);
     if (
       response.status === 422 &&
       backendMessage &&
       backendMessage !== "Request validation failed."
     ) {
-      throw new DailyApiError(response.status, backendMessage);
+      throw new DailyApiError(response.status, backendMessage, details);
     }
-    throw new DailyApiError(response.status);
+    throw new DailyApiError(response.status, undefined, details);
   }
   const parsed = schema.safeParse(payload);
   if (!parsed.success)

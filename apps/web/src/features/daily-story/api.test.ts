@@ -87,6 +87,39 @@ describe("Daily Story transcription audio compatibility", () => {
     });
   });
 
+  test("preserves safe API error details for a failed review", async () => {
+    const fetchMock = vi.mocked(authenticatedApiFetch);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "processing_unavailable",
+            message: "Daily Story review did not produce a valid score.",
+            details: ["first rubric: Required", "repair rubric: Required"],
+          },
+          requestId: "failed-review",
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("window", {
+      location: { origin: "http://localhost" },
+      localStorage: { getItem: () => null, setItem: () => undefined },
+    });
+
+    await expect(
+      reviewDailyStory({
+        storyZh: "今天很忙。",
+        history: [{ id: "u1", role: "user", source: "typed", text: "I was busy." }],
+        chat: { baseUrl: "https://api.example.com", apiKey: "test-key", model: "fixture" },
+      }),
+    ).rejects.toMatchObject({
+      name: "DailyApiError",
+      status: 503,
+      details: ["first rubric: Required", "repair rubric: Required"],
+    });
+  });
+
   test("sends title fill request and returns optional title separately", async () => {
     const fetchMock = vi.mocked(authenticatedApiFetch);
     fetchMock.mockResolvedValue(

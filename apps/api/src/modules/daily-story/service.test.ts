@@ -370,7 +370,7 @@ describe("Daily Story policy service", () => {
       [
         { reply: "That sounds like a long day. What happened next?" },
         { understanding: "understood", reply: "That sounds tiring." },
-        { rubric: rubric(), suggestions: [] },
+        { score: 70, rubric: rubric(), suggestions: [] },
       ],
       requests,
     );
@@ -415,7 +415,7 @@ describe("Daily Story policy service", () => {
 
   test("keeps review context to recent user turns", async () => {
     const requests: TextModelRequest[] = [];
-    const service = serviceFor([{ rubric: rubric(), suggestions: [] }], requests);
+    const service = serviceFor([{ score: 70, rubric: rubric(), suggestions: [] }], requests);
     const history = Array.from({ length: 8 }, (_, index) => [
       { id: `a${index}`, role: "assistant" as const, text: `assistant-${index}` },
       {
@@ -438,48 +438,102 @@ describe("Daily Story policy service", () => {
     expect(prompt).toContain("<LEARNER_USER_TURNS_FOR_SCORING_ONLY>");
   });
 
-  test("requires a complete rubric when there are no suggestions", () => {
-    expect(reviewResultSchema.safeParse({ rubric: rubric(), suggestions: [] }).success).toBe(true);
+  test("requires canonical rubric scores or complete legacy scores", () => {
+    expect(
+      reviewResultSchema.safeParse({ score: 70, rubric: rubric(), suggestions: [] }).success,
+    ).toBe(true);
+    expect(
+      reviewResultSchema.safeParse({
+        overall: 88,
+        scores: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
+        suggestions: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      reviewResultSchema.safeParse({
+        rubric: { ...rubric(), grammar: null },
+        overall: 88,
+        scores: { fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 },
+        suggestions: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      reviewResultSchema.safeParse({
+        score: 70,
+        rubric: { ...rubric(), fluency: { ...rubric().fluency, attachment: { bad: true } } },
+        suggestions: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      reviewResultSchema.safeParse({
+        score: 70,
+        rubric: rubric(),
+        suggestions: [{ sourceTurnId: "u1", improved: "x", category: "grammar", extra: true }],
+      }).success,
+    ).toBe(false);
+    expect(
+      reviewResultSchema.safeParse({ score: { score: 70 }, rubric: rubric(), suggestions: [] })
+        .success,
+    ).toBe(false);
+    expect(
+      reviewResultSchema.safeParse({
+        score: 71,
+        rubric: rubric(),
+        suggestions: [],
+      }).success,
+    ).toBe(false);
+    expect(reviewResultSchema.safeParse({ rubric: null, suggestions: [] }).success).toBe(false);
+    expect(reviewResultSchema.safeParse({ overall: 88, suggestions: [] }).success).toBe(false);
+    expect(
+      reviewResultSchema.safeParse({ overallFeedback: "只有反馈。", suggestions: [] }).success,
+    ).toBe(false);
     expect(reviewResultSchema.safeParse({ suggestions: [] }).success).toBe(false);
     expect(reviewSystemPrompt).toContain(
       "still return the complete rubric with all four dimensions: fluency, grammar, vocabulary, and naturalness",
     );
+    expect(reviewSystemPrompt).toContain("Never return rubric: null");
+    expect(reviewSystemPrompt).toContain("Never return only overallFeedback or suggestions");
   });
 
   test("keeps an empty-suggestion review on the first model call", async () => {
     const requests: TextModelRequest[] = [];
-    const service = serviceFor([{ rubric: rubric(), suggestions: [] }], requests);
+    const service = serviceFor([{ score: 70, rubric: rubric(), suggestions: [] }], requests);
 
     await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
 
     expect(requests).toHaveLength(1);
   });
 
-  test("salvages overall feedback independently from malformed rubric or suggestions", async () => {
-    const service = serviceFor([
-      {
-        overallFeedback:
-          "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
-        overall: 68,
-        rubric: { grammar: "malformed" },
-        suggestions: [{ sourceTurnId: "u1" }],
-      },
-    ]);
+  test("repairs malformed rubric instead of salvaging feedback or overall", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [
+        {
+          overallFeedback:
+            "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
+          overall: 68,
+          rubric: { grammar: "malformed" },
+          suggestions: [{ sourceTurnId: "u1" }],
+        },
+        { score: 70, rubric: rubric(), suggestions: [] },
+      ],
+      requests,
+    );
 
-    await expect(service.review(reviewInput())).resolves.toEqual({
-      score: 68,
-      comment: "本次表达基本清楚，继续针对分项薄弱处练习。",
-      overallFeedback:
-        "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
-      rubric: null,
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 70,
+      rubric: rubric(),
       suggestions: [],
+      overallFeedback: null,
     });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.messages.at(-1)?.content).toContain("Never return rubric: null");
   });
 
   test("fills a missing title in the same structured review request", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
-      [{ rubric: rubric(), suggestions: [], title: "开会", titleBasis: "开会" }],
+      [{ score: 70, rubric: rubric(), suggestions: [], title: "开会", titleBasis: "开会" }],
       requests,
     );
 
@@ -494,7 +548,7 @@ describe("Daily Story policy service", () => {
   test("uses deterministic fallback for malformed review title without breaking review", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
-      [{ rubric: rubric(), suggestions: [], title: 42, titleBasis: { nope: true } }],
+      [{ score: 70, rubric: rubric(), suggestions: [], title: 42, titleBasis: { nope: true } }],
       requests,
     );
 
@@ -508,7 +562,7 @@ describe("Daily Story policy service", () => {
   test("ignores model title when persisted title is already stable", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
-      [{ rubric: rubric(), suggestions: [], title: "模型新标题", titleBasis: "今天" }],
+      [{ score: 70, rubric: rubric(), suggestions: [], title: "模型新标题", titleBasis: "今天" }],
       requests,
     );
 
@@ -523,7 +577,7 @@ describe("Daily Story policy service", () => {
     const service = serviceFor(
       [
         { rubric: null, overallFeedback: "暂缺分项评分。", suggestions: [] },
-        { rubric: rubric(), suggestions: [] },
+        { score: 70, rubric: rubric(), suggestions: [] },
       ],
       requests,
     );
@@ -531,11 +585,15 @@ describe("Daily Story policy service", () => {
     await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
 
     expect(requests).toHaveLength(2);
+    expect(requests[1]?.messages.at(-1)?.content).toContain(
+      "Never return only overallFeedback or suggestions",
+    );
   });
 
   test("restores review originals from submitted history", async () => {
     const service = serviceFor([
       {
+        score: 70,
         rubric: rubric(),
         suggestions: [
           {
@@ -580,6 +638,7 @@ describe("Daily Story policy service", () => {
   test("calculates the overall score server-side and preserves valid evidence", async () => {
     const service = serviceFor([
       {
+        score: 75,
         rubric: {
           ...rubric({ fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 }),
           fluency: {
@@ -624,19 +683,28 @@ describe("Daily Story policy service", () => {
     });
   });
 
-  test("keeps a valid overall score when the provider omits all rubric fields", async () => {
-    const service = serviceFor([{ overall: 88, suggestions: [] }]);
+  test("repairs an overall-only response instead of returning a score without rubric", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [
+        { overall: 88, suggestions: [] },
+        { score: 70, rubric: rubric(), suggestions: [] },
+      ],
+      requests,
+    );
 
     await expect(service.review(reviewInput())).resolves.toMatchObject({
-      score: 88,
-      comment: "本次表达整体稳定，针对细节继续打磨会更自然。",
-      rubric: null,
+      score: 70,
+      comment: "本次表达基本清楚，继续针对分项薄弱处练习。",
+      rubric: rubric(),
     });
+    expect(requests).toHaveLength(2);
   });
 
   test("keeps the review usable when a suggestion diff is invalid", async () => {
     const service = serviceFor([
       {
+        score: 70,
         rubric: rubric(),
         suggestions: [
           {
@@ -668,6 +736,7 @@ describe("Daily Story policy service", () => {
   test("drops rubric evidence whose quote is not in the submitted user turn", async () => {
     const service = serviceFor([
       {
+        score: 70,
         rubric: {
           ...rubric(),
           grammar: {
@@ -855,6 +924,7 @@ describe("Daily Story policy service", () => {
   test("skips review suggestions with an unknown source turn", async () => {
     const service = serviceFor([
       {
+        score: 70,
         rubric: rubric(),
         suggestions: [
           {
@@ -883,6 +953,7 @@ describe("Daily Story policy service", () => {
   test("keeps only one review suggestion per source turn", async () => {
     const service = serviceFor([
       {
+        score: 70,
         rubric: rubric(),
         suggestions: [
           {

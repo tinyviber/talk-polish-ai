@@ -4,7 +4,7 @@ import {
   type DailyStoryChatConfig,
   type DailyStoryHistoryMessage,
 } from "@kotoba/contracts";
-import { dailyStoryValidation } from "./errors";
+import { DailyStoryApplicationError, dailyStoryValidation } from "./errors";
 import { createStructuredGenerator } from "../../../capabilities/structured-generator";
 import {
   reviewResultSchema,
@@ -34,8 +34,8 @@ import type {
 
 export const DAILY_STORY_REVIEW_MAX_TOKENS = 1536;
 
-const REVIEW_REPAIR_INSTRUCTION =
-  "Return only JSON with the exact rubric and suggestions shape from the system instruction. Even when there are no useful improvements, include the complete rubric with fluency, grammar, vocabulary, and naturalness, and set only suggestions to []. Never omit rubric. Do not return a total score or top-level comment. Each evidence quote must be an exact continuous substring of its referenced user turn.";
+export const REVIEW_REPAIR_INSTRUCTION =
+  "Repair the output and return only canonical JSON. The JSON MUST contain top-level score plus rubric.fluency, rubric.grammar, rubric.vocabulary, and rubric.naturalness; score and every rubric item score MUST be integers from 0 to 100, with each rubric item also containing its comment and evidence array. Never return rubric: null. Never return only overallFeedback or suggestions, and never omit any score. If there are no useful improvements, return the complete rubric and suggestions: []. Do not return a top-level comment. Each evidence quote must be an exact continuous substring of its referenced user turn.";
 
 export type ReviewChatProviderFactory = DailyStoryProviderFactory;
 export type ReviewConversationGuard = DailyStoryGuard;
@@ -149,6 +149,11 @@ export function createReviewConversation(dependencies: {
             requestId: input.requestId,
             responseKeys: Object.keys(generated.value).sort(),
           });
+          throw new DailyStoryApplicationError(
+            503,
+            "processing_unavailable",
+            "Daily Story review did not produce a valid score.",
+          );
         }
         const overallFeedback =
           typeof generated.value.overallFeedback === "string" &&
@@ -182,10 +187,7 @@ function normalizeReviewRubricCandidate(rubric: unknown, legacyScores: unknown) 
   const parsedRubric = reviewRubricCandidateSchema.safeParse(rubric);
   if (parsedRubric.success) return parsedRubric.data;
 
-  const rubricAsLegacyScores = reviewLegacyScoresCandidateSchema.safeParse(rubric);
-  const parsedLegacyScores = rubricAsLegacyScores.success
-    ? rubricAsLegacyScores
-    : reviewLegacyScoresCandidateSchema.safeParse(legacyScores);
+  const parsedLegacyScores = reviewLegacyScoresCandidateSchema.safeParse(legacyScores);
   if (!parsedLegacyScores.success) return null;
 
   return Object.fromEntries(

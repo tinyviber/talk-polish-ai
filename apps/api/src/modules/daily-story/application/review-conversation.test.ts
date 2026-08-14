@@ -24,6 +24,7 @@ const input: ReviewConversationInput = {
 };
 
 const modelResult = {
+  score: 70,
   rubric: {
     fluency: { score: 70, comment: "表达连贯。", evidence: [] },
     grammar: { score: 70, comment: "语法稳定。", evidence: [] },

@@ -104,10 +104,10 @@ export const reviewRubricItemCandidateSchema = z
       )
       .max(2),
   })
-  // This is an upstream candidate schema. The public response contract stays
-  // strict, but harmless extra model fields should not force a repair call.
-  .strip();
+  .strict();
 
+// Diff validation and source reconstruction belong to the domain normalizer.
+// A malformed optional suggestion must not make a valid scored review fail.
 const reviewDiffCandidateSchema = z.unknown();
 
 export const reviewRubricCandidateSchema = z
@@ -117,7 +117,7 @@ export const reviewRubricCandidateSchema = z
     vocabulary: reviewRubricItemCandidateSchema,
     naturalness: reviewRubricItemCandidateSchema,
   })
-  .strip();
+  .strict();
 
 const reviewLegacyScoreValueSchema = z.union([
   z.number().int().min(0).max(100),
@@ -137,7 +137,7 @@ const reviewLegacyScoreValueSchema = z.union([
         .max(2)
         .optional(),
     })
-    .strip(),
+    .strict(),
 ]);
 
 /** Compatibility candidate for the older `{ overall, scores }` response. */
@@ -148,7 +148,7 @@ export const reviewLegacyScoresCandidateSchema = z
     vocabulary: reviewLegacyScoreValueSchema,
     naturalness: reviewLegacyScoreValueSchema,
   })
-  .strip();
+  .strict();
 
 export const reviewSuggestionCandidateSchema = z
   .object({
@@ -160,7 +160,19 @@ export const reviewSuggestionCandidateSchema = z
   })
   .strip();
 
-/** Permissive envelope. Domain/application salvage each field independently. */
+const reviewSuggestionsSchema = z.array(reviewSuggestionCandidateSchema).max(2);
+const reviewOverallFeedbackSchema = z.string().min(1).max(600).nullable();
+
+/**
+ * The review response has two accepted wire formats:
+ *
+ * 1. The canonical rubric format, which must contain all four dimensions.
+ * 2. The legacy `{ overall, scores }` format, kept for older providers.
+ *
+ * Feedback and suggestions are intentionally not sufficient on their own.
+ * Invalid scoring output must reach the structured generator's one repair
+ * attempt instead of being silently salvaged by the application layer.
+ */
 const reviewResultValidator = z
   .object({
     rubric: z.unknown().optional(),
@@ -169,51 +181,88 @@ const reviewResultValidator = z
     overall: z.unknown().optional(),
     score: z.unknown().optional(),
     scores: z.unknown().optional(),
-    suggestions: z.unknown().optional(),
-    overallFeedback: z.unknown().optional(),
-    // Optional metadata stays opaque here. Application code grounds it only
-    // when caller explicitly asks to fill a missing title.
+    suggestions: reviewSuggestionsSchema.optional(),
+    overallFeedback: reviewOverallFeedbackSchema.optional(),
+    // Title metadata is non-critical; application code grounds it only when
+    // the caller asks to fill a missing title.
     title: z.unknown().optional(),
     titleBasis: z.unknown().optional(),
   })
-  .strip()
-  // A scoreless response is not useful to the review UI. Reject it here so
-  // the structured generator performs its bounded repair request instead of
-  // silently returning a successful HTTP response with no score.
+  .strict()
   .superRefine((value, context) => {
-    const hasRubricSignal = [value.rubric, value.scores].some(hasDimensionSignal);
-    const hasOverallSignal = [value.overall, value.score].some(hasScoreSignal);
-    if (!hasRubricSignal && !hasOverallSignal) {
+    const hasRubricField = Object.prototype.hasOwnProperty.call(value, "rubric");
+    if (hasRubricField) {
+      if (!reviewRubricCandidateSchema.safeParse(value.rubric).success) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["rubric"],
+          message:
+            "Canonical review output must include fluency, grammar, vocabulary, and naturalness with integer scores from 0 to 100.",
+        });
+      }
+      if (!hasCanonicalScoreSignal(value.score)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["score"],
+          message: "Canonical review output must include a top-level integer score from 0 to 100.",
+        });
+      }
+      const rubric = reviewRubricCandidateSchema.safeParse(value.rubric);
+      if (rubric.success && hasCanonicalScoreSignal(value.score)) {
+        const expectedScore = calculateCandidateScore(rubric.data);
+        if (value.score !== expectedScore) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["score"],
+            message: "Top-level score must equal the rounded average of the four rubric scores.",
+          });
+        }
+      }
+      return;
+    }
+
+    const hasLegacyScores = reviewLegacyScoresCandidateSchema.safeParse(value.scores).success;
+    const hasLegacyOverall = [value.overall, value.score].some(hasScoreSignal);
+    const hasValidPresentOverall =
+      !Object.prototype.hasOwnProperty.call(value, "overall") || hasScoreSignal(value.overall);
+    const hasValidPresentScore =
+      !Object.prototype.hasOwnProperty.call(value, "score") || hasScoreSignal(value.score);
+    if (!hasLegacyScores || !hasLegacyOverall || !hasValidPresentOverall || !hasValidPresentScore) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["rubric"],
-        message: "Review output must include a rubric or overall score.",
+        message:
+          "Review output must include a complete canonical rubric and top-level score, or the legacy overall score plus complete scores.",
       });
     }
   });
 
 export const reviewResultSchema = reviewResultValidator;
 
-const REVIEW_DIMENSIONS = ["fluency", "grammar", "vocabulary", "naturalness"] as const;
-
-function hasDimensionSignal(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return REVIEW_DIMENSIONS.every((dimension) => hasDimensionScore(record[dimension]));
-}
-
-function hasDimensionScore(value: unknown) {
-  if (typeof value === "number") return Number.isInteger(value) && value >= 0 && value <= 100;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const score = (value as Record<string, unknown>).score;
-  return typeof score === "number" && Number.isInteger(score) && score >= 0 && score <= 100;
-}
-
 function hasScoreSignal(value: unknown) {
   if (typeof value === "number") return Number.isInteger(value) && value >= 0 && value <= 100;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const score = (value as Record<string, unknown>).score;
   return typeof score === "number" && Number.isInteger(score) && score >= 0 && score <= 100;
+}
+
+function hasCanonicalScoreSignal(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100;
+}
+
+function calculateCandidateScore(rubric: {
+  fluency: { score: number };
+  grammar: { score: number };
+  vocabulary: { score: number };
+  naturalness: { score: number };
+}) {
+  return Math.round(
+    (rubric.fluency.score +
+      rubric.grammar.score +
+      rubric.vocabulary.score +
+      rubric.naturalness.score) /
+      4,
+  );
 }
 
 export const conversationSystemPrompt = `You are a warm English-speaking friend having a casual Daily Story Conversation.
@@ -233,6 +282,8 @@ export const reviewSystemPrompt = `You are reviewing a finished casual English D
 Rules:
 - Write concise Chinese explanations.
 - Score exactly these four dimensions from 0 to 100 as integers: fluency, grammar, vocabulary, naturalness. Add a short objective Chinese comment for each dimension.
+- Return canonical JSON with top-level score and rubric. score MUST be an integer from 0 to 100 and MUST equal Math.round((fluency + grammar + vocabulary + naturalness) / 4). rubric.fluency, rubric.grammar, rubric.vocabulary, and rubric.naturalness MUST each contain score as an integer from 0 to 100.
+- Never return rubric: null. Never return only overallFeedback or suggestions, and never omit any rubric score.
 - Add at most two evidence items per dimension. Each evidence item must use a submitted user turn id and quote an exact continuous substring from that user turn. Use an empty evidence array when there is no useful evidence.
 - Return zero to two only high-value improvements for clarity, grammar, or natural daily expression. Do not pad or nitpick.
 - Return JSON with rubric, suggestions, and overallFeedback. overallFeedback is 2-4 concise Chinese sentences about the whole conversation: topic, communication success, fluency/continuation, and one notable overall language feature. It is not another rubric or sentence correction.
@@ -242,7 +293,7 @@ Rules:
 - Use at most 16 alternating segments. Do not repeat, overlap, reorder, or split text into tiny pieces merely to mark individual characters. Keep the whole improved sentence in improved.
 - Each suggestion must include category exactly "clarity", "grammar", or "naturalness".
 - Every sourceTurnId must be copied exactly from a submitted user turn. Never invent an ID.
-- Do not return a total score or a top-level comment; the server calculates those.
+- Do not return a top-level comment. The canonical top-level score is required and must be consistent with the rubric.
 - If overallFeedback is uncertain or unavailable, use null. Never invent facts.
 - If there is no useful improvement, still return the complete rubric with all four dimensions: fluency, grammar, vocabulary, and naturalness. Set only suggestions to [] and never omit rubric.
 - Do not invent turns and do not change original wording.

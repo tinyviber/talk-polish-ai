@@ -57,7 +57,51 @@ describe("Daily Story transcription audio compatibility", () => {
         history: [{ id: "u1", role: "user", source: "typed", text: "I was busy." }],
         chat: { baseUrl: "https://api.example.com", apiKey: "test-key", model: "fixture" },
       }),
-    ).resolves.toEqual({ score: null, comment: null, rubric: null, suggestions: [] });
+    ).resolves.toEqual({
+      review: {
+        score: null,
+        comment: null,
+        overallFeedback: null,
+        rubric: null,
+        suggestions: [],
+      },
+    });
+  });
+
+  test("sends title fill request and returns optional title separately", async () => {
+    const fetchMock = vi.mocked(authenticatedApiFetch);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          suggestions: [],
+          score: 80,
+          comment: "整体稳定。",
+          overallFeedback: "主要意思表达清楚。",
+          title: "学校会议",
+          requestId: "review-with-title",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("window", {
+      location: { origin: "http://localhost" },
+      localStorage: { getItem: () => null, setItem: () => undefined },
+    });
+
+    await expect(
+      reviewDailyStory({
+        storyZh: "今天学校开会。",
+        history: [{ id: "u1", role: "user", source: "typed", text: "I was busy." }],
+        chat: { baseUrl: "https://api.example.com", apiKey: "test-key", model: "fixture" },
+        includeTitle: true,
+      }),
+    ).resolves.toMatchObject({
+      title: "学校会议",
+      review: { score: 80, overallFeedback: "主要意思表达清楚。" },
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.includeTitle).toBe(true);
   });
 
   test("keeps mp4 for an ordinary provider when no WAV conversion capability exists", async () => {

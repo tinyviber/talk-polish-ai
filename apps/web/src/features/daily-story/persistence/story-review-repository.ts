@@ -51,6 +51,7 @@ export async function readDailyStoryReview(
       setResult(tx, {
         score: parsed.score,
         comment: parsed.comment,
+        overallFeedback: parsed.overallFeedback ?? null,
         rubric: parsed.rubric,
         ...(parsed.sessionRevision !== undefined
           ? { sessionRevision: parsed.sessionRevision }
@@ -70,11 +71,17 @@ export async function writeDailyStoryReview(
   const normalized = {
     score: review.score ?? null,
     comment: review.comment ?? null,
+    overallFeedback: review.overallFeedback ?? null,
     rubric: review.rubric ?? null,
     ...(review.sessionRevision !== undefined ? { sessionRevision: review.sessionRevision } : {}),
     ...(review.sessionInstanceId ? { sessionInstanceId: review.sessionInstanceId } : {}),
   } satisfies DailyReviewSidecar;
-  if (normalized.score === null && normalized.comment === null && normalized.rubric === null) {
+  if (
+    normalized.score === null &&
+    normalized.comment === null &&
+    normalized.overallFeedback === null &&
+    normalized.rubric === null
+  ) {
     await deleteDailyStoryReview(conversationId);
     return normalized;
   }

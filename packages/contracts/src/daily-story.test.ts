@@ -6,6 +6,7 @@ import {
   dailyStoryProviderCheckRequestSchema,
   dailyStoryReplyRequestSchema,
   dailyStoryReviewDiffSchema,
+  dailyStoryReviewRequestSchema,
   dailyStoryReviewResponseSchema,
   dailyStoryReviewSuggestionSchema,
   dailyStoryTtsConfigSchema,
@@ -199,6 +200,15 @@ describe("Daily Story contracts", () => {
         requestId: "legacy-review",
       }),
     ).toEqual({ suggestions: [], requestId: "legacy-review" });
+
+    expect(
+      dailyStoryReviewRequestSchema.parse({
+        storyZh: "今天很忙。",
+        history: [{ id: "u1", role: "user", source: "typed", text: "I was busy." }],
+        chat,
+        includeTitle: true,
+      }).includeTitle,
+    ).toBe(true);
   });
 
   test("bounds compact review diffs and rejects diffs without a deletion", () => {

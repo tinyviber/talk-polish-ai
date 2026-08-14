@@ -32,6 +32,7 @@ import {
 } from "@/features/daily-story/recording-drafts";
 import type { DailyStoryAudioPurpose } from "@/features/daily-story/audio-outbox";
 import { createConversationId } from "@/features/daily-story/types";
+import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import { DailyStoryHeader } from "./AppHeader";
 import { resolveDailyStoryErrorRetryUi } from "./daily-story-error-retry";
 import { finishConfirmationReducer, initialFinishConfirmationState } from "./finish-confirmation";
@@ -439,6 +440,14 @@ export function DailyStoryPage({
           <ConversationMissing onNewConversation={startNewConversation} />
         ) : (
           <>
+            {phase !== "compose" && phase !== "loading" && story.state.storyZh ? (
+              <section className="mx-auto mb-6 max-w-2xl">
+                <p className="text-sm font-semibold text-primary">Daily Story</p>
+                <h1 className="mt-1 font-display text-3xl">
+                  {story.state.title ?? deriveStableDailyStoryTitle(story.state.storyZh)}
+                </h1>
+              </section>
+            ) : null}
             {phase === "loading" ? <Loading /> : null}
             {phase === "compose" ? (
               <section className="mx-auto max-w-2xl">

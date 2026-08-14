@@ -58,7 +58,11 @@ function fixtureModel(
   };
 }
 
-function serviceFor(values: unknown[], requests: TextModelRequest[] = []) {
+function serviceFor(
+  values: unknown[],
+  requests: TextModelRequest[] = [],
+  asrText = "The meeting spend too much time.  ",
+) {
   return testService({
     providerFactory: () => ({
       chat: fixtureModel(values, requests),
@@ -66,7 +70,7 @@ function serviceFor(values: unknown[], requests: TextModelRequest[] = []) {
         name: "fixture-asr",
         async probe() {},
         async transcribe() {
-          return { text: "The meeting spend too much time.  ", provider: "fixture" };
+          return { text: asrText, provider: "fixture" };
         },
       },
     }),
@@ -304,6 +308,62 @@ describe("Daily Story policy service", () => {
     expect(reply.reply).not.toContain("should say");
   });
 
+  test("does not repair malformed optional title metadata or block opening", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ reply: "Welcome.", title: 42, titleBasis: { unexpected: true } }],
+      requests,
+    );
+
+    const opening = await service.start({
+      learnerId: "learner",
+      requestId: "malformed-title-request",
+      storyZh: "今天学校开会。",
+      chat: chatConfig,
+    });
+
+    expect(opening.opening.text).toBe("Welcome.");
+    expect(opening.title).toBe("今天学校开会");
+    expect("titleBasis" in opening).toBe(false);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("falls back when title metadata grounds only a hallucinated event", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ reply: "Welcome.", title: "今天发生火灾", titleBasis: "今天" }],
+      requests,
+    );
+
+    const opening = await service.start({
+      learnerId: "learner",
+      requestId: "hallucinated-title-request",
+      storyZh: "今天去学校。",
+      chat: chatConfig,
+    });
+
+    expect(opening.title).toBe("今天去学校");
+    expect(requests).toHaveLength(1);
+  });
+
+  test("accepts a grounded generated title without another model request", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ reply: "Welcome.", title: "学校会议", titleBasis: "学校" }],
+      requests,
+    );
+
+    const opening = await service.start({
+      learnerId: "learner",
+      requestId: "grounded-title-request",
+      storyZh: "今天学校开了一个会议。",
+      chat: chatConfig,
+    });
+
+    expect(opening.title).toBe("学校会议");
+    expect(requests).toHaveLength(1);
+  });
+
   test("uses JSON mode and bounded budgets for start, reply, and review", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
@@ -374,12 +434,13 @@ describe("Daily Story policy service", () => {
     const prompt = requests[0]?.messages[1]?.content ?? "";
     expect(prompt).toContain('"id":"u7"');
     expect(prompt).not.toContain('"id":"u0"');
-    expect(prompt).not.toContain("assistant-7");
+    expect(prompt).toContain("assistant-7");
+    expect(prompt).toContain("<LEARNER_USER_TURNS_FOR_SCORING_ONLY>");
   });
 
   test("requires a complete rubric when there are no suggestions", () => {
     expect(reviewResultSchema.safeParse({ rubric: rubric(), suggestions: [] }).success).toBe(true);
-    expect(reviewResultSchema.safeParse({ suggestions: [] }).success).toBe(false);
+    expect(reviewResultSchema.safeParse({ suggestions: [] }).success).toBe(true);
     expect(reviewSystemPrompt).toContain(
       "still return the complete rubric with all four dimensions: fluency, grammar, vocabulary, and naturalness",
     );
@@ -394,7 +455,69 @@ describe("Daily Story policy service", () => {
     expect(requests).toHaveLength(1);
   });
 
-  test("repairs an incomplete no-suggestion result with the complete rubric instruction", async () => {
+  test("salvages overall feedback independently from malformed rubric or suggestions", async () => {
+    const service = serviceFor([
+      {
+        overallFeedback:
+          "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
+        rubric: { grammar: "malformed" },
+        suggestions: [{ sourceTurnId: "u1" }],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).resolves.toEqual({
+      score: null,
+      comment: null,
+      overallFeedback:
+        "你围绕会议经历展开了几轮交流，主要意思能够传达出来。整体表达带有一些重复，但话题推进是连贯的。",
+      rubric: null,
+      suggestions: [],
+    });
+  });
+
+  test("fills a missing title in the same structured review request", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ rubric: rubric(), suggestions: [], title: "开会", titleBasis: "开会" }],
+      requests,
+    );
+
+    await expect(service.review({ ...reviewInput(), includeTitle: true })).resolves.toMatchObject({
+      title: "开会",
+      score: 70,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages[1]?.content).toContain("short Chinese title");
+  });
+
+  test("uses deterministic fallback for malformed review title without breaking review", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ rubric: rubric(), suggestions: [], title: 42, titleBasis: { nope: true } }],
+      requests,
+    );
+
+    await expect(service.review({ ...reviewInput(), includeTitle: true })).resolves.toMatchObject({
+      title: "今天开会",
+      score: 70,
+    });
+    expect(requests).toHaveLength(1);
+  });
+
+  test("ignores model title when persisted title is already stable", async () => {
+    const requests: TextModelRequest[] = [];
+    const service = serviceFor(
+      [{ rubric: rubric(), suggestions: [], title: "模型新标题", titleBasis: "今天" }],
+      requests,
+    );
+
+    const result = await service.review({ ...reviewInput(), includeTitle: false });
+    expect(result).not.toHaveProperty("title");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages[1]?.content).toContain("Do not return title metadata");
+  });
+
+  test("salvages an incomplete no-suggestion result without a second request", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
       [{ suggestions: [] }, { rubric: rubric(), suggestions: [] }],
@@ -403,10 +526,7 @@ describe("Daily Story policy service", () => {
 
     await expect(service.review(reviewInput())).resolves.toMatchObject({ suggestions: [] });
 
-    expect(requests).toHaveLength(2);
-    expect(requests[1]?.messages.at(-1)?.content).toContain(
-      "Even when there are no useful improvements, include the complete rubric with fluency, grammar, vocabulary, and naturalness",
-    );
+    expect(requests).toHaveLength(1);
   });
 
   test("restores review originals from submitted history", async () => {
@@ -541,6 +661,161 @@ describe("Daily Story policy service", () => {
       mimeType: "audio/webm",
     });
     expect(result.transcript).toBe("The meeting spend too much time.  ");
+    expect(result.rawTranscript).toBe(result.transcript);
+    expect(result.normalizedTranscript).toBe(result.transcript);
+  });
+
+  test("keeps ASR usable when no chat provider is configured", async () => {
+    const service = testService({
+      providerFactory: (input) =>
+        input.asr
+          ? {
+              asr: {
+                name: "fixture-asr",
+                async probe() {},
+                async transcribe() {
+                  return { text: "I want to sea my friend", provider: "fixture" };
+                },
+              },
+            }
+          : {},
+    });
+
+    await expect(
+      service.transcribe({
+        learnerId: "learner",
+        requestId: "no-chat",
+        asr: { ...chatConfig },
+        audio: new Uint8Array([1, 2]),
+        mimeType: "audio/webm",
+      }),
+    ).resolves.toMatchObject({
+      transcript: "I want to sea my friend",
+      rawTranscript: "I want to sea my friend",
+      normalizedTranscript: "I want to sea my friend",
+    });
+  });
+
+  test("falls back to raw ASR when the normalization provider fails", async () => {
+    const service = testService({
+      providerFactory: (input) => ({
+        ...(input.asr
+          ? {
+              asr: {
+                name: "fixture-asr",
+                async probe() {},
+                async transcribe() {
+                  return { text: "I go there yesterday", provider: "fixture" };
+                },
+              },
+            }
+          : {}),
+        ...(input.chat
+          ? {
+              chat: {
+                name: "fixture-chat",
+                async probe() {},
+                async generate() {
+                  throw new Error("timeout");
+                },
+              },
+            }
+          : {}),
+      }),
+    });
+
+    await expect(
+      service.transcribe({
+        learnerId: "learner",
+        requestId: "normalization-timeout",
+        asr: { ...chatConfig },
+        chat: chatConfig,
+        audio: new Uint8Array([1, 2]),
+        mimeType: "audio/webm",
+      }),
+    ).resolves.toMatchObject({
+      transcript: "I go there yesterday",
+      rawTranscript: "I go there yesterday",
+      normalizedTranscript: "I go there yesterday",
+      changes: [],
+    });
+  });
+
+  test("falls back to raw ASR when structured normalization remains malformed", async () => {
+    let chatCalls = 0;
+    const service = testService({
+      providerFactory: (input) => ({
+        ...(input.asr
+          ? {
+              asr: {
+                name: "fixture-asr",
+                async probe() {},
+                async transcribe() {
+                  return { text: "I I go to school", provider: "fixture" };
+                },
+              },
+            }
+          : {}),
+        ...(input.chat
+          ? {
+              chat: {
+                name: "fixture-chat",
+                async probe() {},
+                async generate() {
+                  chatCalls += 1;
+                  return { content: "not-json", provider: "fixture" };
+                },
+              },
+            }
+          : {}),
+      }),
+    });
+
+    await expect(
+      service.transcribe({
+        learnerId: "learner",
+        requestId: "normalization-malformed",
+        asr: { ...chatConfig },
+        chat: chatConfig,
+        audio: new Uint8Array([1, 2]),
+        mimeType: "audio/webm",
+      }),
+    ).resolves.toMatchObject({
+      transcript: "I I go to school",
+      rawTranscript: "I I go to school",
+      normalizedTranscript: "I I go to school",
+      changes: [],
+    });
+    expect(chatCalls).toBe(2);
+  });
+
+  test("falls back to raw ASR when a homophone candidate is ambiguous", async () => {
+    const service = serviceFor(
+      [
+        {
+          normalizedText: "I want to see the ocean",
+          changes: [{ category: "homophone", from: "sea", to: "see" }],
+        },
+      ],
+      [],
+      "I want to sea the ocean",
+    );
+
+    await expect(
+      service.transcribe({
+        learnerId: "learner",
+        requestId: "ambiguous-homophone",
+        asr: { ...chatConfig },
+        chat: chatConfig,
+        audio: new Uint8Array([1, 2]),
+        mimeType: "audio/webm",
+      }),
+    ).resolves.toMatchObject({
+      transcript: "I want to sea the ocean",
+      rawTranscript: "I want to sea the ocean",
+      normalizedTranscript: "I want to sea the ocean",
+      changes: [],
+    });
   });
 
   test("skips review suggestions with an unknown source turn", async () => {

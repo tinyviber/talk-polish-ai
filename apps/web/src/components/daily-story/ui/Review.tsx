@@ -383,11 +383,19 @@ function ScoreReview({
     <section className="mx-auto max-w-2xl">
       <p className="text-sm font-semibold text-primary">水平评分</p>
       <h1 className="mt-2 font-display text-3xl">这次表达的整体表现</h1>
-      {review?.score === null || !review?.rubric ? (
-        <div className="mt-6 rounded-3xl border border-dashed border-border bg-card p-6 text-center shadow-lift">
-          <p className="font-medium">暂无评分/评论</p>
-          <p className="mt-2 text-sm text-muted-foreground">点击重新复盘后生成。</p>
+      {review?.overallFeedback ? (
+        <div className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-lift">
+          <p className="text-sm font-semibold text-primary">整体评价</p>
+          <p className="mt-2 text-sm leading-7">{review.overallFeedback}</p>
         </div>
+      ) : null}
+      {review?.score === null || !review?.rubric ? (
+        review?.overallFeedback ? null : (
+          <div className="mt-6 rounded-3xl border border-dashed border-border bg-card p-6 text-center shadow-lift">
+            <p className="font-medium">暂无评分/评论</p>
+            <p className="mt-2 text-sm text-muted-foreground">点击重新复盘后生成。</p>
+          </div>
+        )
       ) : (
         <>
           <div className="mt-6 rounded-3xl border border-border bg-card p-6 text-center shadow-lift">

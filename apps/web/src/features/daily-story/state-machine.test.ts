@@ -18,6 +18,53 @@ describe("Daily Story reducer", () => {
     expect(stale).toEqual(starting);
   });
 
+  test("keeps missing persisted title separate from its display fallback", () => {
+    const state = dailyReducer(
+      { ...initialDailyState, phase: "loading" },
+      {
+        type: "ready",
+        settingsRevision: 4,
+        session: {
+          schemaVersion: 1,
+          revision: 2,
+          updatedAt: "2026-08-14T00:00:00.000Z",
+          phase: "chatting",
+          storyZh: "今天学校开会",
+          messages: [],
+        },
+      },
+    );
+
+    expect(state.title).toBeNull();
+    expect(snapshotDailyState(state)?.title).toBeUndefined();
+  });
+
+  test("fills missing title on review but never replaces stable title", () => {
+    const missing = dailyReducer(
+      { ...initialDailyState, phase: "chatting", storyZh: "今天学校开会" },
+      { type: "reviewRequest", ...op },
+    );
+    const filled = dailyReducer(missing, {
+      type: "reviewSuccess",
+      ...op,
+      title: "学校会议",
+      review: { score: null, comment: null, rubric: null, suggestions: [] },
+    });
+    expect(filled.title).toBe("学校会议");
+
+    const stable = dailyReducer(
+      { ...initialDailyState, phase: "chatting", storyZh: "今天学校开会", title: "原稳定标题" },
+      { type: "reviewRequest", ...op },
+    );
+    const unchanged = dailyReducer(stable, {
+      type: "reviewSuccess",
+      ...op,
+      title: "模型新标题",
+      review: { score: null, comment: null, rubric: null, suggestions: [] },
+    });
+    expect(unchanged.title).toBe("原稳定标题");
+  });
+
   test("keeps ASR transcript readonly until user explicitly sends", () => {
     const recording = { ...initialDailyState, phase: "recording" as const, storyZh: "故事" };
     const transcribing = dailyReducer(recording, { type: "transcribeRequest", ...op });

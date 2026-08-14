@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  faithfulTranscriptChangeSchema,
   dailyStoryReviewResponseSchema,
   isDashScopeBaseUrl,
   isDashScopeFunAsrHttpModel,
@@ -35,12 +36,18 @@ import type {
 
 const openingSchema = z.object({
   opening: z.object({ id: z.string(), role: z.literal("assistant"), text: z.string().min(1) }),
+  title: z.string().min(1).optional(),
 });
 const replySchema = z.object({
   understanding: z.enum(["understood", "clarify", "retry"]),
   reply: z.string().min(1),
 });
-const transcriptSchema = z.object({ transcript: z.string() });
+const transcriptSchema = z.object({
+  transcript: z.string(),
+  rawTranscript: z.string().optional(),
+  normalizedTranscript: z.string().optional(),
+  changes: z.array(faithfulTranscriptChangeSchema).optional(),
+});
 // New scoring fields stay optional while old API instances roll forward.
 const reviewSchema = dailyStoryReviewResponseSchema;
 const checkSchema = z.object({
@@ -126,6 +133,9 @@ export async function startDailyStory(input: {
 export async function transcribeDailyStory(input: {
   audio: Blob;
   asr: AsrProvider;
+  chat?: ChatProvider;
+  storyZh?: string;
+  history?: DailyMessage[];
   directAsr?: boolean;
   signal?: AbortSignal;
 }) {
@@ -141,17 +151,73 @@ export async function transcribeDailyStory(input: {
   }
   const effectiveDirectAsr = isDashScopeFunAsrDirectEnabled(input.asr, input.directAsr === true);
   if (effectiveDirectAsr) {
-    return transcribeWithDashScopeFunAsrDirect(
+    const direct = await transcribeWithDashScopeFunAsrDirect(
       input.asr,
       normalized.blob,
       normalized.mimeType,
       input.signal,
     );
+    return normalizeTranscriptBestEffort({
+      rawTranscript: direct.transcript,
+      ...(input.chat ? { chat: input.chat } : {}),
+      ...(input.storyZh ? { storyZh: input.storyZh } : {}),
+      ...(input.history ? { history: input.history } : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
   }
   const form = new FormData();
   form.set("audio", normalized.blob, `recording.${extension(normalized.mimeType)}`);
   form.set("asr", json(input.asr));
+  if (input.chat) form.set("chat", json(input.chat));
+  if (input.storyZh) form.set("storyZh", input.storyZh);
+  if (input.history?.length) form.set("recentHistory", json(recentHistory(input.history)));
   return request("/api/daily-story/transcribe", transcriptSchema, form, input.signal);
+}
+
+async function normalizeTranscriptBestEffort(input: {
+  rawTranscript: string;
+  chat?: ChatProvider;
+  storyZh?: string;
+  history?: DailyMessage[];
+  signal?: AbortSignal;
+}) {
+  const fallback = {
+    transcript: input.rawTranscript,
+    rawTranscript: input.rawTranscript,
+    normalizedTranscript: input.rawTranscript,
+    changes: [],
+  };
+  if (!input.chat) return { transcript: input.rawTranscript };
+  try {
+    const result = await request(
+      "/api/daily-story/normalize-transcript",
+      transcriptSchema,
+      json({
+        rawTranscript: input.rawTranscript,
+        chat: input.chat,
+        ...(input.storyZh ? { storyZh: input.storyZh } : {}),
+        ...(input.history?.length ? { recentHistory: recentHistory(input.history) } : {}),
+      }),
+      input.signal,
+    );
+    return {
+      transcript: result.normalizedTranscript ?? result.transcript,
+      rawTranscript: result.rawTranscript ?? input.rawTranscript,
+      normalizedTranscript: result.normalizedTranscript ?? result.transcript,
+      changes: result.changes ?? [],
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function recentHistory(history: DailyMessage[]) {
+  return history.slice(-8).map((message) => ({
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    ...(message.role === "user" ? { source: message.source ?? "typed" } : {}),
+  }));
 }
 
 export async function replyDailyStory(input: {
@@ -164,7 +230,12 @@ export async function replyDailyStory(input: {
   return request(
     "/api/daily-story/reply",
     replySchema,
-    json({ storyZh: input.storyZh, history: input.history, turn: input.turn, chat: input.chat }),
+    json({
+      storyZh: input.storyZh,
+      history: publicHistory(input.history),
+      turn: publicTurn(input.turn),
+      chat: input.chat,
+    }),
     input.signal,
   );
 }
@@ -173,22 +244,32 @@ export async function reviewDailyStory(input: {
   storyZh: string;
   history: DailyMessage[];
   chat: ChatProvider;
+  includeTitle?: boolean;
   signal?: AbortSignal;
-}): Promise<DailyReview> {
+}): Promise<{ review: DailyReview; title?: string }> {
   const { signal, ...body } = input;
-  const result = await request("/api/daily-story/review", reviewSchema, json(body), signal);
+  const result = await request(
+    "/api/daily-story/review",
+    reviewSchema,
+    json({ ...body, history: publicHistory(input.history) }),
+    signal,
+  );
   return {
-    score: result.score ?? null,
-    comment: result.comment ?? null,
-    rubric: result.rubric ?? null,
-    suggestions: result.suggestions.map((suggestion) => ({
-      sourceTurnId: suggestion.sourceTurnId,
-      original: suggestion.original,
-      improved: suggestion.improved,
-      category: suggestion.category,
-      explanationZh: suggestion.explanationZh,
-      ...(suggestion.diff ? { diff: suggestion.diff } : {}),
-    })),
+    review: {
+      score: result.score ?? null,
+      comment: result.comment ?? null,
+      rubric: result.rubric ?? null,
+      overallFeedback: result.overallFeedback ?? null,
+      suggestions: result.suggestions.map((suggestion) => ({
+        sourceTurnId: suggestion.sourceTurnId,
+        original: suggestion.original,
+        category: suggestion.category,
+        explanationZh: suggestion.explanationZh,
+        improved: suggestion.improved,
+        ...(suggestion.diff ? { diff: suggestion.diff } : {}),
+      })),
+    },
+    ...(result.title ? { title: result.title } : {}),
   };
 }
 
@@ -243,4 +324,17 @@ function extension(mimeType: string) {
   if (mime === "audio/wav" || mime === "audio/x-wav") return "wav";
   if (mime === "audio/mpeg") return "mp3";
   return "webm";
+}
+
+function publicHistory(history: DailyMessage[]) {
+  return history.map((message) => ({
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    ...(message.role === "user" ? { source: message.source ?? "typed" } : {}),
+  }));
+}
+
+function publicTurn(turn: { id: string; source: TurnSource; text: string }) {
+  return { id: turn.id, source: turn.source, text: turn.text };
 }

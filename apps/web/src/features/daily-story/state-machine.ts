@@ -5,6 +5,7 @@ import type {
   StorySessionSnapshot,
   TurnSource,
 } from "./types";
+import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 
 export type DailyPhase =
   | "loading"
@@ -24,13 +25,14 @@ export type DailyPhase =
   | "error";
 
 type StablePhase = "chatting" | "transcriptReady" | "review";
-type PendingTurn = { id: string; source: TurnSource; text: string };
+type PendingTurn = { id: string; source: TurnSource; text: string; rawText?: string };
 export type DailyErrorKind = "start" | "transcribe" | "reply" | "review";
 
 export type DailyState = {
   phase: DailyPhase;
   draft: string;
   storyZh: string;
+  title: string | null;
   messages: DailyMessage[];
   pendingTranscript: PendingTurn | null;
   review: DailyReview | null;
@@ -46,6 +48,7 @@ export const initialDailyState: DailyState = {
   phase: "loading",
   draft: "",
   storyZh: "",
+  title: null,
   messages: [],
   pendingTranscript: null,
   review: null,
@@ -65,7 +68,7 @@ export type DailyAction =
   | { type: "settingsRevisionChanged"; settingsRevision: number }
   | { type: "draft"; draft: string }
   | ({ type: "startRequest"; storyZh: string } & Operation)
-  | ({ type: "startSuccess"; opening: DailyMessage } & Operation)
+  | ({ type: "startSuccess"; opening: DailyMessage; title?: string } & Operation)
   | { type: "recording" }
   | { type: "recordingDraftReady"; readAloud?: boolean }
   | { type: "continueRecording"; readAloud?: boolean }
@@ -81,7 +84,7 @@ export type DailyAction =
   | ({ type: "replySuccess"; turn: PendingTurn; assistant: DailyMessage } & Operation)
   | { type: "editTranscript"; text: string }
   | ({ type: "reviewRequest" } & Operation)
-  | ({ type: "reviewSuccess"; review: DailyReview } & Operation)
+  | ({ type: "reviewSuccess"; review: DailyReview; title?: string } & Operation)
   | { type: "reviewCancelled" }
   | { type: "readAloudRecording"; target: string }
   | { type: "resetReadAloud" }
@@ -109,6 +112,8 @@ function stableFromSession(session: StorySession, settingsRevision: number): Dai
     phase: session.phase,
     draft: session.storyZh,
     storyZh: session.storyZh,
+    // Keep missing persisted metadata distinguishable from display fallback.
+    title: session.title ?? null,
     messages: session.messages,
     pendingTranscript: session.pendingAsrTranscript
       ? { ...session.pendingAsrTranscript, source: "asr" }
@@ -161,7 +166,14 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         : state;
     case "startSuccess":
       return sameOperation(state, action)
-        ? { ...state, phase: "chatting", messages: [action.opening], operation: null, error: null }
+        ? {
+            ...state,
+            phase: "chatting",
+            title: action.title ?? deriveStableDailyStoryTitle(state.storyZh),
+            messages: [action.opening],
+            operation: null,
+            error: null,
+          }
         : state;
     case "recording":
       return state.phase === "chatting" ? { ...state, phase: "recording", error: null } : state;
@@ -279,7 +291,15 @@ export function dailyReducer(state: DailyState, action: DailyAction): DailyState
         : state;
     case "reviewSuccess":
       return sameOperation(state, action)
-        ? { ...state, phase: "review", review: action.review, operation: null, error: null }
+        ? {
+            ...state,
+            phase: "review",
+            review: action.review,
+            // Stable title wins. A review response can only fill a missing one.
+            title: state.title ?? action.title ?? null,
+            operation: null,
+            error: null,
+          }
         : state;
     case "reviewCancelled":
       return state.phase === "reviewing"
@@ -362,12 +382,16 @@ export function snapshotDailyState(state: DailyState): StorySessionSnapshot | nu
   return {
     phase: state.phase,
     storyZh: state.storyZh,
+    ...(state.title ? { title: state.title } : {}),
     messages: state.messages,
     ...(state.pendingTranscript
       ? {
           pendingAsrTranscript: {
             id: state.pendingTranscript.id,
             text: state.pendingTranscript.text,
+            ...(state.pendingTranscript.rawText
+              ? { rawText: state.pendingTranscript.rawText }
+              : {}),
           },
         }
       : {}),

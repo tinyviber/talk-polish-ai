@@ -2,6 +2,7 @@ import type {
   DailyStoryAsrConfig,
   DailyStoryChatConfig,
   DailyStoryHistoryMessage,
+  DailyStoryNormalizationHistory,
   DailyStoryTtsConfig,
 } from "@kotoba/contracts";
 import type { ProviderProbe } from "../../../platform/ai/probe";
@@ -66,4 +67,14 @@ export type DailyStoryConversationInput = {
   storyZh: string;
   history: DailyStoryHistoryMessage[];
   chat: DailyStoryChatConfig;
+};
+
+export type DailyStoryTranscriptNormalizationInput = {
+  learnerId: string;
+  ip?: string;
+  requestId: string;
+  rawTranscript: string;
+  storyZh?: string;
+  recentHistory?: DailyStoryNormalizationHistory;
+  chat?: DailyStoryChatConfig;
 };

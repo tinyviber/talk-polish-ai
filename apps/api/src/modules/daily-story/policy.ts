@@ -161,7 +161,7 @@ export const reviewSuggestionCandidateSchema = z
   .strip();
 
 /** Permissive envelope. Domain/application salvage each field independently. */
-export const reviewResultSchema = z
+const reviewResultValidator = z
   .object({
     rubric: z.unknown().optional(),
     // Keep the previous speaking-assessment score names long enough for the
@@ -176,7 +176,45 @@ export const reviewResultSchema = z
     title: z.unknown().optional(),
     titleBasis: z.unknown().optional(),
   })
-  .strip();
+  .strip()
+  // A scoreless response is not useful to the review UI. Reject it here so
+  // the structured generator performs its bounded repair request instead of
+  // silently returning a successful HTTP response with no score.
+  .superRefine((value, context) => {
+    const hasRubricSignal = [value.rubric, value.scores].some(hasDimensionSignal);
+    const hasOverallSignal = [value.overall, value.score].some(hasScoreSignal);
+    if (!hasRubricSignal && !hasOverallSignal) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rubric"],
+        message: "Review output must include a rubric or overall score.",
+      });
+    }
+  });
+
+export const reviewResultSchema = reviewResultValidator;
+
+const REVIEW_DIMENSIONS = ["fluency", "grammar", "vocabulary", "naturalness"] as const;
+
+function hasDimensionSignal(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return REVIEW_DIMENSIONS.every((dimension) => hasDimensionScore(record[dimension]));
+}
+
+function hasDimensionScore(value: unknown) {
+  if (typeof value === "number") return Number.isInteger(value) && value >= 0 && value <= 100;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const score = (value as Record<string, unknown>).score;
+  return typeof score === "number" && Number.isInteger(score) && score >= 0 && score <= 100;
+}
+
+function hasScoreSignal(value: unknown) {
+  if (typeof value === "number") return Number.isInteger(value) && value >= 0 && value <= 100;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const score = (value as Record<string, unknown>).score;
+  return typeof score === "number" && Number.isInteger(score) && score >= 0 && score <= 100;
+}
 
 export const conversationSystemPrompt = `You are a warm English-speaking friend having a casual Daily Story Conversation.
 

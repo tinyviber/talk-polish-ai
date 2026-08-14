@@ -143,7 +143,7 @@ export function createReviewConversation(dependencies: {
         }
         const score = rubric
           ? calculateReviewScore(rubric.rubric)
-          : normalizeScoreCandidate(generated.value.overall ?? generated.value.score);
+          : normalizeScoreCandidates(generated.value.overall, generated.value.score);
         if (!rubric && score === null) {
           console.warn("[daily-story review score missing]", {
             requestId: input.requestId,
@@ -200,6 +200,14 @@ function normalizeReviewRubricCandidate(rubric: unknown, legacyScores: unknown) 
           },
     ]),
   ) as ReturnType<typeof reviewRubricCandidateSchema.parse>;
+}
+
+function normalizeScoreCandidates(...values: unknown[]) {
+  for (const value of values) {
+    const score = normalizeScoreCandidate(value);
+    if (score !== null) return score;
+  }
+  return null;
 }
 
 function normalizeScoreCandidate(value: unknown) {

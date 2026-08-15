@@ -325,6 +325,10 @@ export async function runDailyStorySync() {
     let claimToken: string | null = null;
     let heartbeat: number | undefined;
     try {
+      // Review repair is local persistence recovery, not a cloud-sync step.
+      // Run it even when sync has not been configured so a sidecar write that
+      // crashed after the primary transaction can self-heal offline.
+      await repairPendingReviews();
       const token = await readSyncToken();
       if (!token) {
         setStatus("disabled");
@@ -351,7 +355,6 @@ export async function runDailyStorySync() {
         await renew();
         if (leaseLost) throw new SyncLeaseLostError();
       };
-      await repairPendingReviews();
       await reconcileLocalOutbox();
       await pushPending(token, ensureLease);
       await pullAndApply(token, ensureLease);

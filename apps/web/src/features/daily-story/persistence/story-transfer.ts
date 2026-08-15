@@ -12,6 +12,8 @@ import {
   fromStoredSession,
   importedReviewSidecar,
   importedSessionRecord,
+  sameValue,
+  sessionRecord,
   transferBytes,
 } from "./internal/codecs";
 import {
@@ -27,8 +29,8 @@ import {
   type StoredSyncMeta,
 } from "./internal/schemas";
 import { sessionImportTransaction, setResult, transaction } from "./internal/transaction";
-import { createConversationId, createId } from "../types";
-import { ensureDailyStorage } from "./story-session-repository";
+import { createConversationId, createId, type StorySession } from "../types";
+import { ensureDailyStorage, readStorySession } from "./story-session-repository";
 import {
   deleteDailyStoryReviewGuarded,
   isSuccessfulSidecarMutation,
@@ -36,6 +38,62 @@ import {
   writeDailyStoryReviewGuarded,
 } from "./story-review-repository";
 import { clearReviewRepairMarker, toSyncConversation } from "./story-sync-repository";
+
+const EXPORT_STABILITY_ERROR = "对话在导出期间发生变化，未生成文件。请稍后重试。";
+
+function sameSessionVersion(left: StoredSession, right: StoredSession | StorySession) {
+  return (
+    left.revision === right.revision &&
+    left.sessionInstanceId === right.sessionInstanceId &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function effectiveReviewSidecar(session: StorySession) {
+  if (!session.review) return null;
+  return {
+    score: session.review.score,
+    comment: session.review.comment,
+    overallFeedback: session.review.overallFeedback ?? null,
+    rubric: session.review.rubric,
+    sessionRevision: session.revision,
+    ...(session.sessionInstanceId ? { sessionInstanceId: session.sessionInstanceId } : {}),
+  };
+}
+
+async function readStableExportSnapshot(record: unknown) {
+  const initial = sessionSchema.safeParse(record);
+  if (!initial.success) throw new StoryImportError(EXPORT_STABILITY_ERROR);
+
+  const first = await readStorySession(initial.data.id);
+  if (!first || !sameSessionVersion(initial.data, first)) {
+    throw new StoryImportError(EXPORT_STABILITY_ERROR);
+  }
+
+  const primaryRaw = await transaction<unknown | null>(SESSION_STORE, "readonly", (tx) => {
+    const request = tx.objectStore(SESSION_STORE).get(initial.data.id);
+    request.onsuccess = () => setResult(tx, (request.result as unknown) ?? null);
+  });
+  const primary = primaryRaw === null ? null : sessionSchema.safeParse(primaryRaw);
+  const expectedPrimary = sessionRecord(first, initial.data.id);
+  if (
+    !primary?.success ||
+    !sameSessionVersion(initial.data, primary.data) ||
+    !sameValue(primary.data, expectedPrimary)
+  ) {
+    throw new StoryImportError(EXPORT_STABILITY_ERROR);
+  }
+
+  const second = await readStorySession(initial.data.id);
+  if (!second || !sameSessionVersion(initial.data, second) || !sameValue(first, second)) {
+    throw new StoryImportError(EXPORT_STABILITY_ERROR);
+  }
+
+  return {
+    primary: expectedPrimary,
+    sidecar: effectiveReviewSidecar(first),
+  };
+}
 
 export async function exportStorySessions(): Promise<string> {
   await ensureDailyStorage();
@@ -50,25 +108,13 @@ export async function exportStorySessions(): Promise<string> {
     throw new StoryImportError("对话数量超过导出上限。");
   }
 
-  const sidecars = await Promise.all(
-    records.map(async (record) => {
-      const parsed = sessionSchema.safeParse(record);
-      if (!parsed.success) return null;
-      return readDailyStoryReview(
-        parsed.data.id,
-        parsed.data.revision,
-        parsed.data.sessionInstanceId,
-      );
-    }),
-  );
   let envelope: StoryExportEnvelope;
   try {
+    const snapshots = await Promise.all(records.map(readStableExportSnapshot));
     envelope = storyExportEnvelopeSchema.parse({
       format: "kotoba-daily-story",
       version: 2,
-      sessions: records.map((record, index) =>
-        exportSessionRecord(record, sidecars[index] ?? null),
-      ),
+      sessions: snapshots.map(({ primary, sidecar }) => exportSessionRecord(primary, sidecar)),
     });
   } catch {
     throw new StoryImportError(

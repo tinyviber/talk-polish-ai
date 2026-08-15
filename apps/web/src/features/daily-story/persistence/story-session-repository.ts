@@ -21,10 +21,8 @@ import {
 } from "./internal/schemas";
 import { setResult, transaction } from "./internal/transaction";
 import {
-  deleteDailyStoryReview,
   deleteDailyStoryReviewGuarded,
   isSuccessfulSidecarMutation,
-  listDailyStoryReviewIds,
   readDailyStoryReview,
   type SidecarMutationStatus,
   writeDailyStoryReviewGuarded,
@@ -142,7 +140,6 @@ export async function ensureDailyStorage() {
       // review worker will retry the sidecar write later.
     }
   }
-  await repairOrphanReviewSidecars();
 }
 
 async function readLegacyCurrentReview() {
@@ -151,30 +148,6 @@ async function readLegacyCurrentReview() {
     request.onsuccess = () => setResult(tx, request.result !== undefined);
   });
   return exists ? readDailyStoryReview(CURRENT) : null;
-}
-
-async function repairOrphanReviewSidecars() {
-  let reviewIds: string[];
-  let sessionIds: string[];
-  try {
-    [reviewIds, sessionIds] = await Promise.all([
-      listDailyStoryReviewIds(),
-      transaction<string[]>(SESSION_STORE, "readonly", (tx) => {
-        const request = tx.objectStore(SESSION_STORE).getAllKeys();
-        request.onsuccess = () => setResult(tx, (request.result as IDBValidKey[]).map(String));
-      }),
-    ]);
-  } catch {
-    // Repair is opportunistic. A stale review connection must not prevent the
-    // primary settings/session database from recovering.
-    return;
-  }
-  const sessions = new Set(sessionIds);
-  await Promise.all(
-    reviewIds
-      .filter((id) => !sessions.has(id))
-      .map((id) => deleteDailyStoryReview(id).catch(() => {})),
-  );
 }
 
 async function migrateLegacySession(

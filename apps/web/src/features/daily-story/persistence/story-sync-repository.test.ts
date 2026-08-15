@@ -29,6 +29,7 @@ import {
   recordConflict,
   toSyncConversation,
 } from "./story-sync-repository";
+import { getStorySyncStatus, runDailyStorySync } from "../sync/worker";
 import type { DailyReview, StorySession } from "../types";
 import { REVIEW_STORE, SYNC_META_STORE } from "./internal/database";
 import { syncMetaSchema } from "./internal/schemas";
@@ -74,6 +75,34 @@ async function putMalformedReviewSidecar(conversationId: string) {
     });
     request.onsuccess = () => setResult(tx, undefined);
   });
+}
+
+async function seedPendingReviewRepair(conversationId: string) {
+  const session = await writeStorySession(
+    conversationId,
+    {
+      phase: "review",
+      storyZh: "需要恢复的故事",
+      messages: [],
+      review: {
+        score: 92,
+        comment: "本地修复",
+        overallFeedback: "整体清晰。",
+        rubric: null,
+        suggestions: [],
+      },
+    },
+    null,
+  );
+  await deleteDailyStoryReview(conversationId, session.revision, session.sessionInstanceId);
+  await putReviewRepairMarker(conversationId, session.revision, session.sessionInstanceId!, {
+    score: 92,
+    comment: "本地修复",
+    overallFeedback: "整体清晰。",
+    rubric: null,
+    suggestions: [],
+  });
+  return session;
 }
 
 beforeAll(() => {
@@ -172,6 +201,46 @@ describe("Daily Story sync persistence", () => {
         (meta) => meta.conversationId === "conversation-local-review-journal",
       ),
     ).not.toHaveProperty("reviewRepair");
+  });
+
+  test("repairs a pending review journal even when sync is disabled", async () => {
+    const conversationId = "conversation-repair-without-sync";
+    const session = await seedPendingReviewRepair(conversationId);
+
+    expect(await readSyncToken()).toBeNull();
+    await runDailyStorySync();
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      revision: session.revision,
+      review: {
+        score: 92,
+        comment: "本地修复",
+        overallFeedback: "整体清晰。",
+      },
+    });
+    expect(
+      (await listSyncMeta()).find((meta) => meta.conversationId === conversationId),
+    ).not.toHaveProperty("reviewRepair");
+    expect(getStorySyncStatus()).toEqual({ status: "disabled", message: null });
+  });
+
+  test("keeps a review journal when sidecar repair fails with sync disabled", async () => {
+    const conversationId = "conversation-repair-failure-without-sync";
+    const session = await seedPendingReviewRepair(conversationId);
+    await putMalformedReviewSidecar(conversationId);
+
+    await runDailyStorySync();
+
+    expect(
+      (await listSyncMeta()).find((meta) => meta.conversationId === conversationId),
+    ).toMatchObject({
+      reviewRepair: {
+        sessionRevision: session.revision,
+        sessionInstanceId: session.sessionInstanceId,
+        review: { score: 92, comment: "本地修复" },
+      },
+    });
+    expect(getStorySyncStatus()).toEqual({ status: "disabled", message: null });
   });
 
   test("delete is durable as a tombstone mutation and token stays separate", async () => {

@@ -2,7 +2,6 @@ import type { DailyStorySyncConversation, DailyStorySyncRemoteObject } from "@ko
 import { createConversationId, createId, type StorySession } from "../types";
 import {
   conflictConversationIdForPayload,
-  conflictConversationId,
   conflictKey,
   createConflictCopyInTransaction,
   dropSyncOutbox,
@@ -115,7 +114,12 @@ async function reconcileLocalOutbox() {
 async function repairPendingReviews() {
   const metas = await listSyncMeta();
   for (const meta of metas) {
-    if (meta.reviewRepair) await repairStoryReviewFromSync(meta.conversationId, meta.reviewRepair);
+    if (!meta.reviewRepair) continue;
+    try {
+      await repairStoryReviewFromSync(meta.conversationId, meta.reviewRepair);
+    } catch {
+      // Keep the marker. A later scheduled run retries the sidecar repair.
+    }
   }
 }
 
@@ -146,7 +150,7 @@ async function createConflictCopy(
   const existing = await readConflict(key);
   let id =
     existing?.conflictConversationId ??
-    conflictConversationId(item.conversationId, item.mutationId);
+    (await conflictConversationIdForPayload(item.conversationId, item.payload));
   let existingSession = await readStorySession(id);
   if (existing?.payloadHash && existing.payloadHash !== payloadHash) {
     id = await conflictConversationIdForPayload(item.conversationId, item.payload);
@@ -181,7 +185,28 @@ async function createConflictCopy(
       updatedAt: new Date().toISOString(),
       title: truncateConflictTitle(local.title ?? local.storyZh.slice(0, 36)),
     } satisfies StorySession);
-  await createConflictCopyInTransaction(key, item.conversationId, id, payloadHash, copy);
+  let copyResult = await createConflictCopyInTransaction(
+    key,
+    item.conversationId,
+    id,
+    payloadHash,
+    copy,
+  );
+  if (copyResult === "collision") {
+    const baseId = await conflictConversationIdForPayload(item.conversationId, item.payload);
+    for (let suffix = 2; suffix <= 9 && copyResult === "collision"; suffix += 1) {
+      id = `${baseId.slice(0, 156)}_${suffix}`;
+      const candidate = await readStorySession(id);
+      copyResult = await createConflictCopyInTransaction(
+        key,
+        item.conversationId,
+        id,
+        payloadHash,
+        candidate ?? copy,
+      );
+    }
+    if (copyResult === "collision") throw new Error("无法创建安全的冲突副本。");
+  }
   const marker = await readSyncMeta(id);
   if (marker?.reviewRepair) await repairStoryReviewFromSync(id, marker.reviewRepair);
   await refreshSyncOutboxPayload(id);
@@ -203,8 +228,8 @@ async function handleConflict(
   }
   if (item.operation === "delete") {
     if (remote.deleted) {
-      await applyRemoteObject(remote);
       await dropSyncOutbox(item.conversationId, item.mutationId);
+      await applyRemoteObject(remote);
       return;
     }
     await recordConflict(
@@ -213,8 +238,8 @@ async function handleConflict(
       undefined,
       "delete",
     );
-    await applyRemoteObject(remote);
     await dropSyncOutbox(item.conversationId, item.mutationId);
+    await applyRemoteObject(remote);
     return;
   }
   if (item.payload && remote.payload) {
@@ -225,8 +250,8 @@ async function handleConflict(
     }
   }
   await createConflictCopy(item);
-  await applyRemoteObject(remote);
   await dropSyncOutbox(item.conversationId, item.mutationId);
+  await applyRemoteObject(remote);
 }
 
 async function pushPending(token: string, ensureLease: () => Promise<void>) {
@@ -264,6 +289,7 @@ async function pullAndApply(token: string, ensureLease: () => Promise<void>) {
   await ensureLease();
   const remoteObjects = await pullSyncObjects(token);
   for (const remote of remoteObjects) {
+    await ensureLease();
     // Re-read immediately before each apply. A user mutation may have been
     // committed after the page-level pull started.
     if ((await listSyncOutbox()).some((item) => item.conversationId === remote.conversationId))

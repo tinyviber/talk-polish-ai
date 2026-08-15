@@ -17,6 +17,7 @@ import {
   syncMetaSchema,
   syncOutboxSchema,
   type StoredSession,
+  type StoredSyncOutbox,
 } from "./internal/schemas";
 import { setResult, transaction } from "./internal/transaction";
 import {
@@ -459,86 +460,46 @@ export function applyRemoteStoryDeletion(
 }
 
 export async function repairStoryReviewFromSync(conversationId: string, repair: ReviewRepair) {
-  const canRepairDelete =
-    repair.operation === "delete"
-      ? await transaction<boolean>([SESSION_STORE, SYNC_OUTBOX_STORE], "readonly", (tx) => {
-          const sessionRequest = tx.objectStore(SESSION_STORE).get(conversationId);
-          const outboxRequest = tx.objectStore(SYNC_OUTBOX_STORE).get(conversationId);
-          let sessionReady = false;
-          let outboxReady = false;
-          const finish = () => {
-            if (!sessionReady || !outboxReady) return;
-            const outbox =
-              outboxRequest.result === undefined
-                ? null
-                : syncOutboxSchema.parse(outboxRequest.result);
-            setResult(
-              tx,
-              sessionRequest.result === undefined &&
-                (!outbox || (outbox.operation === "delete" && outbox.localRevision === null)),
-            );
-          };
-          sessionRequest.onsuccess = () => {
-            sessionReady = true;
-            finish();
-          };
-          outboxRequest.onsuccess = () => {
-            outboxReady = true;
-            finish();
-          };
-        })
-      : false;
-  const session =
-    repair.operation === "upsert"
-      ? await transaction<StorySession | null>(
-          [SESSION_STORE, SYNC_OUTBOX_STORE],
-          "readonly",
-          (tx) => {
-            const request = tx.objectStore(SESSION_STORE).get(conversationId);
-            const outboxRequest = tx.objectStore(SYNC_OUTBOX_STORE).get(conversationId);
-            let sessionReady = false;
-            let outboxReady = false;
-            let sessionValue: StorySession | null = null;
-            const finish = () => {
-              if (!sessionReady || !outboxReady) return;
-              const outbox =
-                outboxRequest.result === undefined
-                  ? null
-                  : syncOutboxSchema.parse(outboxRequest.result);
-              if (outbox && outbox.localRevision !== repair.sessionRevision) {
-                setResult(tx, null);
-                return;
-              }
-              setResult(tx, sessionValue);
-            };
-            request.onsuccess = () => {
-              const raw = request.result as unknown;
-              if (raw !== undefined) {
-                const value = fromStoredSession(sessionSchema.parse(raw));
-                if (
-                  value.revision === repair.sessionRevision &&
-                  value.sessionInstanceId === repair.sessionInstanceId
-                ) {
-                  sessionValue = value;
-                }
-              }
-              sessionReady = true;
-              finish();
-            };
-            outboxRequest.onsuccess = () => {
-              outboxReady = true;
-              finish();
-            };
-          },
-        )
-      : null;
-  if (repair.operation === "upsert" && !session) {
+  const state = await transaction<{
+    session: StorySession | null;
+    outbox: StoredSyncOutbox | null;
+  }>([SESSION_STORE, SYNC_OUTBOX_STORE], "readonly", (tx) => {
+    const sessionRequest = tx.objectStore(SESSION_STORE).get(conversationId);
+    const outboxRequest = tx.objectStore(SYNC_OUTBOX_STORE).get(conversationId);
+    let loaded = 0;
+    const finish = () => {
+      if (loaded !== 2) return;
+      const raw = sessionRequest.result as unknown;
+      setResult(tx, {
+        session: raw === undefined ? null : fromStoredSession(sessionSchema.parse(raw)),
+        outbox:
+          outboxRequest.result === undefined ? null : syncOutboxSchema.parse(outboxRequest.result),
+      });
+    };
+    sessionRequest.onsuccess = () => {
+      loaded += 1;
+      finish();
+    };
+    outboxRequest.onsuccess = () => {
+      loaded += 1;
+      finish();
+    };
+  });
+  const matchesUpsert =
+    state.session?.revision === repair.sessionRevision &&
+    state.session?.sessionInstanceId === repair.sessionInstanceId &&
+    (!state.outbox || state.outbox.localRevision === repair.sessionRevision);
+  const matchesDelete =
+    state.session === null &&
+    (!state.outbox || (state.outbox.operation === "delete" && state.outbox.localRevision === null));
+  if (
+    (repair.operation === "upsert" && !matchesUpsert) ||
+    (repair.operation === "delete" && !matchesDelete)
+  ) {
+    await clearReviewRepairMarker(conversationId, repair);
     return false;
   }
-  if (repair.operation === "delete" && session) {
-    return false;
-  }
-  if (repair.operation === "upsert" && session) {
+  if (repair.operation === "upsert") {
     if (repair.review) {
       const sidecar = {
         score: repair.review.score,
@@ -567,10 +528,8 @@ export async function repairStoryReviewFromSync(conversationId: string, repair: 
         );
       }
     }
-  } else if (repair.operation === "delete" && canRepairDelete) {
-    await deleteDailyStoryReview(conversationId);
-  } else {
-    return false;
+  } else if (repair.sessionRevision !== null && repair.sessionInstanceId) {
+    await deleteDailyStoryReview(conversationId, repair.sessionRevision, repair.sessionInstanceId);
   }
   await clearReviewRepairMarker(conversationId, repair);
   return true;

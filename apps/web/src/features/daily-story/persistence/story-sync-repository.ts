@@ -383,7 +383,7 @@ export async function markSyncSuccess(
   await transaction<void>(
     [SYNC_META_STORE, SYNC_OUTBOX_STORE, SYNC_CONFLICT_STORE],
     "readwrite",
-    (tx) => {
+    (tx, abort) => {
       const metas = tx.objectStore(SYNC_META_STORE);
       const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
       const conflicts = tx.objectStore(SYNC_CONFLICT_STORE);
@@ -399,52 +399,72 @@ export async function markSyncSuccess(
             ? null
             : syncOutboxSchema.parse(current.result)
           : null;
+        if (!currentValue || currentValue.mutationId !== item.mutationId) {
+          if (currentValue) {
+            const rebase = outbox.put({
+              ...currentValue,
+              expectedRemoteRevision:
+                currentValue.expectedRemoteRevision === null
+                  ? remoteRevision
+                  : Math.max(currentValue.expectedRemoteRevision, remoteRevision),
+            });
+            rebase.onsuccess = () => setResult(tx, undefined);
+          } else {
+            setResult(tx, undefined);
+          }
+          return;
+        }
+
         const meta = syncMetaSchema.parse({
+          ...(existingMeta ?? {
+            conversationId: item.conversationId,
+            remoteRevision: null,
+            localRevision: null,
+          }),
           conversationId: item.conversationId,
           remoteRevision,
           localRevision,
           ...(item.payload?.sessionInstanceId
             ? { sessionInstanceId: item.payload.sessionInstanceId }
-            : {}),
+            : existingMeta?.sessionInstanceId
+              ? { sessionInstanceId: existingMeta.sessionInstanceId }
+              : {}),
           ...(existingMeta?.reviewRepair ? { reviewRepair: existingMeta.reviewRepair } : {}),
           updatedAt: new Date().toISOString(),
         });
         const writeMeta = metas.put(meta);
         writeMeta.onsuccess = () => {
-          if (currentValue?.mutationId !== item.mutationId) {
-            if (currentValue) {
-              outbox.put({ ...currentValue, expectedRemoteRevision: remoteRevision });
-            }
-            setResult(tx, undefined);
-            return;
-          }
           const remove = outbox.delete(item.conversationId);
           remove.onsuccess = () => {
             const resolveConflicts = conflicts.getAll();
             resolveConflicts.onsuccess = () => {
-              for (const raw of resolveConflicts.result as unknown[]) {
-                const conflict = syncConflictSchema.parse(raw);
-                const resolvesUpsert =
-                  item.operation === "upsert" &&
-                  conflict.operation === "upsert" &&
-                  conflict.conflictConversationId === item.conversationId;
-                const resolvesDelete =
-                  item.operation === "delete" &&
-                  conflict.sourceConversationId === item.conversationId &&
-                  conflict.operation === "delete";
-                if (conflict.status !== "open" || (!resolvesUpsert && !resolvesDelete)) {
-                  continue;
+              try {
+                for (const raw of resolveConflicts.result as unknown[]) {
+                  const conflict = syncConflictSchema.parse(raw);
+                  const resolvesUpsert =
+                    item.operation === "upsert" &&
+                    conflict.operation === "upsert" &&
+                    conflict.conflictConversationId === item.conversationId;
+                  const resolvesDelete =
+                    item.operation === "delete" &&
+                    conflict.sourceConversationId === item.conversationId &&
+                    conflict.operation === "delete";
+                  if (conflict.status !== "open" || (!resolvesUpsert && !resolvesDelete)) {
+                    continue;
+                  }
+                  if (resolvesUpsert) {
+                    conflicts.put({ ...conflict, status: "resolved" });
+                  } else {
+                    // A delete conflict is resolved only after a newer delete
+                    // for the same source is accepted (including an idempotent
+                    // retry).
+                    conflicts.delete(conflict.conflictKey);
+                  }
                 }
-                if (resolvesUpsert) {
-                  conflicts.put({ ...conflict, status: "resolved" });
-                } else {
-                  // A delete conflict is resolved only after a newer delete
-                  // for the same source is accepted (including an idempotent
-                  // retry).
-                  conflicts.delete(conflict.conflictKey);
-                }
+                setResult(tx, undefined);
+              } catch (error) {
+                abort(error);
               }
-              setResult(tx, undefined);
             };
           };
         };
@@ -649,10 +669,9 @@ export async function createConflictCopyInTransaction(
           ...(existingMeta ?? {
             conversationId: conflictConversationIdValue,
             remoteRevision: null,
-            localRevision: copy.revision,
+            localRevision: null,
           }),
           conversationId: conflictConversationIdValue,
-          localRevision: copy.revision,
           sessionInstanceId: copy.sessionInstanceId,
           reviewRepair: {
             operation: "upsert" as const,

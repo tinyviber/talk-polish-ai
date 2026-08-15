@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
+  deferNextFakeIndexedDbTransaction,
   installFakeIndexedDb,
   runAfterNextFakeSessionStoreGetAll,
 } from "@/lib/practice/test/fakeIndexedDb";
 import {
+  applyRemoteStoryDeletion,
   applyRemoteStorySession,
   deleteDailyStoryReview,
   ensureDailyStorage,
@@ -128,6 +130,50 @@ describe("Daily Story sync persistence", () => {
     expect(latest[0]?.payload?.messages).toHaveLength(2);
   });
 
+  test("local writes journal the complete review before the sidecar mutation", async () => {
+    const primaryGate = deferNextFakeIndexedDbTransaction();
+    const write = writeStorySession(
+      "conversation-local-review-journal",
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: {
+          score: 92,
+          comment: "完整评分",
+          overallFeedback: "整体清晰。",
+          rubric: null,
+          suggestions: [],
+        },
+      },
+      null,
+    );
+    await primaryGate.started;
+    primaryGate.release();
+
+    const sidecarGate = deferNextFakeIndexedDbTransaction();
+    await sidecarGate.started;
+    expect(await listSyncMeta()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conversationId: "conversation-local-review-journal",
+          reviewRepair: expect.objectContaining({
+            sessionRevision: 1,
+            review: expect.objectContaining({ score: 92, comment: "完整评分" }),
+          }),
+        }),
+      ]),
+    );
+    sidecarGate.release();
+
+    await write;
+    expect(
+      (await listSyncMeta()).find(
+        (meta) => meta.conversationId === "conversation-local-review-journal",
+      ),
+    ).not.toHaveProperty("reviewRepair");
+  });
+
   test("delete is durable as a tombstone mutation and token stays separate", async () => {
     await writeSyncToken("a-local-test-sync-token");
     expect(await readSyncToken()).toBe("a-local-test-sync-token");
@@ -142,6 +188,69 @@ describe("Daily Story sync persistence", () => {
       payload: null,
       localRevision: null,
     });
+  });
+
+  test("local deletes journal sidecar cleanup until it succeeds", async () => {
+    const conversationId = "conversation-local-delete-journal";
+    const saved = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "待删除故事",
+        messages: [],
+        review: { score: 88, comment: "待清理", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    const primaryGate = deferNextFakeIndexedDbTransaction();
+    const deletion = deleteStorySession(conversationId, saved.revision);
+    await primaryGate.started;
+    primaryGate.release();
+
+    const sidecarGate = deferNextFakeIndexedDbTransaction();
+    await sidecarGate.started;
+    expect(await listSyncMeta()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conversationId,
+          reviewRepair: expect.objectContaining({ operation: "delete", review: null }),
+        }),
+      ]),
+    );
+    sidecarGate.release();
+    await deletion;
+    expect(
+      (await listSyncMeta()).find((meta) => meta.conversationId === conversationId),
+    ).not.toHaveProperty("reviewRepair");
+  });
+
+  test("a stale success cannot lower the remote revision expected by a newer mutation", async () => {
+    const first = await writeStorySession(
+      "conversation-stale-remote-revision",
+      { phase: "chatting", storyZh: "初始故事", messages: [] },
+      null,
+    );
+    const firstMutation = (await listSyncOutbox()).find(
+      (item) => item.conversationId === "conversation-stale-remote-revision",
+    );
+    if (!firstMutation) throw new Error("initial outbox missing");
+    await markSyncSuccess(firstMutation, 5, first.revision);
+
+    await writeStorySession(
+      "conversation-stale-remote-revision",
+      { phase: "chatting", storyZh: "更新故事", messages: [] },
+      first.revision,
+    );
+    const newerMutation = (await listSyncOutbox()).find(
+      (item) => item.conversationId === "conversation-stale-remote-revision",
+    );
+    if (!newerMutation) throw new Error("newer outbox missing");
+
+    await markSyncSuccess(firstMutation, 3, first.revision);
+
+    expect(
+      (await listSyncOutbox()).find((item) => item.conversationId === firstMutation.conversationId),
+    ).toMatchObject({ expectedRemoteRevision: 5, mutationId: newerMutation.mutationId });
   });
 
   test("a stale remote upsert cannot resurrect a locally deleted conversation", async () => {
@@ -162,6 +271,15 @@ describe("Daily Story sync persistence", () => {
     expect(result).toBe("skipped");
     expect(await readStorySession("conversation-anti-resurrection")).toBeNull();
     expect((await listSyncOutbox())[0]).toMatchObject({ operation: "delete" });
+  });
+
+  test("a remote tombstone for an already absent conversation needs no sidecar repair", async () => {
+    await expect(applyRemoteStoryDeletion("conversation-already-absent", 3, null)).resolves.toBe(
+      "applied",
+    );
+    expect(
+      (await listSyncMeta()).find((meta) => meta.conversationId === "conversation-already-absent"),
+    ).not.toHaveProperty("reviewRepair");
   });
 
   test("conflict copies use a stable payload id and repair idempotently", async () => {

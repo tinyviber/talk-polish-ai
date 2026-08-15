@@ -22,9 +22,12 @@ import {
 import { setResult, transaction } from "./internal/transaction";
 import {
   deleteDailyStoryReview,
+  deleteDailyStoryReviewGuarded,
+  isSuccessfulSidecarMutation,
   listDailyStoryReviewIds,
   readDailyStoryReview,
-  writeDailyStoryReview,
+  type SidecarMutationStatus,
+  writeDailyStoryReviewGuarded,
 } from "./story-review-repository";
 import { createConversationId } from "../types";
 import type {
@@ -121,8 +124,33 @@ async function readEffectiveSession(sessionResult: SessionReadResult, conversati
 
 export async function ensureDailyStorage() {
   await database();
-  await migrateLegacySession();
+  const legacyReview = await readLegacyCurrentReview();
+  const migrated = await migrateLegacySession(legacyReview);
+  if (migrated) {
+    try {
+      const status = await persistReviewSidecar(
+        migrated.conversationId,
+        migrated.session.review ?? null,
+        migrated.session.revision,
+        migrated.session.sessionInstanceId,
+      );
+      if (isSuccessfulSidecarMutation(status)) {
+        await clearReviewRepairMarker(migrated.conversationId, migrated.reviewRepair);
+      }
+    } catch {
+      // The primary migration and its repair marker are already durable. The
+      // review worker will retry the sidecar write later.
+    }
+  }
   await repairOrphanReviewSidecars();
+}
+
+async function readLegacyCurrentReview() {
+  const exists = await transaction<boolean>(SESSION_STORE, "readonly", (tx) => {
+    const request = tx.objectStore(SESSION_STORE).get(CURRENT);
+    request.onsuccess = () => setResult(tx, request.result !== undefined);
+  });
+  return exists ? readDailyStoryReview(CURRENT) : null;
 }
 
 async function repairOrphanReviewSidecars() {
@@ -149,42 +177,102 @@ async function repairOrphanReviewSidecars() {
   );
 }
 
-async function migrateLegacySession() {
-  return transaction<string | null>([SESSION_STORE, LEASE_STORE], "readwrite", (tx) => {
-    const sessions = tx.objectStore(SESSION_STORE);
-    const leases = tx.objectStore(LEASE_STORE);
-    const sessionRequest = sessions.get(CURRENT);
-    const leaseRequest = leases.get(CURRENT);
-    let sessionLoaded = false;
-    let leaseLoaded = false;
+async function migrateLegacySession(
+  legacyReview: Awaited<ReturnType<typeof readDailyStoryReview>>,
+) {
+  return transaction<{
+    conversationId: string;
+    session: StorySession;
+    reviewRepair: ReviewRepair;
+  } | null>(
+    [SESSION_STORE, LEASE_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE],
+    "readwrite",
+    (tx, abort) => {
+      const sessions = tx.objectStore(SESSION_STORE);
+      const leases = tx.objectStore(LEASE_STORE);
+      const metas = tx.objectStore(SYNC_META_STORE);
+      const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
+      const sessionRequest = sessions.get(CURRENT);
+      const leaseRequest = leases.get(CURRENT);
+      const metaRequest = metas.get(CURRENT);
+      const outboxRequest = outbox.get(CURRENT);
+      let loaded = 0;
 
-    const finish = () => {
-      if (!sessionLoaded || !leaseLoaded) return;
-      const legacy = sessionRequest.result as StoredSession | undefined;
-      if (!legacy) {
-        setResult(tx, null);
-        return;
-      }
-      const conversationId = createConversationId();
-      sessions.put({ ...legacy, id: conversationId });
-      sessions.delete(CURRENT);
-      const legacyLease = leaseRequest.result as
-        { id: string; ownerId: string; expiresAt: number } | undefined;
-      if (legacyLease) {
-        leases.put({ ...legacyLease, id: conversationId });
-        leases.delete(CURRENT);
-      }
-      setResult(tx, conversationId);
-    };
-    sessionRequest.onsuccess = () => {
-      sessionLoaded = true;
-      finish();
-    };
-    leaseRequest.onsuccess = () => {
-      leaseLoaded = true;
-      finish();
-    };
-  });
+      const finish = () => {
+        if (loaded !== 4) return;
+        try {
+          const rawLegacy = sessionRequest.result as unknown;
+          if (rawLegacy === undefined) {
+            setResult(tx, null);
+            return;
+          }
+          const legacy = sessionSchema.parse(rawLegacy);
+          if (metaRequest.result !== undefined || outboxRequest.result !== undefined) {
+            abort(new SessionConflictError());
+            return;
+          }
+          const conversationId = createConversationId();
+          const sessionInstanceId = legacy.sessionInstanceId ?? createId("session");
+          const migrated = fromStoredSession({ ...legacy, id: conversationId, sessionInstanceId });
+          const session =
+            migrated.review && legacyReview ? mergeReview(migrated, legacyReview) : migrated;
+          const reviewRepair = syncMetaSchema.parse({
+            conversationId,
+            remoteRevision: null,
+            localRevision: null,
+            sessionInstanceId,
+            reviewRepair: {
+              operation: "upsert" as const,
+              remoteRevision: null,
+              sessionRevision: session.revision,
+              sessionInstanceId,
+              review: session.review ?? null,
+            },
+            updatedAt: new Date().toISOString(),
+          }).reviewRepair!;
+          sessions.put(sessionRecord(session, conversationId));
+          sessions.delete(CURRENT);
+          const legacyLease = leaseRequest.result as
+            { id: string; ownerId: string; expiresAt: number } | undefined;
+          if (legacyLease) {
+            leases.put({ ...legacyLease, id: conversationId });
+            leases.delete(CURRENT);
+          }
+          metas.put(
+            syncMetaSchema.parse({
+              conversationId,
+              remoteRevision: null,
+              localRevision: null,
+              sessionInstanceId,
+              reviewRepair,
+              updatedAt: new Date().toISOString(),
+            }),
+          );
+          queueStorySyncInTransaction(tx, conversationId, "upsert", session, () =>
+            setResult(tx, { conversationId, session, reviewRepair }),
+          );
+        } catch (error) {
+          abort(error);
+        }
+      };
+      sessionRequest.onsuccess = () => {
+        loaded += 1;
+        finish();
+      };
+      leaseRequest.onsuccess = () => {
+        loaded += 1;
+        finish();
+      };
+      metaRequest.onsuccess = () => {
+        loaded += 1;
+        finish();
+      };
+      outboxRequest.onsuccess = () => {
+        loaded += 1;
+        finish();
+      };
+    },
+  );
 }
 
 export async function listStorySessions(): Promise<StorySessionSummary[]> {
@@ -329,36 +417,45 @@ export async function writeStorySession(
             sessionInstanceId: previous?.sessionInstanceId ?? createId("session"),
             updatedAt: new Date().toISOString(),
           };
-          const migratedReviewRepair = matchingRepair
-            ? syncMetaSchema.parse({
-                ...(storedMeta as StoredSyncMeta),
-                reviewRepair: {
-                  ...matchingRepair,
-                  sessionRevision: next.revision,
-                  sessionInstanceId: next.sessionInstanceId,
-                  review: nextReview ?? null,
-                },
-                updatedAt: new Date().toISOString(),
-              }).reviewRepair
-            : undefined;
-          if (migratedReviewRepair) {
-            tx.objectStore(SYNC_META_STORE).put(
-              syncMetaSchema.parse({
-                ...(storedMeta as StoredSyncMeta),
-                reviewRepair: migratedReviewRepair,
-                updatedAt: new Date().toISOString(),
+          const reviewRepair = syncMetaSchema.parse({
+            ...(storedMeta ?? {
+              conversationId,
+              remoteRevision: null,
+              localRevision: null,
+            }),
+            conversationId,
+            reviewRepair: {
+              operation: "upsert" as const,
+              remoteRevision: matchingRepair?.remoteRevision ?? storedMeta?.remoteRevision ?? null,
+              sessionRevision: next.revision,
+              sessionInstanceId: next.sessionInstanceId,
+              review: nextReview ?? null,
+            },
+            updatedAt: new Date().toISOString(),
+          }).reviewRepair;
+          const markerWrite = tx.objectStore(SYNC_META_STORE).put(
+            syncMetaSchema.parse({
+              ...(storedMeta ?? {
+                conversationId,
+                remoteRevision: null,
+                localRevision: null,
               }),
-            );
-          }
-          const write = store.put(sessionRecord(next, conversationId));
-          write.onsuccess = () =>
-            queueStorySyncInTransaction(tx, conversationId, "upsert", next, () =>
-              setResult(tx, {
-                session: next,
-                previousSessionInstanceId: previous?.sessionInstanceId,
-                ...(migratedReviewRepair ? { reviewRepair: migratedReviewRepair } : {}),
-              }),
-            );
+              conversationId,
+              reviewRepair,
+              updatedAt: new Date().toISOString(),
+            }),
+          );
+          markerWrite.onsuccess = () => {
+            const write = store.put(sessionRecord(next, conversationId));
+            write.onsuccess = () =>
+              queueStorySyncInTransaction(tx, conversationId, "upsert", next, () =>
+                setResult(tx, {
+                  session: next,
+                  previousSessionInstanceId: previous?.sessionInstanceId,
+                  reviewRepair,
+                }),
+              );
+          };
         } catch (error) {
           abort(error);
         }
@@ -396,8 +493,9 @@ export async function writeStorySession(
     },
   );
   const { session: persistedSession, previousSessionInstanceId, reviewRepair } = result;
+  let sidecarStatus: SidecarMutationStatus;
   try {
-    await persistReviewSidecar(
+    sidecarStatus = await persistReviewSidecar(
       conversationId,
       persistedSession.review ?? null,
       persistedSession.revision,
@@ -406,7 +504,7 @@ export async function writeStorySession(
     );
   } catch {
     try {
-      await persistReviewSidecar(
+      sidecarStatus = await persistReviewSidecar(
         conversationId,
         persistedSession.review ?? null,
         persistedSession.revision,
@@ -418,7 +516,9 @@ export async function writeStorySession(
       throw new StorySidecarPersistenceError(conversationId, "write");
     }
   }
-  if (reviewRepair) await clearReviewRepairMarker(conversationId, reviewRepair);
+  if (reviewRepair && isSuccessfulSidecarMutation(sidecarStatus)) {
+    await clearReviewRepairMarker(conversationId, reviewRepair);
+  }
   notifySession(conversationId, persistedSession.revision);
   return persistedSession;
 }
@@ -440,7 +540,7 @@ async function applyRemoteSessionRecord(
     : null;
   const result = await transaction<{
     status: RemoteApplyResult;
-    reviewRepair: ReviewRepair;
+    reviewRepair: ReviewRepair | null;
     previousSessionInstanceId?: string;
   }>([SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE], "readwrite", (tx, abort) => {
     const sessions = tx.objectStore(SESSION_STORE);
@@ -464,32 +564,36 @@ async function applyRemoteSessionRecord(
         }
 
         const previousSessionInstanceId = current?.sessionInstanceId;
-        const reviewRepair: ReviewRepair = {
-          operation: saved ? "upsert" : "delete",
-          remoteRevision,
-          sessionRevision: saved?.revision ?? current?.revision ?? null,
-          ...(saved?.sessionInstanceId
-            ? { sessionInstanceId: saved.sessionInstanceId }
-            : current?.sessionInstanceId
-              ? { sessionInstanceId: current.sessionInstanceId }
-              : {}),
-          review: saved?.review ?? null,
-        };
+        const reviewRepair: ReviewRepair | null =
+          saved || current?.sessionInstanceId
+            ? {
+                operation: saved ? "upsert" : "delete",
+                remoteRevision,
+                sessionRevision: saved?.revision ?? current?.revision ?? null,
+                ...(saved?.sessionInstanceId
+                  ? { sessionInstanceId: saved.sessionInstanceId }
+                  : current?.sessionInstanceId
+                    ? { sessionInstanceId: current.sessionInstanceId }
+                    : {}),
+                review: saved?.review ?? null,
+              }
+            : null;
         const existingMeta =
           metaRequest.result === undefined ? null : syncMetaSchema.parse(metaRequest.result);
+        const { reviewRepair: _existingRepair, ...metaWithoutRepair } = existingMeta ?? {
+          conversationId,
+          remoteRevision: null,
+          localRevision: null,
+        };
         // The marker and primary session/tombstone commit in one transaction.
         // It is written first so a later sidecar failure is repairable.
         const finalMeta = syncMetaSchema.parse({
-          ...(existingMeta ?? {
-            conversationId,
-            remoteRevision: null,
-            localRevision: null,
-          }),
+          ...metaWithoutRepair,
           conversationId,
           remoteRevision,
           localRevision: saved?.revision ?? null,
           ...(saved?.sessionInstanceId ? { sessionInstanceId: saved.sessionInstanceId } : {}),
-          reviewRepair,
+          ...(reviewRepair ? { reviewRepair } : {}),
           updatedAt: new Date().toISOString(),
         });
         const markerWrite = metas.put(finalMeta);
@@ -523,10 +627,12 @@ async function applyRemoteSessionRecord(
   });
   if (result.status === "skipped") return result.status;
   notifySession(conversationId, saved?.revision ?? remoteRevision, "remote");
+  if (!result.reviewRepair) return "applied";
   try {
     const repair = result.reviewRepair;
+    let sidecarStatus: SidecarMutationStatus;
     if (saved?.review) {
-      await persistReviewSidecar(
+      sidecarStatus = await persistReviewSidecar(
         conversationId,
         saved.review,
         saved.revision,
@@ -534,13 +640,23 @@ async function applyRemoteSessionRecord(
         result.previousSessionInstanceId,
       );
     } else if (saved) {
-      await deleteDailyStoryReview(conversationId, saved.revision, saved.sessionInstanceId);
-    } else if (repair.sessionRevision !== null && repair.sessionInstanceId) {
-      await deleteDailyStoryReview(
+      sidecarStatus = await persistReviewSidecar(
         conversationId,
-        repair.sessionRevision,
-        repair.sessionInstanceId,
+        null,
+        saved.revision,
+        saved.sessionInstanceId,
+        result.previousSessionInstanceId,
       );
+    } else if (repair.sessionRevision !== null && repair.sessionInstanceId) {
+      sidecarStatus = await deleteDailyStoryReviewGuarded(conversationId, {
+        expectedSessionRevision: repair.sessionRevision,
+        expectedSessionInstanceId: repair.sessionInstanceId,
+      });
+    } else {
+      sidecarStatus = "generation-mismatch";
+    }
+    if (!isSuccessfulSidecarMutation(sidecarStatus)) {
+      throw new Error(`Sidecar mutation ${sidecarStatus}`);
     }
     await clearReviewRepairMarker(conversationId, repair);
   } catch {
@@ -673,7 +789,7 @@ export async function repairStoryReviewFromSync(conversationId: string, repair: 
         overallFeedback: repair.review.overallFeedback ?? null,
       };
       const existingSidecar = await readDailyStoryReview(conversationId);
-      await writeDailyStoryReview(
+      const status = await writeDailyStoryReviewGuarded(
         conversationId,
         {
           ...sidecar,
@@ -684,17 +800,26 @@ export async function repairStoryReviewFromSync(conversationId: string, repair: 
           ? { expectedPreviousSessionInstanceId: existingSidecar.sessionInstanceId }
           : undefined,
       );
+      if (!isSuccessfulSidecarMutation(status)) return false;
     } else {
       if (repair.sessionRevision !== null && repair.sessionInstanceId) {
-        await deleteDailyStoryReview(
-          conversationId,
-          repair.sessionRevision,
-          repair.sessionInstanceId,
-        );
+        const status = await deleteDailyStoryReviewGuarded(conversationId, {
+          expectedSessionRevision: repair.sessionRevision,
+          expectedSessionInstanceId: repair.sessionInstanceId,
+        });
+        if (!isSuccessfulSidecarMutation(status)) return false;
+      } else {
+        return false;
       }
     }
   } else if (repair.sessionRevision !== null && repair.sessionInstanceId) {
-    await deleteDailyStoryReview(conversationId, repair.sessionRevision, repair.sessionInstanceId);
+    const status = await deleteDailyStoryReviewGuarded(conversationId, {
+      expectedSessionRevision: repair.sessionRevision,
+      expectedSessionInstanceId: repair.sessionInstanceId,
+    });
+    if (!isSuccessfulSidecarMutation(status)) return false;
+  } else {
+    return false;
   }
   await clearReviewRepairMarker(conversationId, repair);
   return true;
@@ -730,7 +855,11 @@ export async function deleteStorySession(
   ) {
     throw new SessionConflictError();
   }
-  const result = await transaction<{ revision: number; sessionInstanceId?: string } | null>(
+  const result = await transaction<{
+    revision: number;
+    sessionInstanceId?: string;
+    reviewRepair?: ReviewRepair;
+  } | null>(
     ownerId === undefined
       ? [SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE]
       : [SESSION_STORE, LEASE_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE],
@@ -738,13 +867,16 @@ export async function deleteStorySession(
     (tx, abort) => {
       const store = tx.objectStore(SESSION_STORE);
       const request = store.get(conversationId);
+      const metaStore = tx.objectStore(SYNC_META_STORE);
+      const metaRequest = metaStore.get(conversationId);
       const leaseRequest =
         ownerId === undefined ? undefined : tx.objectStore(LEASE_STORE).get(conversationId);
       let sessionLoaded = false;
+      let metaLoaded = false;
       let leaseLoaded = ownerId === undefined;
 
       const commit = () => {
-        if (!sessionLoaded || !leaseLoaded) return;
+        if (!sessionLoaded || !metaLoaded || !leaseLoaded) return;
         try {
           if (ownerId !== undefined) {
             const leaseRecord = leaseRequest?.result as unknown;
@@ -766,16 +898,53 @@ export async function deleteStorySession(
             abort(new SessionConflictError());
             return;
           }
+          const existingMeta =
+            metaRequest.result === undefined ? null : syncMetaSchema.parse(metaRequest.result);
           const deletion = store.delete(conversationId);
-          deletion.onsuccess = () =>
-            queueStorySyncInTransaction(tx, conversationId, "delete", null, () =>
-              setResult(
-                tx,
-                current
-                  ? { revision: current.revision, sessionInstanceId: current.sessionInstanceId }
-                  : null,
-              ),
+          deletion.onsuccess = () => {
+            if (!current?.sessionInstanceId) {
+              queueStorySyncInTransaction(tx, conversationId, "delete", null, () =>
+                setResult(tx, null),
+              );
+              return;
+            }
+            const reviewRepair = syncMetaSchema.parse({
+              ...(existingMeta ?? {
+                conversationId,
+                remoteRevision: null,
+                localRevision: null,
+              }),
+              conversationId,
+              reviewRepair: {
+                operation: "delete" as const,
+                remoteRevision: existingMeta?.remoteRevision ?? null,
+                sessionRevision: current.revision,
+                sessionInstanceId: current.sessionInstanceId,
+                review: null,
+              },
+              updatedAt: new Date().toISOString(),
+            }).reviewRepair;
+            const markerWrite = metaStore.put(
+              syncMetaSchema.parse({
+                ...(existingMeta ?? {
+                  conversationId,
+                  remoteRevision: null,
+                  localRevision: null,
+                }),
+                conversationId,
+                reviewRepair,
+                updatedAt: new Date().toISOString(),
+              }),
             );
+            markerWrite.onsuccess = () =>
+              queueStorySyncInTransaction(tx, conversationId, "delete", null, () =>
+                setResult(tx, {
+                  revision: current.revision,
+                  sessionInstanceId: current.sessionInstanceId,
+                  reviewRepair,
+                }),
+              );
+          };
         } catch (error) {
           abort(error);
         }
@@ -783,6 +952,10 @@ export async function deleteStorySession(
 
       request.onsuccess = () => {
         sessionLoaded = true;
+        commit();
+      };
+      metaRequest.onsuccess = () => {
+        metaLoaded = true;
         commit();
       };
       if (leaseRequest) {
@@ -794,18 +967,27 @@ export async function deleteStorySession(
     },
   );
   notifySession(conversationId, (expectedRevision ?? 0) + 1);
-  if (result?.sessionInstanceId) {
+  if (result?.reviewRepair && result.sessionInstanceId) {
+    let sidecarStatus: SidecarMutationStatus;
     try {
-      await deleteDailyStoryReview(conversationId, result.revision, result.sessionInstanceId);
+      sidecarStatus = await deleteDailyStoryReviewGuarded(conversationId, {
+        expectedSessionRevision: result.revision,
+        expectedSessionInstanceId: result.sessionInstanceId,
+      });
     } catch {
       try {
-        await deleteDailyStoryReview(conversationId, result.revision, result.sessionInstanceId);
+        sidecarStatus = await deleteDailyStoryReviewGuarded(conversationId, {
+          expectedSessionRevision: result.revision,
+          expectedSessionInstanceId: result.sessionInstanceId,
+        });
       } catch {
         throw new StorySidecarPersistenceError(conversationId, "delete");
       }
     }
+    if (isSuccessfulSidecarMutation(sidecarStatus)) {
+      await clearReviewRepairMarker(conversationId, result.reviewRepair);
+    }
   }
-  await clearReviewRepairMarker(conversationId);
 }
 
 async function persistReviewSidecar(
@@ -814,12 +996,12 @@ async function persistReviewSidecar(
   sessionRevision: number,
   sessionInstanceId?: string,
   expectedPreviousSessionInstanceId?: string,
-) {
+): Promise<SidecarMutationStatus> {
   if (review) {
     const writeOptions = expectedPreviousSessionInstanceId
       ? { expectedPreviousSessionInstanceId }
       : undefined;
-    await writeDailyStoryReview(
+    return writeDailyStoryReviewGuarded(
       conversationId,
       {
         score: review.score,
@@ -833,9 +1015,11 @@ async function persistReviewSidecar(
       },
       writeOptions,
     );
-  } else {
-    if (sessionInstanceId) {
-      await deleteDailyStoryReview(conversationId, sessionRevision, sessionInstanceId);
-    }
   }
+  if (!sessionInstanceId) return "generation-mismatch";
+  return deleteDailyStoryReviewGuarded(conversationId, {
+    expectedSessionRevision: sessionRevision,
+    expectedSessionInstanceId: sessionInstanceId,
+    ...(expectedPreviousSessionInstanceId ? { expectedPreviousSessionInstanceId } : {}),
+  });
 }

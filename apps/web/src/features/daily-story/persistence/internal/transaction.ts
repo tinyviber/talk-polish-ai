@@ -6,6 +6,8 @@ import {
   SESSION_STORE,
   LEASE_STORE,
   REVIEW_STORE,
+  SYNC_META_STORE,
+  SYNC_OUTBOX_STORE,
 } from "./database";
 import { isRecoverableDatabaseError, normalizeStorageError, DailyStorageError } from "../errors";
 
@@ -143,7 +145,10 @@ function runSessionImportTransaction<T>(run: SessionImportRunner<T>) {
           }
         };
         try {
-          const opened = db.transaction([SESSION_STORE, LEASE_STORE], "readwrite");
+          const opened = db.transaction(
+            [SESSION_STORE, LEASE_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE],
+            "readwrite",
+          );
           tx = opened;
           opened.oncomplete = () => resolve(result!);
           opened.onerror = opened.onabort = () =>

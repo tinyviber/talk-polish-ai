@@ -66,6 +66,13 @@ describe("API boundary", () => {
     expect(response.headers["x-content-type-options"]).toBe("nosniff");
   });
 
+  test("rejects sync access when no personal sync token is configured", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/sync/conversations" });
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error.code).toBe("unauthorized");
+    expect(response.headers["cache-control"]).toBe("private, no-store");
+  });
+
   test("returns a health response even when local postgres is down", async () => {
     const response = await app.inject({ method: "GET", url: "/health" });
     expect(response.statusCode).toBe(200);

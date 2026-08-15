@@ -15,6 +15,7 @@ import { promptRoutes } from "./modules/prompts/routes";
 import { sessionRoutes } from "./modules/sessions/routes";
 import { providerRoutes } from "./modules/providers/routes";
 import { dailyStoryRoutes } from "./modules/daily-story/routes";
+import { dailyStorySyncRoutes } from "./modules/daily-story-sync/routes";
 import type { Env } from "./env";
 import { buildRuntime, type Runtime } from "./runtime";
 
@@ -87,4 +88,5 @@ export async function registerRoutes(
     service: runtime.dailyStory,
     isProduction: config.NODE_ENV === "production",
   });
+  await app.register(dailyStorySyncRoutes);
 }

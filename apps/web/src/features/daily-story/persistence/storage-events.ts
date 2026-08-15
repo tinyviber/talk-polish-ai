@@ -1,6 +1,6 @@
 export type DailyStorageEvent =
   | { kind: "settings"; revision: number }
-  | { kind: "session"; conversationId: string; revision: number }
+  | { kind: "session"; conversationId: string; revision: number; origin?: "local" | "remote" }
   | { kind: "lease"; conversationId: string; ownerId: string }
   | { kind: "leaseReleased"; conversationId: string; ownerId: string };
 
@@ -17,8 +17,14 @@ export function notifySettings(revision: number) {
   storageChannel()?.postMessage({ kind: "settings", revision });
 }
 
-export function notifySession(conversationId: string, revision: number) {
-  storageChannel()?.postMessage({ kind: "session", conversationId, revision });
+export function notifySession(
+  conversationId: string,
+  revision: number,
+  origin: "local" | "remote" = "local",
+) {
+  const event = { kind: "session" as const, conversationId, revision, origin };
+  listeners.forEach((callback) => callback(event));
+  storageChannel()?.postMessage(event);
 }
 
 export function notifyLease(conversationId: string, ownerId: string) {
@@ -40,11 +46,12 @@ export function subscribeDailyStorage(listener: (event: DailyStorageEvent) => vo
     currentChannel.onmessage = (event: MessageEvent<unknown>) => {
       const payload = event.data;
       if (!payload || typeof payload !== "object") return;
-      const { kind, conversationId, revision, ownerId } = payload as {
+      const { kind, conversationId, revision, ownerId, origin } = payload as {
         kind?: unknown;
         conversationId?: unknown;
         revision?: unknown;
         ownerId?: unknown;
+        origin?: unknown;
       };
       if (kind === "settings" && typeof revision === "number") {
         listeners.forEach((callback) => callback({ kind, revision }));
@@ -53,7 +60,14 @@ export function subscribeDailyStorage(listener: (event: DailyStorageEvent) => vo
         typeof conversationId === "string" &&
         typeof revision === "number"
       ) {
-        listeners.forEach((callback) => callback({ kind, conversationId, revision }));
+        listeners.forEach((callback) =>
+          callback({
+            kind,
+            conversationId,
+            revision,
+            ...(origin === "remote" ? { origin } : {}),
+          }),
+        );
       } else if (
         kind === "lease" &&
         typeof conversationId === "string" &&

@@ -16,6 +16,8 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default("*"),
   /** HMAC key used to sign anonymous learner bearer tokens. Change in deployment. */
   ANON_TOKEN_SECRET: z.string().min(16).default("local-development-anon-token-secret"),
+  /** SHA-256 hex digest of the personal sync bearer token; raw token never lives on server. */
+  SYNC_API_TOKEN_HASH: optionalString(),
   ANON_TOKEN_TTL_SEC: z.coerce
     .number()
     .int()
@@ -116,6 +118,9 @@ export function env(): Env {
     if (parsed.data.NODE_ENV === "production") {
       assertProductionSecret(parsed.data.ANON_TOKEN_SECRET);
     }
+    if (parsed.data.SYNC_API_TOKEN_HASH) {
+      assertSyncTokenHash(parsed.data.SYNC_API_TOKEN_HASH);
+    }
     if (parsed.data.NODE_ENV === "production" && parsed.data.CORS_ORIGIN === "*") {
       throw new Error("CORS_ORIGIN must be explicit in production.");
     }
@@ -183,6 +188,12 @@ export function assertProductionSecret(secret: string) {
     throw new Error(
       "ANON_TOKEN_SECRET must be a unique random secret of at least 32 characters in production.",
     );
+  }
+}
+
+export function assertSyncTokenHash(hash: string) {
+  if (!/^[a-f0-9]{64}$/i.test(hash)) {
+    throw new Error("SYNC_API_TOKEN_HASH must be a SHA-256 hex digest.");
   }
 }
 

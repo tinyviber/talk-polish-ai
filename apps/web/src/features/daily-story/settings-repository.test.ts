@@ -3,6 +3,7 @@ import {
   closeNextFakeIndexedDbTransaction,
   deferNextFakeIndexedDbTransaction,
   installFakeIndexedDb,
+  runAfterNextFakeSessionStoreGetAll,
 } from "@/lib/practice/test/fakeIndexedDb";
 import {
   SessionConflictError,
@@ -24,10 +25,15 @@ import {
 } from "./settings-repository";
 import {
   deleteDailyStoryReview,
+  readDailyStoryReview,
   releaseStoryLeaseToken,
   renewStoryLeaseToken,
   writeDailyStoryReview,
 } from "./persistence";
+import { SYNC_META_STORE } from "./persistence/internal/database";
+import { syncMetaSchema } from "./persistence/internal/schemas";
+import { setResult, transaction } from "./persistence/internal/transaction";
+import type { DailyReview } from "./types";
 import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import {
   __closeDailyStorageConnectionForTests,
@@ -134,6 +140,33 @@ async function clearRawStore(storeName: "storySessions" | "storyLeases") {
     read.onsuccess = () => {
       for (const record of read.result as Array<{ id: string }>) store.delete(record.id);
     };
+  });
+}
+
+async function putReviewRepairMarker(
+  conversationId: string,
+  sessionRevision: number,
+  sessionInstanceId: string,
+  review: DailyReview,
+) {
+  await transaction<void>(SYNC_META_STORE, "readwrite", (tx) => {
+    const request = tx.objectStore(SYNC_META_STORE).put(
+      syncMetaSchema.parse({
+        conversationId,
+        remoteRevision: null,
+        localRevision: sessionRevision,
+        sessionInstanceId,
+        reviewRepair: {
+          operation: "upsert",
+          remoteRevision: null,
+          sessionRevision,
+          sessionInstanceId,
+          review,
+        },
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    request.onsuccess = () => setResult(tx, undefined);
   });
 }
 
@@ -846,6 +879,125 @@ describe("Daily Story IndexedDB", () => {
     ]);
   });
 
+  test("exports the complete review from a matching repair journal when sidecar is absent", async () => {
+    const conversationId = "conversation-export-review-repair";
+    const session = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "导出评分",
+        messages: [],
+        review: {
+          score: 92,
+          comment: "完整评论",
+          overallFeedback: "整体清晰。",
+          rubric: null,
+          suggestions: [],
+        },
+      },
+      null,
+    );
+    await deleteDailyStoryReview(conversationId, session.revision, session.sessionInstanceId);
+    await putReviewRepairMarker(conversationId, session.revision, session.sessionInstanceId!, {
+      score: 92,
+      comment: "完整评论",
+      overallFeedback: "整体清晰。",
+      rubric: null,
+      suggestions: [],
+    });
+
+    const exported = JSON.parse(await exportStorySessions()) as {
+      sessions: Array<{ review?: Record<string, unknown> }>;
+    };
+    expect(exported.sessions[0]?.review).toMatchObject({
+      score: 92,
+      comment: "完整评论",
+      overallFeedback: "整体清晰。",
+      rubric: null,
+      suggestions: [],
+    });
+  });
+
+  test("keeps export order from the initial session snapshot", async () => {
+    await writeStorySession(
+      "conversation-export-order-a",
+      {
+        phase: "chatting",
+        storyZh: "第一个故事",
+        messages: [],
+      },
+      null,
+    );
+    await writeStorySession(
+      "conversation-export-order-b",
+      {
+        phase: "chatting",
+        storyZh: "第二个故事",
+        messages: [],
+      },
+      null,
+    );
+
+    const exported = JSON.parse(await exportStorySessions()) as {
+      sessions: Array<{ id: string }>;
+    };
+    expect(exported.sessions.map((session) => session.id)).toEqual([
+      "conversation-export-order-a",
+      "conversation-export-order-b",
+    ]);
+  });
+
+  test("fails closed when a session disappears during export", async () => {
+    const conversationId = "conversation-export-disappears";
+    const session = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "即将消失", messages: [] },
+      null,
+    );
+    runAfterNextFakeSessionStoreGetAll(async () => {
+      await deleteStorySession(conversationId, session.revision);
+    });
+
+    await expect(exportStorySessions()).rejects.toMatchObject({ name: "StoryImportError" });
+  });
+
+  test("fails closed when a session revision changes during export", async () => {
+    const conversationId = "conversation-export-revision-race";
+    const session = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "旧版本", messages: [] },
+      null,
+    );
+    runAfterNextFakeSessionStoreGetAll(async () => {
+      await writeStorySession(
+        conversationId,
+        { phase: "chatting", storyZh: "新版本", messages: [] },
+        session.revision,
+      );
+    });
+
+    await expect(exportStorySessions()).rejects.toMatchObject({ name: "StoryImportError" });
+  });
+
+  test("fails closed when a session generation changes during export", async () => {
+    const conversationId = "conversation-export-generation-race";
+    const session = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "旧一代", messages: [] },
+      null,
+    );
+    runAfterNextFakeSessionStoreGetAll(async () => {
+      await deleteStorySession(conversationId, session.revision);
+      await writeStorySession(
+        conversationId,
+        { phase: "chatting", storyZh: "新一代", messages: [] },
+        null,
+      );
+    });
+
+    await expect(exportStorySessions()).rejects.toMatchObject({ name: "StoryImportError" });
+  });
+
   test("imports legacy v1 exports and carries forward an unscored review", async () => {
     await clearRawStore("storySessions");
     await clearRawStore("storyLeases");
@@ -995,6 +1147,24 @@ describe("Daily Story IndexedDB", () => {
     await expect(readStorySession("sidecar-generation-race")).resolves.toMatchObject({
       sessionInstanceId: second.sessionInstanceId,
       review: { score: 91, comment: "保留" },
+    });
+  });
+
+  test("startup cleanup preserves an orphan sidecar for later recovery", async () => {
+    const conversationId = "conversation-orphan-review";
+    await writeDailyStoryReview(conversationId, {
+      score: 84,
+      comment: "待恢复",
+      overallFeedback: "保留孤立备份。",
+      rubric: null,
+    });
+
+    await ensureDailyStorage();
+
+    await expect(readDailyStoryReview(conversationId)).resolves.toMatchObject({
+      score: 84,
+      comment: "待恢复",
+      overallFeedback: "保留孤立备份。",
     });
   });
 

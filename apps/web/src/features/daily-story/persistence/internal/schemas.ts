@@ -5,6 +5,8 @@ import {
   dailyStoryReviewRubricSchema,
   providerPresetIdSchema,
 } from "@kotoba/contracts";
+import { dailyStorySyncConversationSchema, dailyStorySyncReviewSchema } from "@kotoba/contracts";
+import type { DailyStorySyncConversation } from "@kotoba/contracts";
 import type { ReviewRubric } from "../../types";
 import { CURRENT } from "./database";
 
@@ -283,3 +285,69 @@ export type StoredReviewSidecar = {
   sessionRevision?: number | undefined;
   sessionInstanceId?: string | undefined;
 };
+
+export const syncConfigSchema = z
+  .object({
+    id: z.literal(CURRENT),
+    schemaVersion: z.literal(1),
+    token: z.string().trim().min(16).max(512),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+
+export const syncMetaSchema = z
+  .object({
+    conversationId: z.string().trim().min(1).max(160),
+    remoteRevision: z.number().int().positive().nullable(),
+    localRevision: z.number().int().nonnegative().nullable(),
+    sessionInstanceId: z.string().min(1).max(160).optional(),
+    reviewRepair: z
+      .object({
+        operation: z.enum(["upsert", "delete"]),
+        remoteRevision: z.number().int().positive().nullable(),
+        sessionRevision: z.number().int().nonnegative().nullable(),
+        sessionInstanceId: z.string().min(1).max(160).optional(),
+        review: dailyStorySyncReviewSchema.nullable(),
+      })
+      .strict()
+      .optional(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+
+export const syncOutboxSchema = z
+  .object({
+    conversationId: z.string().trim().min(1).max(160),
+    operation: z.enum(["upsert", "delete"]),
+    mutationId: z.string().min(16).max(160),
+    expectedRemoteRevision: z.number().int().positive().nullable(),
+    localRevision: z.number().int().nonnegative().nullable(),
+    payload: dailyStorySyncConversationSchema.nullable(),
+    queuedAt: z.string().datetime(),
+    attempts: z.number().int().nonnegative(),
+    nextAttemptAt: z.number().int().nonnegative(),
+    lastError: z.string().max(600).optional(),
+  })
+  .strict();
+
+export const syncConflictSchema = z
+  .object({
+    conflictKey: z.string().min(16).max(320),
+    sourceConversationId: z.string().trim().min(1).max(160),
+    operation: z.enum(["upsert", "delete"]).default("upsert"),
+    conflictConversationId: z.string().trim().min(1).max(160).optional(),
+    payloadHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    status: z.enum(["open", "resolved"]).default("open"),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+export type StoredSyncConfig = z.infer<typeof syncConfigSchema>;
+export type StoredSyncMeta = z.infer<typeof syncMetaSchema>;
+export type StoredSyncOutbox = z.infer<typeof syncOutboxSchema> & {
+  payload: DailyStorySyncConversation | null;
+};
+export type StoredSyncConflict = z.infer<typeof syncConflictSchema>;

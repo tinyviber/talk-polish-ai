@@ -24,6 +24,39 @@ Daily Story routes require anonymous learner authentication and use
 `Cache-Control: private, no-store`. Browser service worker policy keeps every
 `/api/*` request, POST/multipart upload, and TTS audio network-only.
 
+## Personal conversation sync
+
+Conversation sync is optional and remains local-first. IndexedDB stays the
+runtime source of truth; sync runs in the page as a best-effort outbox worker.
+It never changes Daily Story LLM history requests and never uploads provider
+settings, API keys, audio, leases, or transient UI state.
+
+The API stores opaque Daily Story text snapshots in PostgreSQL table
+`daily_story_sync_objects`. Each object has an independent server revision and
+is updated with a transactional compare-and-swap. Deletes are permanent
+tombstones, and lost responses are safe to retry with `mutationId`. A CAS
+conflict keeps the remote conversation under its original ID and creates a
+local conflict copy for the divergent text.
+
+Configure one high-entropy personal token on the API host as its SHA-256 hex
+digest; do not put the raw token in Git, Web build variables, URLs, or logs:
+
+```sh
+SYNC_TOKEN='generate-and-store-outside-the-repository'
+printf '%s' "$SYNC_TOKEN" | sha256sum
+```
+
+Set the resulting digest as `SYNC_API_TOKEN_HASH` in the API production env
+(`0600`), run the additive migration with the existing deployment hook, then
+enter the raw token in Settings on each device. The browser stores it only in
+the versioned local IndexedDB sync config. Rotating the digest invalidates old
+tokens; enter the new token on each device.
+
+Review remains in its existing sidecar IndexedDB. Sync reads session + sidecar
+as one aggregate after both local writes complete. A sidecar failure does not
+block local use; startup reconciliation retries the aggregate. Existing JSON
+import/export remains the manual backup and disaster-recovery path.
+
 ## Local development
 
 Requirements: Bun 1.2.17, Docker, and a browser with microphone support.

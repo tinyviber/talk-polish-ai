@@ -1,10 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
+import type { DailyStorySyncPushRequest } from "@kotoba/contracts";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "./app";
 import { db } from "./db/client";
-import { audioRecordings, speakingAttempts, storageCleanupJobs } from "./db/schema";
+import {
+  audioRecordings,
+  dailyStorySyncObjects,
+  speakingAttempts,
+  storageCleanupJobs,
+} from "./db/schema";
 import { ATTEMPT_PROCESSING_STALE_MS } from "./modules/attempts/service";
+import { dailyStorySyncRepository, encodeSyncCursor } from "./modules/daily-story-sync/repository";
 
 const integration = process.env.RUN_INTEGRATION === "1" ? test : test.skip;
 const ttsIntegration =
@@ -364,5 +371,134 @@ describe("persisted practice journey", () => {
     expect(playbackResponse.statusCode).toBe(200);
     expect(playbackResponse.headers["content-type"]).toContain("audio/mpeg");
     expect(Buffer.from(playbackResponse.rawPayload)).toEqual(Buffer.from("integration tts"));
+  });
+});
+
+describe("Daily Story sync repository", () => {
+  const prefix = `integration-sync-${crypto.randomUUID()}-`;
+  const contentHash = "a".repeat(64);
+
+  function liveObject(conversationId: string, revision: number, text: string) {
+    return {
+      conversationId,
+      schemaVersion: 1 as const,
+      revision,
+      sessionInstanceId: `session-${conversationId}`,
+      updatedAt: new Date().toISOString(),
+      phase: "chatting" as const,
+      storyZh: "故事",
+      messages: [{ id: "assistant_1", role: "assistant" as const, text }],
+    };
+  }
+
+  function mutation(
+    mutationId: string,
+    expectedRemoteRevision: number | null,
+    object: ReturnType<typeof liveObject> | null,
+  ): DailyStorySyncPushRequest {
+    return {
+      mutationId,
+      expectedRemoteRevision,
+      clientRevision: object?.revision ?? 0,
+      ...(object?.sessionInstanceId ? { sessionInstanceId: object.sessionInstanceId } : {}),
+      object,
+    };
+  }
+
+  async function apply(
+    conversationId: string,
+    input: DailyStorySyncPushRequest,
+    mutationHash: string,
+  ) {
+    return dailyStorySyncRepository.apply(conversationId, input, contentHash, mutationHash);
+  }
+
+  integration("enforces idempotent mutation hashes, CAS, tombstones, and concurrency", async () => {
+    const conversationId = `${prefix}semantics`;
+    const first = mutation("mutation-first", null, liveObject(conversationId, 1, "Hello."));
+    const accepted = await apply(conversationId, first, "mutation-hash-first");
+    expect(accepted.kind).toBe("accepted");
+    if (accepted.kind !== "accepted") throw new Error("initial sync mutation was rejected");
+    expect(await apply(conversationId, first, "mutation-hash-first")).toMatchObject({
+      kind: "accepted",
+      idempotent: true,
+    });
+    expect((await apply(conversationId, first, "different-mutation-hash")).kind).toBe(
+      "invalid_mutation",
+    );
+
+    const stale = mutation("mutation-stale", null, liveObject(conversationId, 2, "Stale."));
+    expect((await apply(conversationId, stale, "mutation-hash-stale")).kind).toBe("conflict");
+
+    const second = mutation(
+      "mutation-second",
+      accepted.row.remoteRevision,
+      liveObject(conversationId, 2, "Updated."),
+    );
+    const updated = await apply(conversationId, second, "mutation-hash-second");
+    expect(updated.kind).toBe("accepted");
+    if (updated.kind !== "accepted") throw new Error("CAS update was rejected");
+
+    const deleted = mutation("mutation-delete", updated.row.remoteRevision, null);
+    const tombstone = await apply(conversationId, deleted, "mutation-hash-delete");
+    expect(tombstone).toMatchObject({ kind: "accepted", idempotent: false });
+    expect(
+      (
+        await apply(
+          conversationId,
+          mutation("mutation-resurrect", null, liveObject(conversationId, 3, "Old.")),
+          "mutation-hash-resurrect",
+        )
+      ).kind,
+    ).toBe("conflict");
+
+    const concurrentId = `${prefix}concurrent`;
+    const [left, right] = await Promise.all([
+      apply(
+        concurrentId,
+        mutation("mutation-left", null, liveObject(concurrentId, 1, "Left.")),
+        "mutation-hash-left",
+      ),
+      apply(
+        concurrentId,
+        mutation("mutation-right", null, liveObject(concurrentId, 1, "Right.")),
+        "mutation-hash-right",
+      ),
+    ]);
+    expect([left.kind, right.kind].sort()).toEqual(["accepted", "conflict"]);
+  });
+
+  integration("paginates more than one hundred tombstone/live objects", async () => {
+    await db()
+      .delete(dailyStorySyncObjects)
+      .where(like(dailyStorySyncObjects.conversationId, `${prefix}%`));
+    for (let index = 0; index < 101; index += 1) {
+      const conversationId = `${prefix}page-${String(index).padStart(3, "0")}`;
+      const result = await apply(
+        conversationId,
+        mutation(`mutation-page-${index}`, null, liveObject(conversationId, 1, `Page ${index}.`)),
+        `mutation-hash-page-${index}`,
+      );
+      expect(result.kind).toBe("accepted");
+    }
+
+    const first = await dailyStorySyncRepository.list(100);
+    expect(first).toHaveLength(100);
+    const last = first.at(-1);
+    if (!last) throw new Error("first sync page is empty");
+    const second = await dailyStorySyncRepository.list(100, {
+      updatedAt: last.updatedAt.toISOString(),
+      conversationId: last.conversationId,
+    });
+    expect(second.length).toBeGreaterThanOrEqual(1);
+    expect(
+      new Set([...first, ...second].map((row) => row.conversationId)).size,
+    ).toBeGreaterThanOrEqual(101);
+
+    const encoded = encodeSyncCursor(last);
+    expect(encoded).toBeTruthy();
+    await db()
+      .delete(dailyStorySyncObjects)
+      .where(like(dailyStorySyncObjects.conversationId, `${prefix}%`));
   });
 });

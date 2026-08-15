@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+import type { DailyStorySyncConversation } from "@kotoba/contracts";
 
 /* Anonymous learner profiles (device-scoped, no PII). */
 export const learners = pgTable(
@@ -176,4 +177,23 @@ export const progressEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("progress_events_learner_idx").on(t.learnerId)],
+);
+
+/** Single personal sync vault. Tombstones stay forever to prevent resurrection. */
+export const dailyStorySyncObjects = pgTable(
+  "daily_story_sync_objects",
+  {
+    conversationId: varchar("conversation_id", { length: 160 }).primaryKey(),
+    remoteRevision: integer("remote_revision").notNull().default(1),
+    clientRevision: integer("client_revision").notNull().default(0),
+    sessionInstanceId: varchar("session_instance_id", { length: 160 }),
+    contentHash: varchar("content_hash", { length: 64 }).notNull(),
+    mutationHash: varchar("mutation_hash", { length: 64 }).notNull().default(""),
+    deleted: boolean("deleted").notNull().default(false),
+    payload: jsonb("payload").$type<DailyStorySyncConversation | null>(),
+    lastMutationId: varchar("last_mutation_id", { length: 160 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("daily_story_sync_objects_updated_idx").on(t.updatedAt)],
 );

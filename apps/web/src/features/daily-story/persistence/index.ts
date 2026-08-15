@@ -13,11 +13,19 @@ export {
   writeProviderSettings,
 } from "./provider-settings-repository";
 export {
+  readSyncToken,
+  writeSyncToken,
+  listSyncOutbox,
+  listSyncConflicts,
+  queueStorySync,
+} from "./story-sync-repository";
+export {
   deleteStorySession,
   ensureDailyStorage,
   listStorySessions,
   readStorySession,
   writeStorySession,
+  replaceStorySessionFromSync,
 } from "./story-session-repository";
 export {
   deleteDailyStoryReview,

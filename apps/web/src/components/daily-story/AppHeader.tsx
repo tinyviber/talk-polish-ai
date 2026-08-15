@@ -1,6 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { List, Mic, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { SyncStatusBadge } from "./SyncStatusBadge";
 
 export function DailyStoryHeader() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -14,6 +15,7 @@ export function DailyStoryHeader() {
           <span className="font-display text-lg font-semibold tracking-tight">每日故事对话</span>
         </Link>
         <div className="ml-auto flex items-center gap-1">
+          <SyncStatusBadge />
           <Link
             to="/"
             aria-current={pathname === "/" ? "page" : undefined}

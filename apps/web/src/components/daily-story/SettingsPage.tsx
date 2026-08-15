@@ -27,9 +27,12 @@ import {
   clearAllProviders,
   clearProvider,
   readProviderSettings,
+  readSyncToken,
   saveAsrDirectPreference,
   saveProvider,
+  writeSyncToken,
 } from "@/features/daily-story/persistence";
+import { runDailyStorySync } from "@/features/daily-story/sync";
 import {
   applyProviderSelection,
   hasEffectiveProviderEndpointChanged,
@@ -119,6 +122,9 @@ export function SettingsPage() {
     tts: false,
   });
   const [error, setError] = useState<string | null>(null);
+  const [syncToken, setSyncToken] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const operationRef = useRef<Record<DailyCapability, SettingsOperation>>({
     chat: { operationId: 0, draftVersion: 0 },
     asr: { operationId: 0, draftVersion: 0 },
@@ -143,7 +149,7 @@ export function SettingsPage() {
 
   const load = async () => {
     try {
-      const loaded = await readProviderSettings();
+      const [loaded, savedSyncToken] = await Promise.all([readProviderSettings(), readSyncToken()]);
       setSettings(loaded);
       setDrafts({
         chat: toDraft("chat", loaded.chat),
@@ -151,6 +157,7 @@ export function SettingsPage() {
         tts: toDraft("tts", loaded.tts),
       });
       setAsrDirectEnabled(loaded.local?.asrDirect ?? false);
+      setSyncToken(savedSyncToken ?? "");
       setProviderIds({
         chat: loaded.chat?.preset ?? providerIdForEndpoint("chat", loaded.chat?.baseUrl ?? ""),
         asr: loaded.asr?.preset ?? providerIdForEndpoint("asr", loaded.asr?.baseUrl ?? ""),
@@ -190,6 +197,43 @@ export function SettingsPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  const saveSync = async () => {
+    const token = syncToken.trim();
+    if (token && token.length < 16) {
+      setSyncMessage("同步密钥至少需要 16 个字符；生产环境请使用高熵随机密钥。 ");
+      return;
+    }
+    setSyncBusy(true);
+    setSyncMessage(null);
+    try {
+      await writeSyncToken(token || null);
+      if (token) {
+        await runDailyStorySync();
+        setSyncMessage("同步已启用。当前页面继续优先使用本地数据。 ");
+      } else {
+        setSyncMessage("同步已关闭；本地对话和待同步队列保留。 ");
+      }
+    } catch (cause) {
+      setSyncMessage(cause instanceof Error ? cause.message : "无法保存同步设置。 ");
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const clearSync = async () => {
+    setSyncBusy(true);
+    setSyncMessage(null);
+    try {
+      await writeSyncToken(null);
+      setSyncToken("");
+      setSyncMessage("同步已关闭；本地对话和待同步队列保留。 ");
+    } catch (cause) {
+      setSyncMessage(cause instanceof Error ? cause.message : "无法清除同步设置。 ");
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   const update = (capability: DailyCapability, key: keyof Draft, value: string) => {
     invalidateOperations(capability);
@@ -343,6 +387,65 @@ export function SettingsPage() {
         ) : (
           <>
             <ProviderAvailability />
+            <section className="mt-7 rounded-3xl border border-border bg-card p-5 shadow-lift sm:p-6">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="font-display text-2xl">跨设备同步</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    输入服务器配置的个人同步密钥。密钥只保存在当前浏览器 IndexedDB，不会进入
+                    JSON、LLM 请求或对话数据。
+                  </p>
+                </div>
+                <span className="rounded-full bg-secondary px-2.5 py-1 text-xs text-muted-foreground">
+                  可选
+                </span>
+              </div>
+              <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end">
+                <label className="block flex-1 text-sm font-medium" htmlFor="daily-sync-token">
+                  <span>Sync token</span>
+                  <Input
+                    id="daily-sync-token"
+                    className="mt-1.5"
+                    type="password"
+                    value={syncToken}
+                    onChange={(event) => setSyncToken(event.target.value)}
+                    placeholder="输入高熵个人同步密钥"
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="flex gap-2">
+                  <Button
+                    className="rounded-full"
+                    onClick={() => void saveSync()}
+                    disabled={syncBusy}
+                  >
+                    {syncBusy ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Check className="size-4" />
+                    )}
+                    保存并同步
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="rounded-full"
+                    onClick={() => void clearSync()}
+                    disabled={syncBusy || !syncToken}
+                  >
+                    清除
+                  </Button>
+                </div>
+              </div>
+              {syncMessage ? (
+                <p className="mt-3 text-xs text-muted-foreground" role="status">
+                  {syncMessage}
+                </p>
+              ) : null}
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                各设备输入同一密钥即可共享远端
+                conversation。服务器只保存文字快照；网络失败时本地继续可用，恢复网络后自动重试。
+              </p>
+            </section>
             <div className="mt-7 space-y-4">
               <ProviderCard
                 capability="chat"

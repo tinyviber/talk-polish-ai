@@ -1,10 +1,14 @@
 import { DailyStorageError, normalizeStorageError } from "../errors";
 
 export const DB_NAME = "kotoba-loop-settings";
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const SETTINGS_STORE = "providerSettings";
 export const SESSION_STORE = "storySessions";
 export const LEASE_STORE = "storyLeases";
+export const SYNC_CONFIG_STORE = "syncConfig";
+export const SYNC_META_STORE = "syncMeta";
+export const SYNC_OUTBOX_STORE = "syncOutbox";
+export const SYNC_CONFLICT_STORE = "syncConflicts";
 export const CURRENT = "current";
 export const LEASE_MS = 15_000;
 export const REVIEW_DB_NAME = "kotoba-daily-story-review-v2";
@@ -62,6 +66,14 @@ export function database() {
           db.createObjectStore(SESSION_STORE, { keyPath: "id" });
         if (!db.objectStoreNames.contains(LEASE_STORE))
           db.createObjectStore(LEASE_STORE, { keyPath: "id" });
+        if (!db.objectStoreNames.contains(SYNC_CONFIG_STORE))
+          db.createObjectStore(SYNC_CONFIG_STORE, { keyPath: "id" });
+        if (!db.objectStoreNames.contains(SYNC_META_STORE))
+          db.createObjectStore(SYNC_META_STORE, { keyPath: "conversationId" });
+        if (!db.objectStoreNames.contains(SYNC_OUTBOX_STORE))
+          db.createObjectStore(SYNC_OUTBOX_STORE, { keyPath: "conversationId" });
+        if (!db.objectStoreNames.contains(SYNC_CONFLICT_STORE))
+          db.createObjectStore(SYNC_CONFLICT_STORE, { keyPath: "conflictKey" });
       };
       request.onblocked = () => {
         resetCachedConnection();

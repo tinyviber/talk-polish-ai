@@ -1,4 +1,11 @@
-import { CURRENT, LEASE_STORE, SESSION_STORE, database } from "./internal/database";
+import {
+  CURRENT,
+  LEASE_STORE,
+  SESSION_STORE,
+  SYNC_META_STORE,
+  SYNC_OUTBOX_STORE,
+  database,
+} from "./internal/database";
 import { notifySession } from "./storage-events";
 import { SessionConflictError, StorySidecarPersistenceError } from "./errors";
 import { createId } from "../types";
@@ -19,6 +26,7 @@ import type {
   StorySessionSnapshot,
   StorySessionSummary,
 } from "../types";
+import { queueStorySyncInTransaction } from "./story-sync-repository";
 
 type StorySessionWriteResult = {
   session: StorySession;
@@ -180,7 +188,9 @@ export async function writeStorySession(
     throw new SessionConflictError();
   }
   const result = await transaction<StorySessionWriteResult>(
-    ownerId !== undefined ? [SESSION_STORE, LEASE_STORE] : SESSION_STORE,
+    ownerId !== undefined
+      ? [SESSION_STORE, LEASE_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE]
+      : [SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE],
     "readwrite",
     (tx, abort) => {
       const store = tx.objectStore(SESSION_STORE);
@@ -237,10 +247,12 @@ export async function writeStorySession(
           };
           const write = store.put(sessionRecord(next, conversationId));
           write.onsuccess = () =>
-            setResult(tx, {
-              session: next,
-              previousSessionInstanceId: previous?.sessionInstanceId,
-            });
+            queueStorySyncInTransaction(tx, conversationId, "upsert", next, () =>
+              setResult(tx, {
+                session: next,
+                previousSessionInstanceId: previous?.sessionInstanceId,
+              }),
+            );
         } catch (error) {
           abort(error);
         }
@@ -294,6 +306,54 @@ export async function writeStorySession(
   return persistedSession;
 }
 
+/** Apply a validated remote snapshot without incrementing local CAS revision. */
+export async function replaceStorySessionFromSync(
+  conversationId: string,
+  incoming: StorySession,
+): Promise<StorySession> {
+  const saved: StorySession = {
+    ...incoming,
+    schemaVersion: 1,
+    sessionInstanceId: incoming.sessionInstanceId ?? createId("session"),
+  };
+  const result = await transaction<{ previousSessionInstanceId?: string }>(
+    SESSION_STORE,
+    "readwrite",
+    (tx, abort) => {
+      const store = tx.objectStore(SESSION_STORE);
+      const read = store.get(conversationId);
+      read.onsuccess = () => {
+        try {
+          const previousRaw = read.result as unknown;
+          const previous = previousRaw === undefined ? null : sessionSchema.parse(previousRaw);
+          const write = store.put(sessionRecord(saved, conversationId));
+          write.onsuccess = () =>
+            setResult(tx, {
+              ...(previous?.sessionInstanceId
+                ? { previousSessionInstanceId: previous.sessionInstanceId }
+                : {}),
+            });
+        } catch (error) {
+          abort(error);
+        }
+      };
+    },
+  );
+  if (saved.review) {
+    await persistReviewSidecar(
+      conversationId,
+      saved.review,
+      saved.revision,
+      saved.sessionInstanceId,
+      result.previousSessionInstanceId,
+    );
+  } else {
+    await deleteDailyStoryReview(conversationId);
+  }
+  notifySession(conversationId, saved.revision, "remote");
+  return saved;
+}
+
 export function deleteStorySession(expectedRevision: number | null): Promise<void>;
 export function deleteStorySession(
   conversationId: string,
@@ -325,7 +385,9 @@ export async function deleteStorySession(
     throw new SessionConflictError();
   }
   const result = await transaction<{ revision: number; sessionInstanceId?: string } | null>(
-    ownerId === undefined ? SESSION_STORE : [SESSION_STORE, LEASE_STORE],
+    ownerId === undefined
+      ? [SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE]
+      : [SESSION_STORE, LEASE_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE],
     "readwrite",
     (tx, abort) => {
       const store = tx.objectStore(SESSION_STORE);
@@ -360,11 +422,13 @@ export async function deleteStorySession(
           }
           const deletion = store.delete(conversationId);
           deletion.onsuccess = () =>
-            setResult(
-              tx,
-              current
-                ? { revision: current.revision, sessionInstanceId: current.sessionInstanceId }
-                : null,
+            queueStorySyncInTransaction(tx, conversationId, "delete", null, () =>
+              setResult(
+                tx,
+                current
+                  ? { revision: current.revision, sessionInstanceId: current.sessionInstanceId }
+                  : null,
+              ),
             );
         } catch (error) {
           abort(error);

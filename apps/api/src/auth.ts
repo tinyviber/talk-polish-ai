@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { env } from "./env";
 import { ApiError } from "./http/errors";
@@ -89,4 +89,43 @@ export async function requireLearnerAuth(request: FastifyRequest) {
   if (!match) throw ApiError.unauthorized();
   const payload = verifyLearnerToken(match[1]!);
   return requireLearner(payload.sub);
+}
+
+/** Personal sync vault auth. Disabled when no digest is configured. */
+const syncAuthFailures = new Map<string, { count: number; resetAt: number }>();
+const SYNC_AUTH_WINDOW_MS = 15 * 60_000;
+const SYNC_AUTH_MAX_FAILURES = 60;
+
+export function verifySyncToken(token: string, configuredHash = env().SYNC_API_TOKEN_HASH) {
+  const actual = createHash("sha256").update(token, "utf8").digest();
+  const expected = /^[a-f0-9]{64}$/i.test(configuredHash ?? "")
+    ? Buffer.from(configuredHash!, "hex")
+    : Buffer.alloc(actual.byteLength);
+  const valid = Boolean(configuredHash) && timingSafeEqual(actual, expected);
+  if (!valid) throw ApiError.unauthorized("A valid sync token is required.");
+}
+
+export function requireSyncAuth(request: FastifyRequest) {
+  const key = request.ip || "unknown";
+  const now = Date.now();
+  const existing = syncAuthFailures.get(key);
+  if (existing && existing.resetAt > now && existing.count >= SYNC_AUTH_MAX_FAILURES) {
+    throw ApiError.rateLimited("Too many failed sync authentication attempts.");
+  }
+  if (existing && existing.resetAt <= now) syncAuthFailures.delete(key);
+
+  const header = request.headers.authorization;
+  const match = header?.match(/^Bearer\s+(\S+)$/i);
+  try {
+    if (!match) throw ApiError.unauthorized("A valid sync token is required.");
+    verifySyncToken(match[1]!);
+    syncAuthFailures.delete(key);
+  } catch (error) {
+    const failed = syncAuthFailures.get(key);
+    syncAuthFailures.set(key, {
+      count: (failed?.count ?? 0) + 1,
+      resetAt: failed?.resetAt && failed.resetAt > now ? failed.resetAt : now + SYNC_AUTH_WINDOW_MS,
+    });
+    throw error;
+  }
 }

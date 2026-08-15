@@ -11,6 +11,7 @@
     "./attempts": "./src/attempts.ts",
     "./audio": "./src/audio.ts",
     "./daily-story": "./src/daily-story.ts",
+    "./daily-story-sync": "./src/daily-story-sync.ts",
     "./errors": "./src/errors.ts",
     "./expressions": "./src/expressions.ts",
     "./progress": "./src/progress.ts",

@@ -16,6 +16,10 @@ type TransactionGate = {
 };
 
 let nextTransactionGate: TransactionGate | undefined;
+type SessionStoreGetAllHook = (records: unknown[]) => void | Promise<void>;
+let nextSessionStoreGetAllHook: SessionStoreGetAllHook | undefined;
+
+const DAILY_STORY_SESSION_STORE = "storySessions";
 
 function clone<T>(value: T): T {
   try {
@@ -36,10 +40,23 @@ function createRequest<T>() {
   };
 }
 
-function createObjectStoreHandle(store: StoreData, tx: ReturnType<typeof createTransaction>) {
-  const run = <T>(action: () => T) => tx.run(action);
+function createObjectStoreHandle(
+  store: StoreData,
+  storeName: string,
+  tx: ReturnType<typeof createTransaction>,
+) {
+  const run = <T>(action: () => T | Promise<T>) => tx.run(action);
   return {
-    getAll: () => run(() => Array.from(store.records.values()).map((value) => clone(value))),
+    getAll: () =>
+      run(() => {
+        const records = Array.from(store.records.values()).map((value) => clone(value));
+        if (storeName !== DAILY_STORY_SESSION_STORE || !nextSessionStoreGetAllHook) {
+          return records;
+        }
+        const hook = nextSessionStoreGetAllHook;
+        nextSessionStoreGetAllHook = undefined;
+        return Promise.resolve(hook(records)).then(() => records);
+      }),
     getAllKeys: () => run(() => Array.from(store.records.keys())),
     get: (key: IDBValidKey) => run(() => clone(store.records.get(key))),
     put: (value: Record<string, unknown>) =>
@@ -142,21 +159,43 @@ function createTransaction(
         tx.oncomplete?.(new Event("complete"));
       });
     },
-    run<T>(action: () => T) {
+    run<T>(action: () => T | Promise<T>) {
       const request = createRequest<T>();
       tx.begin();
       const execute = () => {
         if (aborted) return;
+        let asynchronous = false;
         try {
-          request.result = action();
-          request.onsuccess?.(new Event("success"));
+          const result = action();
+          if (result instanceof Promise) {
+            asynchronous = true;
+            void result.then(
+              (value) => {
+                if (aborted) return;
+                request.result = value;
+                request.onsuccess?.(new Event("success"));
+                tx.end();
+              },
+              (error: unknown) => {
+                if (aborted) return;
+                request.error = error as Error;
+                tx.error = request.error;
+                request.onerror?.(new Event("error"));
+                tx.forceAbort(request.error);
+                tx.end();
+              },
+            );
+          } else {
+            request.result = result;
+            request.onsuccess?.(new Event("success"));
+          }
         } catch (error) {
           request.error = error as Error;
           tx.error = request.error;
           tx.onerror?.(new Event("error"));
           tx.forceAbort(request.error);
         } finally {
-          tx.end();
+          if (!asynchronous) tx.end();
         }
       };
       if (startGate) void startGate.then(() => queueMicrotask(execute));
@@ -167,7 +206,7 @@ function createTransaction(
       if (!storeNames.includes(name)) throw new Error(`Missing object store: ${name}`);
       const store = data.stores.get(name);
       if (!store) throw new Error(`Missing object store: ${name}`);
-      return createObjectStoreHandle(store, tx) as unknown as IDBObjectStore;
+      return createObjectStoreHandle(store, name, tx) as unknown as IDBObjectStore;
     },
   };
 
@@ -208,6 +247,7 @@ function createDatabase(data: DatabaseData) {
       data.stores.set(name, store);
       return createObjectStoreHandle(
         store,
+        name,
         createTransaction(data, [name]),
       ) as unknown as IDBObjectStore;
     },
@@ -236,6 +276,7 @@ function createDatabase(data: DatabaseData) {
 
 export function installFakeIndexedDb() {
   nextTransactionGate = undefined;
+  nextSessionStoreGetAllHook = undefined;
   const databases = new Map<string, DatabaseData>();
   const databaseHandles = new Set<{ __closeNextTransaction(): void }>();
   const original = globalThis.indexedDB;
@@ -300,6 +341,11 @@ export function installFakeIndexedDb() {
       value: original,
     });
   };
+}
+
+/** Test-only seam: run one async hook after the initial Daily Story session getAll snapshot. */
+export function runAfterNextFakeSessionStoreGetAll(hook: SessionStoreGetAllHook) {
+  nextSessionStoreGetAllHook = hook;
 }
 
 /** Test-only seam: hold the first request of the next transaction. */

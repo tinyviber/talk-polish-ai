@@ -105,9 +105,12 @@ async function readEffectiveSession(sessionResult: SessionReadResult, conversati
       sessionResult.session.revision,
       sessionResult.session.sessionInstanceId,
     );
-  } catch {
-    // The primary database remains usable when the sidecar database is
-    // unavailable. A matching sync marker is the durable fallback.
+  } catch (error) {
+    if (!sessionResult.reviewRepair?.review) throw error;
+    // A matching sync marker is the durable fallback when the sidecar cannot
+    // be read. Without one, do not fabricate a review from the primary record:
+    // it only stores suggestions and would turn a transient read failure into
+    // a destructive null review on the next local write.
   }
   if (sidecar) return mergeReview(sessionResult.session, sidecar);
   const repairedReview = reviewFromRepair(sessionResult.reviewRepair?.review ?? null);
@@ -191,17 +194,17 @@ export async function listStorySessions(): Promise<StorySessionSummary[]> {
     request.onsuccess = () => setResult(tx, request.result as unknown[]);
   });
   const sessions = await Promise.all(
-    records.map(async (record) => {
+    records.map(async (record): Promise<StorySessionSummary | null> => {
       const parsed = sessionSchema.parse(record);
       const effective = await readEffectiveSession(
         await readSessionAndRepair(parsed.id),
         parsed.id,
       );
-      if (!effective) throw new Error("Daily Story session disappeared during listing.");
+      if (!effective) return null;
       return {
         id: parsed.id,
-        revision: parsed.revision,
-        updatedAt: parsed.updatedAt,
+        revision: effective.revision,
+        updatedAt: effective.updatedAt,
         phase: effective.phase,
         storyZh: effective.storyZh,
         title: effective.title ?? deriveStableDailyStoryTitle(effective.storyZh),
@@ -209,7 +212,9 @@ export async function listStorySessions(): Promise<StorySessionSummary[]> {
       } satisfies StorySessionSummary;
     }),
   );
-  return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return sessions
+    .filter((session): session is StorySessionSummary => session !== null)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export async function readStorySession(conversationId = CURRENT): Promise<StorySession | null> {

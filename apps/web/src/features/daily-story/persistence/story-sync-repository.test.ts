@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { installFakeIndexedDb } from "@/lib/practice/test/fakeIndexedDb";
+import {
+  installFakeIndexedDb,
+  runAfterNextFakeSessionStoreGetAll,
+} from "@/lib/practice/test/fakeIndexedDb";
 import {
   applyRemoteStorySession,
   deleteDailyStoryReview,
@@ -25,9 +28,9 @@ import {
   toSyncConversation,
 } from "./story-sync-repository";
 import type { DailyReview, StorySession } from "../types";
-import { SYNC_META_STORE } from "./internal/database";
+import { REVIEW_STORE, SYNC_META_STORE } from "./internal/database";
 import { syncMetaSchema } from "./internal/schemas";
-import { setResult, transaction } from "./internal/transaction";
+import { reviewTransaction, setResult, transaction } from "./internal/transaction";
 import { __resetDailyStorageForTests } from "./testing";
 
 let restore: () => void;
@@ -36,7 +39,7 @@ async function putReviewRepairMarker(
   conversationId: string,
   sessionRevision: number,
   sessionInstanceId: string,
-  review: DailyReview,
+  review: DailyReview | null,
 ) {
   await transaction<void>(SYNC_META_STORE, "readwrite", (tx) => {
     const request = tx.objectStore(SYNC_META_STORE).put(
@@ -55,6 +58,18 @@ async function putReviewRepairMarker(
         updatedAt: new Date().toISOString(),
       }),
     );
+    request.onsuccess = () => setResult(tx, undefined);
+  });
+}
+
+async function putMalformedReviewSidecar(conversationId: string) {
+  await reviewTransaction<void>("readwrite", (tx) => {
+    const request = tx.objectStore(REVIEW_STORE).put({
+      conversationId,
+      score: "not-a-score",
+      comment: null,
+      rubric: null,
+    });
     request.onsuccess = () => setResult(tx, undefined);
   });
 }
@@ -367,6 +382,101 @@ describe("Daily Story sync persistence", () => {
     ).not.toHaveProperty("reviewRepair");
   });
 
+  test("a malformed sidecar without a repair marker rejects instead of returning an empty review", async () => {
+    const conversationId = "conversation-malformed-review-no-marker";
+    const saved = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: { score: 90, comment: "真实评分", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await putMalformedReviewSidecar(conversationId);
+
+    await expect(readStorySession(conversationId)).rejects.toThrow();
+    expect(saved.revision).toBe(1);
+  });
+
+  test("a malformed sidecar with a null repair marker still rejects", async () => {
+    const conversationId = "conversation-malformed-review-null-marker";
+    const saved = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: { score: 90, comment: "真实评分", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await putMalformedReviewSidecar(conversationId);
+    await putReviewRepairMarker(conversationId, saved.revision, saved.sessionInstanceId!, null);
+
+    await expect(readStorySession(conversationId)).rejects.toThrow();
+  });
+
+  test("a malformed sidecar falls back to and preserves a matching full repair marker", async () => {
+    const conversationId = "conversation-malformed-review-with-marker";
+    const saved = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: { score: 90, comment: "旧评分", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    const repairedReview: DailyReview = {
+      score: 95,
+      comment: "远端完整评分",
+      overallFeedback: "整体表达清晰。",
+      rubric: null,
+      suggestions: [],
+    };
+    await putMalformedReviewSidecar(conversationId);
+    await putReviewRepairMarker(
+      conversationId,
+      saved.revision,
+      saved.sessionInstanceId!,
+      repairedReview,
+    );
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      review: repairedReview,
+    });
+    expect(
+      (await listSyncMeta()).find((meta) => meta.conversationId === conversationId),
+    ).toMatchObject({
+      reviewRepair: { review: repairedReview },
+    });
+  });
+
+  test("a missing sidecar and null repair marker preserve the primary suggestions-only review", async () => {
+    const conversationId = "conversation-missing-review-null-marker";
+    const saved = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: { score: null, comment: null, rubric: null, suggestions: [] },
+      },
+      null,
+    );
+
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      review: { score: null, comment: null, rubric: null, suggestions: [] },
+    });
+    await putReviewRepairMarker(conversationId, saved.revision, saved.sessionInstanceId!, null);
+    await expect(readStorySession(conversationId)).resolves.toMatchObject({
+      review: { score: null, comment: null, rubric: null, suggestions: [] },
+    });
+  });
+
   test("reviewRepair from another session generation is not used as a fallback", async () => {
     const conversationId = "conversation-review-repair-generation";
     const initial = await writeStorySession(
@@ -441,5 +551,52 @@ describe("Daily Story sync persistence", () => {
       },
     });
     expect((await readStorySession(conversationId))?.revision).toBe(newer.revision);
+  });
+
+  test("listing skips a session deleted after the initial session snapshot", async () => {
+    const conversationId = "conversation-list-delete-race";
+    const saved = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "待删除故事", messages: [] },
+      null,
+    );
+    runAfterNextFakeSessionStoreGetAll(() => deleteStorySession(conversationId, saved.revision));
+
+    await expect(listStorySessions()).resolves.toEqual([]);
+  });
+
+  test("listing uses one effective newer session snapshot after an update race", async () => {
+    const conversationId = "conversation-list-update-race";
+    const first = await writeStorySession(
+      conversationId,
+      { phase: "chatting", storyZh: "旧故事", messages: [] },
+      null,
+    );
+    let newer: StorySession | undefined;
+    runAfterNextFakeSessionStoreGetAll(async () => {
+      newer = await writeStorySession(
+        conversationId,
+        {
+          ...first,
+          phase: "review",
+          storyZh: "新故事",
+          title: "新标题",
+          review: { score: 88, comment: "新评分", rubric: null, suggestions: [] },
+        },
+        first.revision,
+      );
+    });
+
+    const summary = (await listStorySessions()).find((session) => session.id === conversationId);
+    expect(newer).toBeDefined();
+    expect(summary).toMatchObject({
+      id: conversationId,
+      revision: newer!.revision,
+      updatedAt: newer!.updatedAt,
+      phase: "review",
+      storyZh: "新故事",
+      title: "新标题",
+      review: { score: 88, comment: "新评分" },
+    });
   });
 });

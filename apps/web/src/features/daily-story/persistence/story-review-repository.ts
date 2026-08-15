@@ -10,54 +10,58 @@ export async function readDailyStoryReview(
   expectedSessionRevision?: number,
   expectedSessionInstanceId?: string,
 ): Promise<DailyReviewSidecar | null> {
-  const result = await reviewTransaction<DailyReviewSidecar | null>("readonly", (tx) => {
+  const result = await reviewTransaction<DailyReviewSidecar | null>("readonly", (tx, abort) => {
     const request = tx.objectStore(REVIEW_STORE).get(conversationId);
     request.onsuccess = () => {
-      const record = request.result as unknown;
-      if (record === undefined) {
-        setResult(tx, null);
-        return;
+      try {
+        const record = request.result as unknown;
+        if (record === undefined) {
+          setResult(tx, null);
+          return;
+        }
+        const parsed = storedReviewSidecarSchema.parse(record);
+        if (
+          expectedSessionRevision !== undefined &&
+          parsed.sessionRevision !== undefined &&
+          parsed.sessionRevision !== expectedSessionRevision
+        ) {
+          setResult(tx, null);
+          return;
+        }
+        if (
+          expectedSessionInstanceId !== undefined &&
+          parsed.sessionInstanceId !== expectedSessionInstanceId
+        ) {
+          setResult(tx, null);
+          return;
+        }
+        if (
+          expectedSessionRevision !== undefined &&
+          expectedSessionInstanceId === undefined &&
+          parsed.sessionInstanceId !== undefined
+        ) {
+          setResult(tx, null);
+          return;
+        }
+        // A pre-migration sidecar has no revision. Never merge it into a newly
+        // created revision-1 session; that is the dangerous session-id reuse case.
+        if (expectedSessionRevision === 1 && parsed.sessionRevision === undefined) {
+          setResult(tx, null);
+          return;
+        }
+        setResult(tx, {
+          score: parsed.score,
+          comment: parsed.comment,
+          overallFeedback: parsed.overallFeedback ?? null,
+          rubric: parsed.rubric,
+          ...(parsed.sessionRevision !== undefined
+            ? { sessionRevision: parsed.sessionRevision }
+            : {}),
+          ...(parsed.sessionInstanceId ? { sessionInstanceId: parsed.sessionInstanceId } : {}),
+        });
+      } catch (error) {
+        abort(error);
       }
-      const parsed = storedReviewSidecarSchema.parse(record);
-      if (
-        expectedSessionRevision !== undefined &&
-        parsed.sessionRevision !== undefined &&
-        parsed.sessionRevision !== expectedSessionRevision
-      ) {
-        setResult(tx, null);
-        return;
-      }
-      if (
-        expectedSessionInstanceId !== undefined &&
-        parsed.sessionInstanceId !== expectedSessionInstanceId
-      ) {
-        setResult(tx, null);
-        return;
-      }
-      if (
-        expectedSessionRevision !== undefined &&
-        expectedSessionInstanceId === undefined &&
-        parsed.sessionInstanceId !== undefined
-      ) {
-        setResult(tx, null);
-        return;
-      }
-      // A pre-migration sidecar has no revision. Never merge it into a newly
-      // created revision-1 session; that is the dangerous session-id reuse case.
-      if (expectedSessionRevision === 1 && parsed.sessionRevision === undefined) {
-        setResult(tx, null);
-        return;
-      }
-      setResult(tx, {
-        score: parsed.score,
-        comment: parsed.comment,
-        overallFeedback: parsed.overallFeedback ?? null,
-        rubric: parsed.rubric,
-        ...(parsed.sessionRevision !== undefined
-          ? { sessionRevision: parsed.sessionRevision }
-          : {}),
-        ...(parsed.sessionInstanceId ? { sessionInstanceId: parsed.sessionInstanceId } : {}),
-      });
     };
   });
   return result;

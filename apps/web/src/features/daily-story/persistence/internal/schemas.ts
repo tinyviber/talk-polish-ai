@@ -5,7 +5,7 @@ import {
   dailyStoryReviewRubricSchema,
   providerPresetIdSchema,
 } from "@kotoba/contracts";
-import { dailyStorySyncConversationSchema } from "@kotoba/contracts";
+import { dailyStorySyncConversationSchema, dailyStorySyncReviewSchema } from "@kotoba/contracts";
 import type { DailyStorySyncConversation } from "@kotoba/contracts";
 import type { ReviewRubric } from "../../types";
 import { CURRENT } from "./database";
@@ -301,6 +301,16 @@ export const syncMetaSchema = z
     remoteRevision: z.number().int().positive().nullable(),
     localRevision: z.number().int().nonnegative().nullable(),
     sessionInstanceId: z.string().min(1).max(160).optional(),
+    reviewRepair: z
+      .object({
+        operation: z.enum(["upsert", "delete"]),
+        remoteRevision: z.number().int().positive().nullable(),
+        sessionRevision: z.number().int().nonnegative().nullable(),
+        sessionInstanceId: z.string().min(1).max(160).optional(),
+        review: dailyStorySyncReviewSchema.nullable(),
+      })
+      .strict()
+      .optional(),
     updatedAt: z.string().datetime(),
   })
   .strict();
@@ -326,6 +336,11 @@ export const syncConflictSchema = z
     sourceConversationId: z.string().trim().min(1).max(160),
     operation: z.enum(["upsert", "delete"]).default("upsert"),
     conflictConversationId: z.string().trim().min(1).max(160).optional(),
+    payloadHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    status: z.enum(["open", "resolved"]).default("open"),
     createdAt: z.string().datetime(),
   })
   .strict();

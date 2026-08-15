@@ -1,38 +1,39 @@
 import type { DailyStorySyncConversation, DailyStorySyncRemoteObject } from "@kotoba/contracts";
-import { createConversationId, type StorySession } from "../types";
+import { createConversationId, createId, type StorySession } from "../types";
 import {
+  conflictConversationIdForPayload,
   conflictConversationId,
   conflictKey,
+  createConflictCopyInTransaction,
   dropSyncOutbox,
   fromSyncConversation,
-  isStorySyncSuppressed,
+  hashSyncPayload,
   listSyncOutbox,
   listSyncConflicts,
+  listSyncMeta,
   markRemoteRevision,
   markSyncAttempt,
   markSyncSuccess,
-  queueStorySync,
   readConflict,
   readSyncMeta,
   readSyncToken,
+  refreshSyncOutboxPayload,
   recordConflict,
   rebaseSyncOutbox,
   toSyncConversation,
-  withoutStorySync,
-  type SyncOperation,
 } from "../persistence/story-sync-repository";
 import {
-  deleteStorySession,
-  listStorySessions,
+  applyRemoteStoryDeletion,
+  applyRemoteStorySession,
   readStorySession,
-  replaceStorySessionFromSync,
-  writeStorySession,
+  reconcileStorySyncOutbox,
+  repairStoryReviewFromSync,
 } from "../persistence";
 import { claimStoryLeaseToken, releaseStoryLeaseToken, renewStoryLeaseToken } from "../persistence";
 import { subscribeDailyStorage, type DailyStorageEvent } from "../persistence";
 import { pushSyncObject, pullSyncObjects, StorySyncApiError } from "./api";
 
-export type StorySyncStatus = "disabled" | "syncing" | "synced" | "offline" | "error";
+export type StorySyncStatus = "disabled" | "syncing" | "synced" | "pending" | "offline" | "error";
 export type StorySyncSnapshot = { status: StorySyncStatus; message: string | null };
 
 const SYNC_LEASE_ID = "__daily_story_sync__";
@@ -108,32 +109,31 @@ export function safeMerge(local: DailyStorySyncConversation, remote: DailyStoryS
 }
 
 async function reconcileLocalOutbox() {
-  const outbox = await listSyncOutbox();
-  const outboxIds = new Set(outbox.map((item) => item.conversationId));
-  const sessions = await listStorySessions();
-  for (const summary of sessions) {
-    const meta = await readSyncMeta(summary.id);
-    if (!outboxIds.has(summary.id) && meta?.localRevision !== summary.revision) {
-      await queueStorySync(summary.id, "upsert");
-    }
+  await reconcileStorySyncOutbox();
+}
+
+async function repairPendingReviews() {
+  const metas = await listSyncMeta();
+  for (const meta of metas) {
+    if (meta.reviewRepair) await repairStoryReviewFromSync(meta.conversationId, meta.reviewRepair);
   }
 }
 
 async function applyRemoteObject(remote: DailyStorySyncRemoteObject) {
-  await withoutStorySync(async () => {
-    if (remote.deleted) {
-      const current = await readStorySession(remote.conversationId);
-      if (current) await deleteStorySession(remote.conversationId, current.revision);
-      return;
-    }
-    if (!remote.payload) return;
-    await replaceStorySessionFromSync(remote.conversationId, fromSyncConversation(remote.payload));
-  });
-  await markRemoteRevision(
+  const current = await readStorySession(remote.conversationId);
+  if (remote.deleted) {
+    return applyRemoteStoryDeletion(
+      remote.conversationId,
+      remote.remoteRevision,
+      current?.revision ?? null,
+    );
+  }
+  if (!remote.payload) return "skipped" as const;
+  return applyRemoteStorySession(
     remote.conversationId,
+    fromSyncConversation(remote.payload),
     remote.remoteRevision,
-    remote.payload?.revision ?? null,
-    remote.payload?.sessionInstanceId,
+    current?.revision ?? null,
   );
 }
 
@@ -142,35 +142,49 @@ async function createConflictCopy(
 ): Promise<string | null> {
   if (!item.payload) return null;
   const key = conflictKey(item.conversationId, item.mutationId);
+  const payloadHash = await hashSyncPayload(item.payload);
   const existing = await readConflict(key);
-  if (existing?.conflictConversationId) {
-    const existingSession = await readStorySession(existing.conflictConversationId);
-    const hasOutbox = (await listSyncOutbox()).some(
-      (outbox) => outbox.conversationId === existing.conflictConversationId,
-    );
-    if (!existingSession) {
-      const local = fromSyncConversation(item.payload);
-      await writeStorySession(
-        existing.conflictConversationId,
-        {
-          ...local,
-          title: truncateConflictTitle(local.title ?? local.storyZh.slice(0, 36)),
-        },
-        null,
-      );
-    } else if (!hasOutbox) {
-      await queueStorySync(existing.conflictConversationId, "upsert");
+  let id =
+    existing?.conflictConversationId ??
+    conflictConversationId(item.conversationId, item.mutationId);
+  let existingSession = await readStorySession(id);
+  if (existing?.payloadHash && existing.payloadHash !== payloadHash) {
+    id = await conflictConversationIdForPayload(item.conversationId, item.payload);
+    existingSession = await readStorySession(id);
+  } else if (existingSession && !existing?.payloadHash) {
+    const normalize = (value: DailyStorySyncConversation, conversationId: string) => {
+      const {
+        conversationId: _id,
+        revision: _revision,
+        updatedAt: _updatedAt,
+        sessionInstanceId: _instance,
+        ...rest
+      } = value;
+      return { ...rest, conversationId };
+    };
+    const existingPayload = toSyncConversation(existingSession, item.conversationId);
+    if (
+      JSON.stringify(normalize(existingPayload, item.conversationId)) !==
+      JSON.stringify(normalize(item.payload, item.conversationId))
+    ) {
+      id = await conflictConversationIdForPayload(item.conversationId, item.payload);
+      existingSession = await readStorySession(id);
     }
-    return existing.conflictConversationId;
   }
-  const id = conflictConversationId(item.conversationId, item.mutationId);
   const local = fromSyncConversation(item.payload);
-  await writeStorySession(
-    id,
-    { ...local, title: truncateConflictTitle(local.title ?? local.storyZh.slice(0, 36)) },
-    null,
-  );
-  await recordConflict(key, item.conversationId, id, "upsert");
+  const copy =
+    existingSession ??
+    ({
+      ...local,
+      revision: 1,
+      sessionInstanceId: createId("session"),
+      updatedAt: new Date().toISOString(),
+      title: truncateConflictTitle(local.title ?? local.storyZh.slice(0, 36)),
+    } satisfies StorySession);
+  await createConflictCopyInTransaction(key, item.conversationId, id, payloadHash, copy);
+  const marker = await readSyncMeta(id);
+  if (marker?.reviewRepair) await repairStoryReviewFromSync(id, marker.reviewRepair);
+  await refreshSyncOutboxPayload(id);
   return id;
 }
 
@@ -249,14 +263,15 @@ async function pushPending(token: string, ensureLease: () => Promise<void>) {
 async function pullAndApply(token: string, ensureLease: () => Promise<void>) {
   await ensureLease();
   const remoteObjects = await pullSyncObjects(token);
-  const outbox = new Map((await listSyncOutbox()).map((item) => [item.conversationId, item]));
   for (const remote of remoteObjects) {
-    if (outbox.has(remote.conversationId)) continue;
+    // Re-read immediately before each apply. A user mutation may have been
+    // committed after the page-level pull started.
+    if ((await listSyncOutbox()).some((item) => item.conversationId === remote.conversationId))
+      continue;
     const local = await readStorySession(remote.conversationId);
     const meta = await readSyncMeta(remote.conversationId);
     if (!local) {
-      if (!remote.deleted) await applyRemoteObject(remote);
-      else await markRemoteRevision(remote.conversationId, remote.remoteRevision, null);
+      await applyRemoteObject(remote);
       continue;
     }
     const localPayload = toSyncConversation(local, remote.conversationId);
@@ -270,7 +285,7 @@ async function pullAndApply(token: string, ensureLease: () => Promise<void>) {
       continue;
     }
     if (meta?.remoteRevision === remote.remoteRevision) {
-      await queueStorySync(remote.conversationId, "upsert");
+      await reconcileLocalOutbox();
       continue;
     }
     await applyRemoteObject(remote);
@@ -293,7 +308,7 @@ export async function runDailyStorySync() {
       ownerId = createConversationId();
       claimToken = await claimStoryLeaseToken(SYNC_LEASE_ID, ownerId);
       if (!claimToken) {
-        setStatus("synced", "其他标签页正在同步。");
+        setStatus("syncing", "其他标签页正在同步。");
         return;
       }
       let leaseLost = false;
@@ -310,20 +325,28 @@ export async function runDailyStorySync() {
         await renew();
         if (leaseLost) throw new SyncLeaseLostError();
       };
+      await repairPendingReviews();
       await reconcileLocalOutbox();
       await pushPending(token, ensureLease);
       await pullAndApply(token, ensureLease);
-      const remaining = (await listSyncOutbox()).some((item) => item.nextAttemptAt <= Date.now());
-      const deleteConflicts = (await listSyncConflicts()).some(
-        (conflict) => conflict.operation === "delete",
+      await repairPendingReviews();
+      const remaining = (await listSyncOutbox()).length > 0;
+      const pendingRepair = (await listSyncMeta()).some((meta) => meta.reviewRepair);
+      const openConflicts = (await listSyncConflicts()).filter(
+        (conflict) => conflict.status === "open",
       );
+      const deleteConflicts = openConflicts.some((conflict) => conflict.operation === "delete");
       setStatus(
-        remaining || deleteConflicts ? "error" : "synced",
-        remaining
-          ? "仍有对话等待同步。"
-          : deleteConflicts
+        openConflicts.length > 0 || pendingRepair ? "error" : remaining ? "pending" : "synced",
+        openConflicts.length > 0
+          ? deleteConflicts
             ? "有一次删除与远端更新冲突；远端版本已保留，请确认后再删除。"
-            : null,
+            : "发现冲突副本；远端和本地版本都已保留。"
+          : pendingRepair
+            ? "review 本地修复未完成，将自动重试。"
+            : remaining
+              ? "仍有对话等待同步。"
+              : null,
       );
     } catch (error) {
       if (error instanceof SyncLeaseLostError) {
@@ -361,10 +384,7 @@ export function startDailyStorySync() {
     }, 500);
   };
   const onStorage = (event: DailyStorageEvent) => {
-    if (event.kind !== "session" || event.origin === "remote" || isStorySyncSuppressed()) return;
-    void queueStorySync(event.conversationId)
-      .then(schedule)
-      .catch(() => setStatus("error", "本地同步队列写入失败。"));
+    if (event.kind === "session") schedule();
   };
   const unsubscribe = subscribeDailyStorage(onStorage);
   const onWake = () => void runDailyStorySync();

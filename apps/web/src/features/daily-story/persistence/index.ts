@@ -17,7 +17,8 @@ export {
   writeSyncToken,
   listSyncOutbox,
   listSyncConflicts,
-  queueStorySync,
+  listSyncMeta,
+  reconcileStorySyncOutbox,
 } from "./story-sync-repository";
 export {
   deleteStorySession,
@@ -25,7 +26,9 @@ export {
   listStorySessions,
   readStorySession,
   writeStorySession,
-  replaceStorySessionFromSync,
+  applyRemoteStorySession,
+  applyRemoteStoryDeletion,
+  repairStoryReviewFromSync,
 } from "./story-session-repository";
 export {
   deleteDailyStoryReview,

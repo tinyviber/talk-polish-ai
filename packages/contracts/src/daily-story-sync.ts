@@ -40,7 +40,7 @@ const syncPendingTranscriptSchema = z
   })
   .strict();
 
-const syncReviewSchema = z
+export const dailyStorySyncReviewSchema = z
   .object({
     score: z.number().int().min(0).max(100).nullable(),
     comment: z.string().min(1).max(300).nullable(),
@@ -62,7 +62,7 @@ export const dailyStorySyncConversationSchema = z
     title: z.string().min(1).max(80).optional(),
     messages: z.array(syncMessageSchema).max(DAILY_STORY_LIMITS.historyMessages),
     pendingAsrTranscript: syncPendingTranscriptSchema.optional(),
-    review: syncReviewSchema.optional(),
+    review: dailyStorySyncReviewSchema.optional(),
   })
   .strict()
   .superRefine((conversation, ctx) => {

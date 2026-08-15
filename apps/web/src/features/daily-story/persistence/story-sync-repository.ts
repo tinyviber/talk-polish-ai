@@ -5,12 +5,15 @@ import {
 import { createId, type DailyReview, type StorySession } from "../types";
 import {
   CURRENT,
+  SESSION_STORE,
   SYNC_CONFIG_STORE,
   SYNC_CONFLICT_STORE,
   SYNC_META_STORE,
   SYNC_OUTBOX_STORE,
 } from "./internal/database";
+import { fromStoredSession, sessionRecord } from "./internal/codecs";
 import {
+  sessionSchema,
   syncConfigSchema,
   syncConflictSchema,
   syncMetaSchema,
@@ -32,10 +35,6 @@ export function queueStorySyncInTransaction(
   session: StorySession | null,
   onComplete: () => void,
 ) {
-  if (isStorySyncSuppressed()) {
-    onComplete();
-    return;
-  }
   const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
   const metaRequest = tx.objectStore(SYNC_META_STORE).get(conversationId);
   const existingRequest = outbox.get(conversationId);
@@ -72,21 +71,6 @@ export function queueStorySyncInTransaction(
     existingReady = true;
     commit();
   };
-}
-
-let syncSuppressionDepth = 0;
-
-export function isStorySyncSuppressed() {
-  return syncSuppressionDepth > 0;
-}
-
-export async function withoutStorySync<T>(run: () => Promise<T>) {
-  syncSuppressionDepth += 1;
-  try {
-    return await run();
-  } finally {
-    syncSuppressionDepth -= 1;
-  }
 }
 
 export function toSyncConversation(
@@ -195,6 +179,113 @@ export async function listSyncOutbox(): Promise<StoredSyncOutbox[]> {
   });
 }
 
+export async function listSyncMeta(): Promise<StoredSyncMeta[]> {
+  return transaction<StoredSyncMeta[]>(SYNC_META_STORE, "readonly", (tx) => {
+    const request = tx.objectStore(SYNC_META_STORE).getAll();
+    request.onsuccess = () =>
+      setResult(
+        tx,
+        (request.result as unknown[]).map((value) => syncMetaSchema.parse(value)),
+      );
+  });
+}
+
+/**
+ * Reconciles legacy/imported sessions without a read-then-write race. The
+ * decision and outbox insert share the primary IDB transaction. Sidecar
+ * hydration happens only after the durable queue entry exists.
+ */
+export async function reconcileStorySyncOutbox() {
+  const queued = await transaction<Array<{ conversationId: string; mutationId: string }>>(
+    [SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE],
+    "readwrite",
+    (tx) => {
+      const sessionsRequest = tx.objectStore(SESSION_STORE).getAll();
+      const metasRequest = tx.objectStore(SYNC_META_STORE).getAll();
+      const outboxRequest = tx.objectStore(SYNC_OUTBOX_STORE).getAll();
+      let sessions: unknown[] | undefined;
+      let metas: StoredSyncMeta[] | undefined;
+      let outbox: StoredSyncOutbox[] | undefined;
+      const finish = () => {
+        if (!sessions || !metas || !outbox) return;
+        const metaById = new Map(metas.map((value) => [value.conversationId, value]));
+        const outboxById = new Map(outbox.map((value) => [value.conversationId, value]));
+        const queuedItems: Array<{ conversationId: string; mutationId: string }> = [];
+        const store = tx.objectStore(SYNC_OUTBOX_STORE);
+        for (const raw of sessions) {
+          const parsed = sessionSchema.safeParse(raw);
+          if (!parsed.success) continue;
+          const conversationId = parsed.data.id;
+          if (outboxById.has(conversationId)) continue;
+          const session = fromStoredSession(parsed.data);
+          const meta = metaById.get(conversationId);
+          if (
+            meta?.localRevision === session.revision &&
+            meta.sessionInstanceId === session.sessionInstanceId
+          )
+            continue;
+          const record = syncOutboxSchema.parse({
+            conversationId,
+            operation: "upsert",
+            mutationId: createId("sync"),
+            expectedRemoteRevision: meta?.remoteRevision ?? null,
+            localRevision: session.revision,
+            payload: toSyncConversation(session, conversationId),
+            queuedAt: new Date().toISOString(),
+            attempts: 0,
+            nextAttemptAt: 0,
+          });
+          store.put(record);
+          queuedItems.push({ conversationId, mutationId: record.mutationId });
+        }
+        setResult(tx, queuedItems);
+      };
+      sessionsRequest.onsuccess = () => {
+        sessions = sessionsRequest.result as unknown[];
+        finish();
+      };
+      metasRequest.onsuccess = () => {
+        metas = (metasRequest.result as unknown[]).map((value) => syncMetaSchema.parse(value));
+        finish();
+      };
+      outboxRequest.onsuccess = () => {
+        outbox = (outboxRequest.result as unknown[]).map((value) => syncOutboxSchema.parse(value));
+        finish();
+      };
+    },
+  );
+  await Promise.all(
+    queued.map(({ conversationId, mutationId }) =>
+      refreshSyncOutboxPayload(conversationId, mutationId),
+    ),
+  );
+}
+
+/** Merge the full sidecar-backed aggregate into an already durable outbox row. */
+export async function refreshSyncOutboxPayload(conversationId: string, mutationId?: string) {
+  const session = await readStorySession(conversationId);
+  if (!session) return;
+  const payload = toSyncConversation(session, conversationId);
+  await transaction<void>(SYNC_OUTBOX_STORE, "readwrite", (tx) => {
+    const store = tx.objectStore(SYNC_OUTBOX_STORE);
+    const current = store.get(conversationId);
+    current.onsuccess = () => {
+      const value = current.result === undefined ? null : syncOutboxSchema.parse(current.result);
+      if (
+        !value ||
+        value.operation !== "upsert" ||
+        (mutationId && value.mutationId !== mutationId) ||
+        value.localRevision !== payload.revision
+      ) {
+        setResult(tx, undefined);
+        return;
+      }
+      const write = store.put({ ...value, payload });
+      write.onsuccess = () => setResult(tx, undefined);
+    };
+  });
+}
+
 export async function listSyncConflicts(): Promise<StoredSyncConflict[]> {
   return transaction<StoredSyncConflict[]>(SYNC_CONFLICT_STORE, "readonly", (tx) => {
     const request = tx.objectStore(SYNC_CONFLICT_STORE).getAll();
@@ -203,51 +294,6 @@ export async function listSyncConflicts(): Promise<StoredSyncConflict[]> {
         tx,
         (request.result as unknown[]).map((value) => syncConflictSchema.parse(value)),
       );
-  });
-}
-
-export async function queueStorySync(conversationId: string, operation?: SyncOperation) {
-  const session = await readStorySession(conversationId);
-  const resolvedOperation = operation ?? (session ? "upsert" : "delete");
-  const payload =
-    resolvedOperation === "upsert" && session ? toSyncConversation(session, conversationId) : null;
-  await transaction<void>([SYNC_OUTBOX_STORE, SYNC_META_STORE], "readwrite", (tx) => {
-    const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
-    const meta = tx.objectStore(SYNC_META_STORE).get(conversationId);
-    const existing = outbox.get(conversationId);
-    let metaValue: StoredSyncMeta | null = null;
-    let existingValue: StoredSyncOutbox | null = null;
-    let metaReady = false;
-    let existingReady = false;
-    const commit = () => {
-      if (!metaReady || !existingReady) return;
-      const expectedRemoteRevision =
-        existingValue?.expectedRemoteRevision ?? metaValue?.remoteRevision ?? null;
-      const record = syncOutboxSchema.parse({
-        conversationId,
-        operation: resolvedOperation,
-        mutationId: createId("sync"),
-        expectedRemoteRevision,
-        localRevision: payload?.revision ?? null,
-        payload,
-        queuedAt: new Date().toISOString(),
-        attempts: 0,
-        nextAttemptAt: 0,
-      });
-      const write = outbox.put(record);
-      write.onsuccess = () => setResult(tx, undefined);
-    };
-    meta.onsuccess = () => {
-      metaValue = meta.result === undefined ? null : syncMetaSchema.parse(meta.result);
-      metaReady = true;
-      commit();
-    };
-    existing.onsuccess = () => {
-      existingValue =
-        existing.result === undefined ? null : syncOutboxSchema.parse(existing.result);
-      existingReady = true;
-      commit();
-    };
   });
 }
 
@@ -334,31 +380,105 @@ export async function markSyncSuccess(
   remoteRevision: number,
   localRevision: number | null,
 ) {
-  await transaction<void>([SYNC_META_STORE, SYNC_OUTBOX_STORE], "readwrite", (tx) => {
-    const metas = tx.objectStore(SYNC_META_STORE);
-    const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
-    const current = outbox.get(item.conversationId);
-    current.onsuccess = () => {
-      const currentValue =
-        current.result === undefined ? null : syncOutboxSchema.parse(current.result);
-      const meta = syncMetaSchema.parse({
-        conversationId: item.conversationId,
-        remoteRevision,
-        localRevision,
-        ...(item.payload?.sessionInstanceId
-          ? { sessionInstanceId: item.payload.sessionInstanceId }
-          : {}),
-        updatedAt: new Date().toISOString(),
-      });
-      const writeMeta = metas.put(meta);
-      writeMeta.onsuccess = () => {
-        if (currentValue?.mutationId !== item.mutationId) {
-          setResult(tx, undefined);
-          return;
-        }
-        const remove = outbox.delete(item.conversationId);
-        remove.onsuccess = () => setResult(tx, undefined);
+  await transaction<void>(
+    [SYNC_META_STORE, SYNC_OUTBOX_STORE, SYNC_CONFLICT_STORE],
+    "readwrite",
+    (tx) => {
+      const metas = tx.objectStore(SYNC_META_STORE);
+      const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
+      const conflicts = tx.objectStore(SYNC_CONFLICT_STORE);
+      const existingMetaRequest = metas.get(item.conversationId);
+      const current = outbox.get(item.conversationId);
+      let existingMeta: StoredSyncMeta | null = null;
+      let metaReady = false;
+      let outboxReady = false;
+      const commit = () => {
+        if (!metaReady || !outboxReady) return;
+        const currentValue = outboxReady
+          ? current.result === undefined
+            ? null
+            : syncOutboxSchema.parse(current.result)
+          : null;
+        const meta = syncMetaSchema.parse({
+          conversationId: item.conversationId,
+          remoteRevision,
+          localRevision,
+          ...(item.payload?.sessionInstanceId
+            ? { sessionInstanceId: item.payload.sessionInstanceId }
+            : {}),
+          ...(existingMeta?.reviewRepair ? { reviewRepair: existingMeta.reviewRepair } : {}),
+          updatedAt: new Date().toISOString(),
+        });
+        const writeMeta = metas.put(meta);
+        writeMeta.onsuccess = () => {
+          if (currentValue?.mutationId !== item.mutationId) {
+            if (currentValue) {
+              outbox.put({ ...currentValue, expectedRemoteRevision: remoteRevision });
+            }
+            setResult(tx, undefined);
+            return;
+          }
+          const remove = outbox.delete(item.conversationId);
+          remove.onsuccess = () => {
+            // A delete conflict is resolved only after a newer delete for the
+            // same source is accepted (including an idempotent retry).
+            if (item.operation !== "delete") {
+              setResult(tx, undefined);
+              return;
+            }
+            const openConflicts = conflicts.getAll();
+            openConflicts.onsuccess = () => {
+              for (const raw of openConflicts.result as unknown[]) {
+                const conflict = syncConflictSchema.parse(raw);
+                if (
+                  conflict.sourceConversationId === item.conversationId &&
+                  conflict.operation === "delete" &&
+                  conflict.status === "open"
+                ) {
+                  conflicts.delete(conflict.conflictKey);
+                }
+              }
+              setResult(tx, undefined);
+            };
+          };
+        };
       };
+      existingMetaRequest.onsuccess = () => {
+        existingMeta =
+          existingMetaRequest.result === undefined
+            ? null
+            : syncMetaSchema.parse(existingMetaRequest.result);
+        metaReady = true;
+        commit();
+      };
+      current.onsuccess = () => {
+        outboxReady = true;
+        commit();
+      };
+    },
+  );
+}
+
+export async function clearReviewRepairMarker(
+  conversationId: string,
+  expected?: StoredSyncMeta["reviewRepair"],
+) {
+  await transaction<void>(SYNC_META_STORE, "readwrite", (tx) => {
+    const store = tx.objectStore(SYNC_META_STORE);
+    const request = store.get(conversationId);
+    request.onsuccess = () => {
+      const current = request.result === undefined ? null : syncMetaSchema.parse(request.result);
+      if (!current?.reviewRepair) {
+        setResult(tx, undefined);
+        return;
+      }
+      if (expected && JSON.stringify(current.reviewRepair) !== JSON.stringify(expected)) {
+        setResult(tx, undefined);
+        return;
+      }
+      const { reviewRepair: _reviewRepair, ...withoutMarker } = current;
+      const write = store.put(syncMetaSchema.parse(withoutMarker));
+      write.onsuccess = () => setResult(tx, undefined);
     };
   });
 }
@@ -370,15 +490,21 @@ export async function markRemoteRevision(
   sessionInstanceId?: string,
 ) {
   await transaction<void>(SYNC_META_STORE, "readwrite", (tx) => {
-    const record = syncMetaSchema.parse({
-      conversationId,
-      remoteRevision,
-      localRevision,
-      ...(sessionInstanceId ? { sessionInstanceId } : {}),
-      updatedAt: new Date().toISOString(),
-    });
-    const request = tx.objectStore(SYNC_META_STORE).put(record);
-    request.onsuccess = () => setResult(tx, undefined);
+    const store = tx.objectStore(SYNC_META_STORE);
+    const current = store.get(conversationId);
+    current.onsuccess = () => {
+      const previous = current.result === undefined ? null : syncMetaSchema.parse(current.result);
+      const record = syncMetaSchema.parse({
+        conversationId,
+        remoteRevision,
+        localRevision,
+        ...(sessionInstanceId ? { sessionInstanceId } : {}),
+        ...(previous?.reviewRepair ? { reviewRepair: previous.reviewRepair } : {}),
+        updatedAt: new Date().toISOString(),
+      });
+      const request = store.put(record);
+      request.onsuccess = () => setResult(tx, undefined);
+    };
   });
 }
 
@@ -397,6 +523,7 @@ export async function recordConflict(
   sourceConversationId: string,
   conflictConversationId: string | undefined,
   operation: SyncOperation = "upsert",
+  payloadHash?: string,
 ) {
   await transaction<void>(SYNC_CONFLICT_STORE, "readwrite", (tx) => {
     const request = tx.objectStore(SYNC_CONFLICT_STORE).put(
@@ -405,11 +532,164 @@ export async function recordConflict(
         sourceConversationId,
         operation,
         ...(conflictConversationId ? { conflictConversationId } : {}),
+        ...(payloadHash ? { payloadHash } : {}),
+        status: "open",
         createdAt: new Date().toISOString(),
       }),
     );
     request.onsuccess = () => setResult(tx, undefined);
   });
+}
+
+export async function clearConflict(conflictKey: string) {
+  await transaction<void>(SYNC_CONFLICT_STORE, "readwrite", (tx) => {
+    const request = tx.objectStore(SYNC_CONFLICT_STORE).delete(conflictKey);
+    request.onsuccess = () => setResult(tx, undefined);
+  });
+}
+
+export async function hashSyncPayload(value: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    );
+  }
+  // Old non-secure browser contexts may not expose SubtleCrypto. This is only
+  // a local idempotency fingerprint; the API still verifies its own SHA-256.
+  let hash = 2166136261;
+  for (const byte of bytes) hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+  return `${hash.toString(16).padStart(8, "0")}`.repeat(8).slice(0, 64);
+}
+
+export async function conflictConversationIdForPayload(
+  sourceConversationId: string,
+  payload: DailyStorySyncConversation,
+) {
+  const source = sourceConversationId.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 72);
+  const hash = await hashSyncPayload(payload);
+  return `conflict_${source}_${hash}`.slice(0, 159);
+}
+
+/**
+ * Creates or repairs a conflict copy atomically in the primary database.
+ * Review sidecar hydration is intentionally completed by the caller after
+ * this transaction, with the repair marker making crashes retryable.
+ */
+export async function createConflictCopyInTransaction(
+  conflictKeyValue: string,
+  sourceConversationId: string,
+  conflictConversationIdValue: string,
+  payloadHash: string,
+  copy: StorySession,
+) {
+  return transaction<"created" | "repaired" | "collision">(
+    [SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE, SYNC_CONFLICT_STORE],
+    "readwrite",
+    (tx) => {
+      const sessions = tx.objectStore(SESSION_STORE);
+      const metas = tx.objectStore(SYNC_META_STORE);
+      const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
+      const conflicts = tx.objectStore(SYNC_CONFLICT_STORE);
+      const sessionRequest = sessions.get(conflictConversationIdValue);
+      const outboxRequest = outbox.get(conflictConversationIdValue);
+      const metaRequest = metas.get(conflictConversationIdValue);
+      const conflictRequest = conflicts.get(conflictKeyValue);
+      let sessionReady = false;
+      let outboxReady = false;
+      let metaReady = false;
+      let conflictReady = false;
+      const finish = () => {
+        if (!sessionReady || !outboxReady || !metaReady || !conflictReady) return;
+        const existingConflict =
+          conflictRequest.result === undefined
+            ? null
+            : syncConflictSchema.parse(conflictRequest.result);
+        const existingSession = sessionRequest.result as unknown;
+        const existingOutbox =
+          outboxRequest.result === undefined ? null : syncOutboxSchema.parse(outboxRequest.result);
+        const existingMeta =
+          metaRequest.result === undefined ? null : syncMetaSchema.parse(metaRequest.result);
+        if (
+          (existingConflict?.payloadHash && existingConflict.payloadHash !== payloadHash) ||
+          (existingSession !== undefined &&
+            JSON.stringify(existingSession) !==
+              JSON.stringify(sessionRecord(copy, conflictConversationIdValue)))
+        ) {
+          setResult(tx, "collision");
+          return;
+        }
+        if (existingSession === undefined) {
+          sessions.put(sessionRecord(copy, conflictConversationIdValue));
+        }
+        if (!existingOutbox) {
+          const payload = toSyncConversation(copy, conflictConversationIdValue);
+          outbox.put(
+            syncOutboxSchema.parse({
+              conversationId: conflictConversationIdValue,
+              operation: "upsert",
+              mutationId: createId("sync"),
+              expectedRemoteRevision: null,
+              localRevision: copy.revision,
+              payload,
+              queuedAt: new Date().toISOString(),
+              attempts: 0,
+              nextAttemptAt: 0,
+            }),
+          );
+        }
+        const marker = {
+          ...(existingMeta ?? {
+            conversationId: conflictConversationIdValue,
+            remoteRevision: null,
+            localRevision: copy.revision,
+          }),
+          conversationId: conflictConversationIdValue,
+          localRevision: copy.revision,
+          sessionInstanceId: copy.sessionInstanceId,
+          reviewRepair: {
+            operation: "upsert" as const,
+            remoteRevision: null,
+            sessionRevision: copy.revision,
+            sessionInstanceId: copy.sessionInstanceId,
+            review: copy.review ?? null,
+          },
+          updatedAt: new Date().toISOString(),
+        };
+        metas.put(syncMetaSchema.parse(marker));
+        conflicts.put(
+          syncConflictSchema.parse({
+            ...(existingConflict ?? {}),
+            conflictKey: conflictKeyValue,
+            sourceConversationId,
+            operation: "upsert",
+            conflictConversationId: conflictConversationIdValue,
+            payloadHash,
+            status: "open",
+            createdAt: existingConflict?.createdAt ?? new Date().toISOString(),
+          }),
+        );
+        setResult(tx, existingSession === undefined ? "created" : "repaired");
+      };
+      sessionRequest.onsuccess = () => {
+        sessionReady = true;
+        finish();
+      };
+      outboxRequest.onsuccess = () => {
+        outboxReady = true;
+        finish();
+      };
+      metaRequest.onsuccess = () => {
+        metaReady = true;
+        finish();
+      };
+      conflictRequest.onsuccess = () => {
+        conflictReady = true;
+        finish();
+      };
+    },
+  );
 }
 
 export function conflictConversationId(sourceConversationId: string, mutationId: string) {

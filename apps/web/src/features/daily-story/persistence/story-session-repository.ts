@@ -11,7 +11,13 @@ import { SessionConflictError, StorySidecarPersistenceError } from "./errors";
 import { createId } from "../types";
 import { deriveStableDailyStoryTitle } from "@kotoba/contracts";
 import { fromStoredSession, mergeReview, sessionRecord } from "./internal/codecs";
-import { leaseSchema, sessionSchema, type StoredSession } from "./internal/schemas";
+import {
+  leaseSchema,
+  sessionSchema,
+  syncMetaSchema,
+  syncOutboxSchema,
+  type StoredSession,
+} from "./internal/schemas";
 import { setResult, transaction } from "./internal/transaction";
 import {
   deleteDailyStoryReview,
@@ -26,7 +32,8 @@ import type {
   StorySessionSnapshot,
   StorySessionSummary,
 } from "../types";
-import { queueStorySyncInTransaction } from "./story-sync-repository";
+import { clearReviewRepairMarker, queueStorySyncInTransaction } from "./story-sync-repository";
+import type { StoredSyncMeta } from "./internal/schemas";
 
 type StorySessionWriteResult = {
   session: StorySession;
@@ -302,56 +309,271 @@ export async function writeStorySession(
       throw new StorySidecarPersistenceError(conversationId, "write");
     }
   }
+  await clearReviewRepairMarker(conversationId);
   notifySession(conversationId, persistedSession.revision);
   return persistedSession;
 }
 
-/** Apply a validated remote snapshot without incrementing local CAS revision. */
-export async function replaceStorySessionFromSync(
+type RemoteApplyResult = "applied" | "skipped";
+type ReviewRepair = NonNullable<StoredSyncMeta["reviewRepair"]>;
+
+async function applyRemoteSessionRecord(
   conversationId: string,
-  incoming: StorySession,
-): Promise<StorySession> {
-  const saved: StorySession = {
-    ...incoming,
-    schemaVersion: 1,
-    sessionInstanceId: incoming.sessionInstanceId ?? createId("session"),
-  };
-  const result = await transaction<{ previousSessionInstanceId?: string }>(
-    SESSION_STORE,
-    "readwrite",
-    (tx, abort) => {
-      const store = tx.objectStore(SESSION_STORE);
-      const read = store.get(conversationId);
-      read.onsuccess = () => {
-        try {
-          const previousRaw = read.result as unknown;
-          const previous = previousRaw === undefined ? null : sessionSchema.parse(previousRaw);
-          const write = store.put(sessionRecord(saved, conversationId));
+  incoming: StorySession | null,
+  remoteRevision: number,
+  expectedLocalRevision: number | null,
+): Promise<RemoteApplyResult> {
+  const saved = incoming
+    ? {
+        ...incoming,
+        schemaVersion: 1 as const,
+        sessionInstanceId: incoming.sessionInstanceId ?? createId("session"),
+      }
+    : null;
+  const result = await transaction<{
+    status: RemoteApplyResult;
+    reviewRepair: ReviewRepair;
+    previousSessionInstanceId?: string;
+  }>([SESSION_STORE, SYNC_META_STORE, SYNC_OUTBOX_STORE], "readwrite", (tx, abort) => {
+    const sessions = tx.objectStore(SESSION_STORE);
+    const metas = tx.objectStore(SYNC_META_STORE);
+    const outbox = tx.objectStore(SYNC_OUTBOX_STORE);
+    const metaRequest = metas.get(conversationId);
+    const sessionRequest = sessions.get(conversationId);
+    const outboxRequest = outbox.get(conversationId);
+    let loaded = 0;
+    const commit = () => {
+      if (loaded !== 3) return;
+      try {
+        const currentRaw = sessionRequest.result as unknown;
+        const current =
+          currentRaw === undefined ? null : fromStoredSession(sessionSchema.parse(currentRaw));
+        const localMutationExists = outboxRequest.result !== undefined;
+        const revisionMatches = (current?.revision ?? null) === expectedLocalRevision;
+        if (localMutationExists || !revisionMatches) {
+          setResult(tx, { status: "skipped" as const });
+          return;
+        }
+
+        const previousSessionInstanceId = current?.sessionInstanceId;
+        const reviewRepair: ReviewRepair = {
+          operation: saved ? "upsert" : "delete",
+          remoteRevision,
+          sessionRevision: saved?.revision ?? current?.revision ?? null,
+          ...(saved?.sessionInstanceId
+            ? { sessionInstanceId: saved.sessionInstanceId }
+            : current?.sessionInstanceId
+              ? { sessionInstanceId: current.sessionInstanceId }
+              : {}),
+          review: saved?.review ?? null,
+        };
+        const existingMeta =
+          metaRequest.result === undefined ? null : syncMetaSchema.parse(metaRequest.result);
+        // The marker and primary session/tombstone commit in one transaction.
+        // It is written first so a later sidecar failure is repairable.
+        const finalMeta = syncMetaSchema.parse({
+          ...(existingMeta ?? {
+            conversationId,
+            remoteRevision: null,
+            localRevision: null,
+          }),
+          conversationId,
+          remoteRevision,
+          localRevision: saved?.revision ?? null,
+          ...(saved?.sessionInstanceId ? { sessionInstanceId: saved.sessionInstanceId } : {}),
+          reviewRepair,
+          updatedAt: new Date().toISOString(),
+        });
+        const markerWrite = metas.put(finalMeta);
+        markerWrite.onsuccess = () => {
+          const write = saved
+            ? sessions.put(sessionRecord(saved, conversationId))
+            : sessions.delete(conversationId);
           write.onsuccess = () =>
             setResult(tx, {
-              ...(previous?.sessionInstanceId
-                ? { previousSessionInstanceId: previous.sessionInstanceId }
-                : {}),
+              status: "applied" as const,
+              reviewRepair,
+              ...(previousSessionInstanceId ? { previousSessionInstanceId } : {}),
             });
-        } catch (error) {
-          abort(error);
-        }
-      };
-    },
-  );
-  if (saved.review) {
-    await persistReviewSidecar(
-      conversationId,
-      saved.review,
-      saved.revision,
-      saved.sessionInstanceId,
-      result.previousSessionInstanceId,
-    );
-  } else {
-    await deleteDailyStoryReview(conversationId);
+        };
+      } catch (error) {
+        abort(error);
+      }
+    };
+    metaRequest.onsuccess = () => {
+      loaded += 1;
+      commit();
+    };
+    sessionRequest.onsuccess = () => {
+      loaded += 1;
+      commit();
+    };
+    outboxRequest.onsuccess = () => {
+      loaded += 1;
+      commit();
+    };
+  });
+  if (result.status === "skipped") return result.status;
+  notifySession(conversationId, saved?.revision ?? remoteRevision, "remote");
+  try {
+    const repair = result.reviewRepair;
+    if (saved?.review) {
+      await persistReviewSidecar(
+        conversationId,
+        saved.review,
+        saved.revision,
+        saved.sessionInstanceId,
+        result.previousSessionInstanceId,
+      );
+    } else if (saved) {
+      await deleteDailyStoryReview(conversationId, saved.revision, saved.sessionInstanceId);
+    } else if (repair.sessionRevision !== null && repair.sessionInstanceId) {
+      await deleteDailyStoryReview(
+        conversationId,
+        repair.sessionRevision,
+        repair.sessionInstanceId,
+      );
+    }
+    await clearReviewRepairMarker(conversationId, repair);
+  } catch {
+    throw new StorySidecarPersistenceError(conversationId, "write");
   }
-  notifySession(conversationId, saved.revision, "remote");
-  return saved;
+  return "applied";
+}
+
+export function applyRemoteStorySession(
+  conversationId: string,
+  incoming: StorySession,
+  remoteRevision: number,
+  expectedLocalRevision: number | null,
+) {
+  return applyRemoteSessionRecord(conversationId, incoming, remoteRevision, expectedLocalRevision);
+}
+
+export function applyRemoteStoryDeletion(
+  conversationId: string,
+  remoteRevision: number,
+  expectedLocalRevision: number | null,
+) {
+  return applyRemoteSessionRecord(conversationId, null, remoteRevision, expectedLocalRevision);
+}
+
+export async function repairStoryReviewFromSync(conversationId: string, repair: ReviewRepair) {
+  const canRepairDelete =
+    repair.operation === "delete"
+      ? await transaction<boolean>([SESSION_STORE, SYNC_OUTBOX_STORE], "readonly", (tx) => {
+          const sessionRequest = tx.objectStore(SESSION_STORE).get(conversationId);
+          const outboxRequest = tx.objectStore(SYNC_OUTBOX_STORE).get(conversationId);
+          let sessionReady = false;
+          let outboxReady = false;
+          const finish = () => {
+            if (!sessionReady || !outboxReady) return;
+            const outbox =
+              outboxRequest.result === undefined
+                ? null
+                : syncOutboxSchema.parse(outboxRequest.result);
+            setResult(
+              tx,
+              sessionRequest.result === undefined &&
+                (!outbox || (outbox.operation === "delete" && outbox.localRevision === null)),
+            );
+          };
+          sessionRequest.onsuccess = () => {
+            sessionReady = true;
+            finish();
+          };
+          outboxRequest.onsuccess = () => {
+            outboxReady = true;
+            finish();
+          };
+        })
+      : false;
+  const session =
+    repair.operation === "upsert"
+      ? await transaction<StorySession | null>(
+          [SESSION_STORE, SYNC_OUTBOX_STORE],
+          "readonly",
+          (tx) => {
+            const request = tx.objectStore(SESSION_STORE).get(conversationId);
+            const outboxRequest = tx.objectStore(SYNC_OUTBOX_STORE).get(conversationId);
+            let sessionReady = false;
+            let outboxReady = false;
+            let sessionValue: StorySession | null = null;
+            const finish = () => {
+              if (!sessionReady || !outboxReady) return;
+              const outbox =
+                outboxRequest.result === undefined
+                  ? null
+                  : syncOutboxSchema.parse(outboxRequest.result);
+              if (outbox && outbox.localRevision !== repair.sessionRevision) {
+                setResult(tx, null);
+                return;
+              }
+              setResult(tx, sessionValue);
+            };
+            request.onsuccess = () => {
+              const raw = request.result as unknown;
+              if (raw !== undefined) {
+                const value = fromStoredSession(sessionSchema.parse(raw));
+                if (
+                  value.revision === repair.sessionRevision &&
+                  value.sessionInstanceId === repair.sessionInstanceId
+                ) {
+                  sessionValue = value;
+                }
+              }
+              sessionReady = true;
+              finish();
+            };
+            outboxRequest.onsuccess = () => {
+              outboxReady = true;
+              finish();
+            };
+          },
+        )
+      : null;
+  if (repair.operation === "upsert" && !session) {
+    return false;
+  }
+  if (repair.operation === "delete" && session) {
+    return false;
+  }
+  if (repair.operation === "upsert" && session) {
+    if (repair.review) {
+      const sidecar = {
+        score: repair.review.score,
+        comment: repair.review.comment,
+        rubric: repair.review.rubric,
+        overallFeedback: repair.review.overallFeedback ?? null,
+      };
+      const existingSidecar = await readDailyStoryReview(conversationId);
+      await writeDailyStoryReview(
+        conversationId,
+        {
+          ...sidecar,
+          ...(repair.sessionRevision !== null ? { sessionRevision: repair.sessionRevision } : {}),
+          ...(repair.sessionInstanceId ? { sessionInstanceId: repair.sessionInstanceId } : {}),
+        },
+        existingSidecar?.sessionInstanceId
+          ? { expectedPreviousSessionInstanceId: existingSidecar.sessionInstanceId }
+          : undefined,
+      );
+    } else {
+      if (repair.sessionRevision !== null && repair.sessionInstanceId) {
+        await deleteDailyStoryReview(
+          conversationId,
+          repair.sessionRevision,
+          repair.sessionInstanceId,
+        );
+      }
+    }
+  } else if (repair.operation === "delete" && canRepairDelete) {
+    await deleteDailyStoryReview(conversationId);
+  } else {
+    return false;
+  }
+  await clearReviewRepairMarker(conversationId, repair);
+  return true;
 }
 
 export function deleteStorySession(expectedRevision: number | null): Promise<void>;
@@ -459,6 +681,7 @@ export async function deleteStorySession(
       }
     }
   }
+  await clearReviewRepairMarker(conversationId);
 }
 
 async function persistReviewSidecar(

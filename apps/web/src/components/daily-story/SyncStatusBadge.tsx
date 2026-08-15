@@ -9,6 +9,7 @@ import {
 function label(snapshot: StorySyncSnapshot) {
   if (snapshot.status === "syncing") return "同步中";
   if (snapshot.status === "synced") return "已同步";
+  if (snapshot.status === "pending") return "等待同步";
   if (snapshot.status === "offline") return "离线";
   if (snapshot.status === "error") return "同步异常";
   return "未启用同步";

@@ -2,11 +2,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { installFakeIndexedDb } from "@/lib/practice/test/fakeIndexedDb";
 import {
   applyRemoteStorySession,
+  deleteDailyStoryReview,
   ensureDailyStorage,
   deleteStorySession,
   listSyncConflicts,
   listSyncMeta,
   listSyncOutbox,
+  listStorySessions,
   readSyncToken,
   readStorySession,
   repairStoryReviewFromSync,
@@ -22,13 +24,40 @@ import {
   recordConflict,
   toSyncConversation,
 } from "./story-sync-repository";
-import type { StorySession } from "../types";
+import type { DailyReview, StorySession } from "../types";
 import { SYNC_META_STORE } from "./internal/database";
 import { syncMetaSchema } from "./internal/schemas";
 import { setResult, transaction } from "./internal/transaction";
 import { __resetDailyStorageForTests } from "./testing";
 
 let restore: () => void;
+
+async function putReviewRepairMarker(
+  conversationId: string,
+  sessionRevision: number,
+  sessionInstanceId: string,
+  review: DailyReview,
+) {
+  await transaction<void>(SYNC_META_STORE, "readwrite", (tx) => {
+    const request = tx.objectStore(SYNC_META_STORE).put(
+      syncMetaSchema.parse({
+        conversationId,
+        remoteRevision: 2,
+        localRevision: sessionRevision,
+        sessionInstanceId,
+        reviewRepair: {
+          operation: "upsert",
+          remoteRevision: 2,
+          sessionRevision,
+          sessionInstanceId,
+          review,
+        },
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    request.onsuccess = () => setResult(tx, undefined);
+  });
+}
 
 beforeAll(() => {
   restore = installFakeIndexedDb();
@@ -179,7 +208,194 @@ describe("Daily Story sync persistence", () => {
     ).toHaveLength(0);
   });
 
-  test("stale review repair markers are cleared after a newer local session wins", async () => {
+  test("a successfully synced conflict copy resolves its matching upsert conflict", async () => {
+    const copy: StorySession = {
+      schemaVersion: 1,
+      revision: 1,
+      sessionInstanceId: "session-upsert-conflict-copy",
+      updatedAt: "2026-08-15T00:00:00.000Z",
+      phase: "chatting",
+      storyZh: "冲突故事",
+      messages: [{ id: "assistant_1", role: "assistant", text: "Hello." }],
+    };
+    const sourceConversationId = "conversation-upsert-conflict";
+    const payload = toSyncConversation(copy, sourceConversationId);
+    const key = conflictKey(sourceConversationId, "sync_mutation_upsert");
+    const hash = await hashSyncPayload(payload);
+    const conflictConversationId = await conflictConversationIdForPayload(
+      sourceConversationId,
+      payload,
+    );
+
+    await expect(
+      createConflictCopyInTransaction(
+        key,
+        sourceConversationId,
+        conflictConversationId,
+        hash,
+        copy,
+      ),
+    ).resolves.toBe("created");
+    const item = (await listSyncOutbox()).find(
+      (value) => value.conversationId === conflictConversationId,
+    );
+    expect(item?.operation).toBe("upsert");
+    if (!item) throw new Error("conflict copy outbox missing");
+
+    await markSyncSuccess(item, 1, item.localRevision);
+
+    expect(
+      (await listSyncConflicts()).find((conflict) => conflict.conflictKey === key),
+    ).toMatchObject({ status: "resolved", conflictConversationId });
+    expect(
+      (await listSyncConflicts()).filter(
+        (conflict) => conflict.conflictKey === key && conflict.status === "open",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("a stale conflict-copy success does not resolve its still-pending upsert conflict", async () => {
+    const copy: StorySession = {
+      schemaVersion: 1,
+      revision: 1,
+      sessionInstanceId: "session-stale-upsert-conflict-copy",
+      updatedAt: "2026-08-15T00:00:00.000Z",
+      phase: "chatting",
+      storyZh: "冲突故事",
+      messages: [{ id: "assistant_1", role: "assistant", text: "Hello." }],
+    };
+    const sourceConversationId = "conversation-stale-upsert-conflict";
+    const payload = toSyncConversation(copy, sourceConversationId);
+    const key = conflictKey(sourceConversationId, "sync_mutation_stale_upsert");
+    const hash = await hashSyncPayload(payload);
+    const conflictConversationId = await conflictConversationIdForPayload(
+      sourceConversationId,
+      payload,
+    );
+
+    await expect(
+      createConflictCopyInTransaction(
+        key,
+        sourceConversationId,
+        conflictConversationId,
+        hash,
+        copy,
+      ),
+    ).resolves.toBe("created");
+    const staleItem = (await listSyncOutbox()).find(
+      (value) => value.conversationId === conflictConversationId,
+    );
+    expect(staleItem?.operation).toBe("upsert");
+    if (!staleItem) throw new Error("conflict copy outbox missing");
+
+    await writeStorySession(conflictConversationId, { ...copy, title: "本地更新" }, copy.revision);
+    await markSyncSuccess(staleItem, 1, staleItem.localRevision);
+
+    expect(
+      (await listSyncConflicts()).find((conflict) => conflict.conflictKey === key),
+    ).toMatchObject({ status: "open", conflictConversationId });
+    expect(
+      (await listSyncOutbox()).find((value) => value.conversationId === conflictConversationId)
+        ?.mutationId,
+    ).not.toBe(staleItem.mutationId);
+  });
+
+  test("matching reviewRepair fallback preserves a full review through a suggestions-only title edit", async () => {
+    const conversationId = "conversation-review-repair-fallback";
+    const completeReview: DailyReview = {
+      score: 90,
+      comment: "保留完整评分",
+      overallFeedback: "整体表达清晰。",
+      rubric: null,
+      suggestions: [],
+    };
+    const initial = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: completeReview,
+      },
+      null,
+    );
+
+    expect((await readStorySession(conversationId))?.review?.score).toBe(90);
+    await putReviewRepairMarker(conversationId, initial.revision, initial.sessionInstanceId!, {
+      ...completeReview,
+      score: 95,
+    });
+    expect((await readStorySession(conversationId))?.review?.score).toBe(90);
+
+    await deleteDailyStoryReview(conversationId);
+    const recovered = await readStorySession(conversationId);
+    expect(recovered?.review).toMatchObject({
+      score: 95,
+      comment: completeReview.comment,
+      overallFeedback: completeReview.overallFeedback,
+    });
+    expect(
+      (await listStorySessions()).find((session) => session.id === conversationId),
+    ).toMatchObject({
+      id: conversationId,
+      review: { score: 95, comment: completeReview.comment },
+    });
+
+    await writeStorySession(
+      conversationId,
+      {
+        phase: recovered!.phase,
+        storyZh: recovered!.storyZh,
+        messages: recovered!.messages,
+        title: "修改后的标题",
+        review: { suggestions: recovered!.review?.suggestions ?? [] },
+      },
+      recovered!.revision,
+    );
+
+    const persisted = await readStorySession(conversationId);
+    expect(persisted).toMatchObject({
+      title: "修改后的标题",
+      review: {
+        score: 95,
+        comment: completeReview.comment,
+        overallFeedback: completeReview.overallFeedback,
+      },
+    });
+    expect(
+      (await listSyncMeta()).find((meta) => meta.conversationId === conversationId),
+    ).not.toHaveProperty("reviewRepair");
+  });
+
+  test("reviewRepair from another session generation is not used as a fallback", async () => {
+    const conversationId = "conversation-review-repair-generation";
+    const initial = await writeStorySession(
+      conversationId,
+      {
+        phase: "review",
+        storyZh: "一个故事",
+        messages: [],
+        review: { score: 80, comment: "当前版本", rubric: null, suggestions: [] },
+      },
+      null,
+    );
+    await deleteDailyStoryReview(conversationId);
+    await putReviewRepairMarker(conversationId, initial.revision, "session-different-generation", {
+      score: 99,
+      comment: "旧版本",
+      rubric: null,
+      suggestions: [],
+    });
+
+    expect((await readStorySession(conversationId))?.review).toMatchObject({
+      score: null,
+      comment: null,
+      rubric: null,
+      suggestions: [],
+    });
+  });
+
+  test("same-generation review repair markers migrate after a newer local session wins", async () => {
     const conversationId = "conversation-review-repair-stale";
     const first = await writeStorySession(
       conversationId,
@@ -216,7 +432,14 @@ describe("Daily Story sync persistence", () => {
     ).resolves.toBe(false);
     expect(
       (await listSyncMeta()).find((meta) => meta.conversationId === conversationId),
-    ).not.toHaveProperty("reviewRepair");
+    ).toMatchObject({
+      reviewRepair: {
+        operation: "upsert",
+        sessionRevision: newer.revision,
+        sessionInstanceId: newer.sessionInstanceId,
+        review: null,
+      },
+    });
     expect((await readStorySession(conversationId))?.revision).toBe(newer.revision);
   });
 });

@@ -420,21 +420,27 @@ export async function markSyncSuccess(
           }
           const remove = outbox.delete(item.conversationId);
           remove.onsuccess = () => {
-            // A delete conflict is resolved only after a newer delete for the
-            // same source is accepted (including an idempotent retry).
-            if (item.operation !== "delete") {
-              setResult(tx, undefined);
-              return;
-            }
-            const openConflicts = conflicts.getAll();
-            openConflicts.onsuccess = () => {
-              for (const raw of openConflicts.result as unknown[]) {
+            const resolveConflicts = conflicts.getAll();
+            resolveConflicts.onsuccess = () => {
+              for (const raw of resolveConflicts.result as unknown[]) {
                 const conflict = syncConflictSchema.parse(raw);
-                if (
+                const resolvesUpsert =
+                  item.operation === "upsert" &&
+                  conflict.operation === "upsert" &&
+                  conflict.conflictConversationId === item.conversationId;
+                const resolvesDelete =
+                  item.operation === "delete" &&
                   conflict.sourceConversationId === item.conversationId &&
-                  conflict.operation === "delete" &&
-                  conflict.status === "open"
-                ) {
+                  conflict.operation === "delete";
+                if (conflict.status !== "open" || (!resolvesUpsert && !resolvesDelete)) {
+                  continue;
+                }
+                if (resolvesUpsert) {
+                  conflicts.put({ ...conflict, status: "resolved" });
+                } else {
+                  // A delete conflict is resolved only after a newer delete
+                  // for the same source is accepted (including an idempotent
+                  // retry).
                   conflicts.delete(conflict.conflictKey);
                 }
               }

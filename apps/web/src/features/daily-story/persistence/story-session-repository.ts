@@ -36,10 +36,85 @@ import type {
 import { clearReviewRepairMarker, queueStorySyncInTransaction } from "./story-sync-repository";
 import type { StoredSyncMeta } from "./internal/schemas";
 
+type ReviewRepair = NonNullable<StoredSyncMeta["reviewRepair"]>;
+
 type StorySessionWriteResult = {
   session: StorySession;
   previousSessionInstanceId: string | undefined;
+  reviewRepair?: ReviewRepair;
 };
+
+type SessionReadResult = {
+  session: StorySession | null;
+  reviewRepair: ReviewRepair | null;
+};
+
+function matchingReviewRepair(
+  session: StorySession | null,
+  meta: StoredSyncMeta | null,
+): ReviewRepair | null {
+  const repair = meta?.reviewRepair;
+  if (
+    !session ||
+    !repair ||
+    repair.operation !== "upsert" ||
+    repair.sessionRevision !== session.revision ||
+    repair.sessionInstanceId !== session.sessionInstanceId
+  ) {
+    return null;
+  }
+  return repair;
+}
+
+function reviewFromRepair(repair: ReviewRepair["review"]): DailyReview | null {
+  return repair ? (repair as unknown as DailyReview) : null;
+}
+
+async function readSessionAndRepair(conversationId: string): Promise<SessionReadResult> {
+  return transaction<SessionReadResult>([SESSION_STORE, SYNC_META_STORE], "readonly", (tx) => {
+    const sessionRequest = tx.objectStore(SESSION_STORE).get(conversationId);
+    const metaRequest = tx.objectStore(SYNC_META_STORE).get(conversationId);
+    let sessionLoaded = false;
+    let metaLoaded = false;
+    const finish = () => {
+      if (!sessionLoaded || !metaLoaded) return;
+      const rawSession = sessionRequest.result as unknown;
+      const session =
+        rawSession === undefined ? null : fromStoredSession(sessionSchema.parse(rawSession));
+      const rawMeta = metaRequest.result as unknown;
+      const meta = rawMeta === undefined ? null : syncMetaSchema.parse(rawMeta);
+      setResult(tx, { session, reviewRepair: matchingReviewRepair(session, meta) });
+    };
+    sessionRequest.onsuccess = () => {
+      sessionLoaded = true;
+      finish();
+    };
+    metaRequest.onsuccess = () => {
+      metaLoaded = true;
+      finish();
+    };
+  });
+}
+
+async function readEffectiveSession(sessionResult: SessionReadResult, conversationId: string) {
+  if (!sessionResult.session) return null;
+  let sidecar = null;
+  try {
+    sidecar = await readDailyStoryReview(
+      conversationId,
+      sessionResult.session.revision,
+      sessionResult.session.sessionInstanceId,
+    );
+  } catch {
+    // The primary database remains usable when the sidecar database is
+    // unavailable. A matching sync marker is the durable fallback.
+  }
+  if (sidecar) return mergeReview(sessionResult.session, sidecar);
+  const repairedReview = reviewFromRepair(sessionResult.reviewRepair?.review ?? null);
+  return repairedReview
+    ? { ...sessionResult.session, review: repairedReview }
+    : sessionResult.session;
+}
 
 export async function ensureDailyStorage() {
   await database();
@@ -113,27 +188,24 @@ export async function listStorySessions(): Promise<StorySessionSummary[]> {
   await ensureDailyStorage();
   const records = await transaction<unknown[]>(SESSION_STORE, "readonly", (tx) => {
     const request = tx.objectStore(SESSION_STORE).getAll();
-    request.onsuccess = () => {
-      setResult(tx, request.result as unknown[]);
-    };
+    request.onsuccess = () => setResult(tx, request.result as unknown[]);
   });
   const sessions = await Promise.all(
     records.map(async (record) => {
       const parsed = sessionSchema.parse(record);
-      const session = fromStoredSession(parsed);
-      const review = await readDailyStoryReview(
+      const effective = await readEffectiveSession(
+        await readSessionAndRepair(parsed.id),
         parsed.id,
-        parsed.revision,
-        parsed.sessionInstanceId,
       );
+      if (!effective) throw new Error("Daily Story session disappeared during listing.");
       return {
         id: parsed.id,
         revision: parsed.revision,
         updatedAt: parsed.updatedAt,
-        phase: parsed.phase,
-        storyZh: parsed.storyZh,
-        title: session.title ?? deriveStableDailyStoryTitle(session.storyZh),
-        review: session.review ? (mergeReview(session, review).review ?? null) : null,
+        phase: effective.phase,
+        storyZh: effective.storyZh,
+        title: effective.title ?? deriveStableDailyStoryTitle(effective.storyZh),
+        review: effective.review ?? null,
       } satisfies StorySessionSummary;
     }),
   );
@@ -141,19 +213,7 @@ export async function listStorySessions(): Promise<StorySessionSummary[]> {
 }
 
 export async function readStorySession(conversationId = CURRENT): Promise<StorySession | null> {
-  const session = await transaction<StorySession | null>(SESSION_STORE, "readonly", (tx) => {
-    const request = tx.objectStore(SESSION_STORE).get(conversationId);
-    request.onsuccess = () => {
-      const record = request.result as unknown;
-      setResult(tx, record === undefined ? null : fromStoredSession(sessionSchema.parse(record)));
-    };
-  });
-  return session
-    ? mergeReview(
-        session,
-        await readDailyStoryReview(conversationId, session.revision, session.sessionInstanceId),
-      )
-    : null;
+  return readEffectiveSession(await readSessionAndRepair(conversationId), conversationId);
 }
 
 /** CAS writes stop stale tabs from undoing newer turns. */
@@ -203,14 +263,17 @@ export async function writeStorySession(
     (tx, abort) => {
       const store = tx.objectStore(SESSION_STORE);
       const request = store.get(conversationId);
+      const metaRequest = tx.objectStore(SYNC_META_STORE).get(conversationId);
       const leaseRequest =
         ownerId !== undefined ? tx.objectStore(LEASE_STORE).get(conversationId) : undefined;
       let storedSessionRecord: StoredSession | undefined;
+      let storedMeta: StoredSyncMeta | null = null;
       let leaseRecord: unknown;
       let sessionReady = false;
+      let metaReady = false;
       let leaseReady = ownerId === undefined;
       const commit = () => {
-        if (!sessionReady || !leaseReady) return;
+        if (!sessionReady || !metaReady || !leaseReady) return;
         try {
           if (ownerId !== undefined) {
             const lease = leaseRecord === undefined ? null : leaseSchema.parse(leaseRecord);
@@ -232,33 +295,63 @@ export async function writeStorySession(
             return;
           }
           const { review: snapshotReview, ...sessionWithoutReview } = session;
+          const matchingRepair = matchingReviewRepair(previous, storedMeta);
+          let nextReview: DailyReview | undefined;
+          if (snapshotReview && "score" in snapshotReview) {
+            nextReview = snapshotReview;
+          } else if (matchingRepair?.review) {
+            const repairedReview = reviewFromRepair(matchingRepair.review);
+            if (repairedReview) {
+              nextReview = {
+                ...repairedReview,
+                ...(snapshotReview ? { suggestions: snapshotReview.suggestions } : {}),
+              };
+            }
+          } else if (snapshotReview) {
+            nextReview = {
+              score: null,
+              comment: null,
+              overallFeedback: null,
+              rubric: null,
+              suggestions: snapshotReview.suggestions,
+            };
+          }
           const next: StorySession = {
             ...sessionWithoutReview,
-            ...(snapshotReview
-              ? {
-                  review:
-                    "score" in snapshotReview
-                      ? snapshotReview
-                      : {
-                          score: null,
-                          comment: null,
-                          overallFeedback: null,
-                          rubric: null,
-                          suggestions: snapshotReview.suggestions,
-                        },
-                }
-              : {}),
+            ...(nextReview ? { review: nextReview } : {}),
             schemaVersion: 1,
             revision: (previous?.revision ?? 0) + 1,
             sessionInstanceId: previous?.sessionInstanceId ?? createId("session"),
             updatedAt: new Date().toISOString(),
           };
+          const migratedReviewRepair = matchingRepair
+            ? syncMetaSchema.parse({
+                ...(storedMeta as StoredSyncMeta),
+                reviewRepair: {
+                  ...matchingRepair,
+                  sessionRevision: next.revision,
+                  sessionInstanceId: next.sessionInstanceId,
+                  review: nextReview ?? null,
+                },
+                updatedAt: new Date().toISOString(),
+              }).reviewRepair
+            : undefined;
+          if (migratedReviewRepair) {
+            tx.objectStore(SYNC_META_STORE).put(
+              syncMetaSchema.parse({
+                ...(storedMeta as StoredSyncMeta),
+                reviewRepair: migratedReviewRepair,
+                updatedAt: new Date().toISOString(),
+              }),
+            );
+          }
           const write = store.put(sessionRecord(next, conversationId));
           write.onsuccess = () =>
             queueStorySyncInTransaction(tx, conversationId, "upsert", next, () =>
               setResult(tx, {
                 session: next,
                 previousSessionInstanceId: previous?.sessionInstanceId,
+                ...(migratedReviewRepair ? { reviewRepair: migratedReviewRepair } : {}),
               }),
             );
         } catch (error) {
@@ -269,6 +362,16 @@ export async function writeStorySession(
         try {
           storedSessionRecord = request.result as StoredSession | undefined;
           sessionReady = true;
+          commit();
+        } catch (error) {
+          abort(error);
+        }
+      };
+      metaRequest.onsuccess = () => {
+        try {
+          const raw = metaRequest.result as unknown;
+          storedMeta = raw === undefined ? null : syncMetaSchema.parse(raw);
+          metaReady = true;
           commit();
         } catch (error) {
           abort(error);
@@ -287,7 +390,7 @@ export async function writeStorySession(
       }
     },
   );
-  const { session: persistedSession, previousSessionInstanceId } = result;
+  const { session: persistedSession, previousSessionInstanceId, reviewRepair } = result;
   try {
     await persistReviewSidecar(
       conversationId,
@@ -310,13 +413,12 @@ export async function writeStorySession(
       throw new StorySidecarPersistenceError(conversationId, "write");
     }
   }
-  await clearReviewRepairMarker(conversationId);
+  if (reviewRepair) await clearReviewRepairMarker(conversationId, reviewRepair);
   notifySession(conversationId, persistedSession.revision);
   return persistedSession;
 }
 
 type RemoteApplyResult = "applied" | "skipped";
-type ReviewRepair = NonNullable<StoredSyncMeta["reviewRepair"]>;
 
 async function applyRemoteSessionRecord(
   conversationId: string,
@@ -459,6 +561,53 @@ export function applyRemoteStoryDeletion(
   return applyRemoteSessionRecord(conversationId, null, remoteRevision, expectedLocalRevision);
 }
 
+async function migrateReviewRepairMarker(
+  conversationId: string,
+  expected: ReviewRepair,
+  session: StorySession,
+) {
+  const migrated = syncMetaSchema.parse({
+    conversationId,
+    remoteRevision: expected.remoteRevision,
+    localRevision: session.revision,
+    ...(session.sessionInstanceId ? { sessionInstanceId: session.sessionInstanceId } : {}),
+    reviewRepair: {
+      ...expected,
+      sessionRevision: session.revision,
+      ...(session.sessionInstanceId ? { sessionInstanceId: session.sessionInstanceId } : {}),
+      review: expected.review
+        ? {
+            ...expected.review,
+            ...(session.review ? { suggestions: session.review.suggestions } : {}),
+          }
+        : null,
+    },
+    updatedAt: new Date().toISOString(),
+  });
+  await transaction<void>(SYNC_META_STORE, "readwrite", (tx) => {
+    const store = tx.objectStore(SYNC_META_STORE);
+    const request = store.get(conversationId);
+    request.onsuccess = () => {
+      const current = request.result === undefined ? null : syncMetaSchema.parse(request.result);
+      if (
+        !current?.reviewRepair ||
+        JSON.stringify(current.reviewRepair) !== JSON.stringify(expected)
+      ) {
+        setResult(tx, undefined);
+        return;
+      }
+      const write = store.put(
+        syncMetaSchema.parse({
+          ...current,
+          reviewRepair: migrated.reviewRepair,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+      write.onsuccess = () => setResult(tx, undefined);
+    };
+  });
+}
+
 export async function repairStoryReviewFromSync(conversationId: string, repair: ReviewRepair) {
   const state = await transaction<{
     session: StorySession | null;
@@ -492,6 +641,17 @@ export async function repairStoryReviewFromSync(conversationId: string, repair: 
   const matchesDelete =
     state.session === null &&
     (!state.outbox || (state.outbox.operation === "delete" && state.outbox.localRevision === null));
+  const newerSameGenerationSession =
+    repair.operation === "upsert" &&
+    state.session !== null &&
+    state.session.sessionInstanceId === repair.sessionInstanceId &&
+    state.session.revision > (repair.sessionRevision ?? -1)
+      ? state.session
+      : null;
+  if (newerSameGenerationSession) {
+    await migrateReviewRepairMarker(conversationId, repair, newerSameGenerationSession);
+    return false;
+  }
   if (
     (repair.operation === "upsert" && !matchesUpsert) ||
     (repair.operation === "delete" && !matchesDelete)

@@ -530,6 +530,13 @@ describe("Daily Story policy service", () => {
     );
     expect(reviewSystemPrompt).toMatch(/(?:optional.{0,80}diff|diff.{0,80}optional)/i);
     expect(reviewSystemPrompt).toMatch(/server.{0,100}(?:calculat|determin).{0,100}score/i);
+    expect(reviewSystemPrompt).toMatch(
+      /full role-aware conversation.*(?:understand|disambiguate).*learner intent/i,
+    );
+    expect(reviewSystemPrompt).toMatch(/evidence.*learner.*turn/i);
+    expect(reviewSystemPrompt).not.toContain(
+      "Full role-aware conversation is context for overallFeedback only",
+    );
     expect(reviewSystemPrompt).not.toMatch(
       /Each suggestion object must contain exactly these five fields:.*diff/i,
     );

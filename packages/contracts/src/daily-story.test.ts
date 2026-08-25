@@ -7,6 +7,7 @@ import {
   dailyStoryReplyRequestSchema,
   dailyStoryReviewDiffSchema,
   dailyStoryReviewRequestSchema,
+  dailyStoryReviewSchema,
   dailyStoryReviewResponseSchema,
   dailyStoryReviewSuggestionSchema,
   dailyStoryTtsConfigSchema,
@@ -223,6 +224,73 @@ describe("Daily Story contracts", () => {
         includeTitle: true,
       }).includeTitle,
     ).toBe(true);
+  });
+
+  test("limits canonical reviews to two suggestions with optional diffs", () => {
+    const rubric = {
+      fluency: { score: 70, comment: "表达连贯。", evidence: [] },
+      grammar: { score: 70, comment: "语法稳定。", evidence: [] },
+      vocabulary: { score: 70, comment: "词汇够用。", evidence: [] },
+      naturalness: { score: 70, comment: "表达自然。", evidence: [] },
+    };
+    const suggestion = (sourceTurnId: string, withDiff: boolean) => {
+      const original = `I went home ${sourceTurnId}.`;
+      return {
+        sourceTurnId,
+        original,
+        ...(withDiff
+          ? {
+              diff: [
+                ["=", "I went "],
+                ["-", `home ${sourceTurnId}.`],
+              ] as const,
+            }
+          : {}),
+        improved: `I headed home ${sourceTurnId}.`,
+        category: "naturalness" as const,
+        explanationZh: "更像自然口语。",
+      };
+    };
+    const three = [suggestion("u1", true), suggestion("u2", true), suggestion("u3", true)];
+
+    expect(
+      dailyStoryReviewSchema.safeParse({
+        score: 70,
+        comment: "表达基本清楚。",
+        rubric,
+        suggestions: three,
+      }).success,
+    ).toBe(false);
+    expect(
+      dailyStoryReviewResponseSchema.safeParse({
+        score: 70,
+        comment: "表达基本清楚。",
+        rubric,
+        suggestions: three,
+        requestId: "canonical-review",
+      }).success,
+    ).toBe(false);
+
+    for (const withDiff of [false, true]) {
+      const suggestions = [suggestion("u1", withDiff), suggestion("u2", withDiff)];
+      expect(
+        dailyStoryReviewSchema.safeParse({
+          score: 70,
+          comment: "表达基本清楚。",
+          rubric,
+          suggestions,
+        }).success,
+      ).toBe(true);
+      expect(
+        dailyStoryReviewResponseSchema.safeParse({
+          score: 70,
+          comment: "表达基本清楚。",
+          rubric,
+          suggestions,
+          requestId: "canonical-review",
+        }).success,
+      ).toBe(true);
+    }
   });
 
   test("bounds compact review diffs and rejects diffs without a deletion", () => {

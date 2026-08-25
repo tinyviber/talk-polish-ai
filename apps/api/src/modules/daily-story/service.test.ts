@@ -13,6 +13,7 @@ import {
   openingUserPrompt,
   reviewResultSchema,
   reviewSystemPrompt,
+  reviewUserPrompt,
 } from "./policy";
 import { createDailyStoryService, DAILY_STORY_REVIEW_MAX_TOKENS } from "./service";
 
@@ -435,10 +436,10 @@ describe("Daily Story policy service", () => {
     expect(prompt).toContain('"id":"u7"');
     expect(prompt).not.toContain('"id":"u0"');
     expect(prompt).toContain("assistant-7");
-    expect(prompt).toContain("<LEARNER_USER_TURNS_FOR_SCORING_ONLY>");
+    expect(prompt).toContain("<LEARNER_USER_TURNS_FOR_EVALUATION_AND_EVIDENCE>");
   });
 
-  test("requires canonical rubric scores or complete legacy scores", () => {
+  test("requires a usable rubric or complete legacy scores", () => {
     expect(
       reviewResultSchema.safeParse({ score: 70, rubric: rubric(), suggestions: [] }).success,
     ).toBe(true);
@@ -473,6 +474,26 @@ describe("Daily Story policy service", () => {
     ).toBe(true);
     expect(
       reviewResultSchema.safeParse({
+        rubric: {
+          fluency: { score: 70 },
+          grammar: { score: 70 },
+          vocabulary: { score: 70 },
+          naturalness: { score: 70 },
+        },
+        suggestions: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      reviewResultSchema.safeParse({
+        score: 70,
+        rubric: rubric(),
+        comment: "legacy extra field",
+        overallFeedback: { malformed: true },
+        suggestions: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      reviewResultSchema.safeParse({
         score: 70,
         rubric: rubric(),
         suggestions: [{ sourceTurnId: "u1", improved: "x", category: "grammar", extra: true }],
@@ -481,7 +502,7 @@ describe("Daily Story policy service", () => {
     expect(
       reviewResultSchema.safeParse({ score: { score: 70 }, rubric: rubric(), suggestions: [] })
         .success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       reviewResultSchema.safeParse({
         score: 71,
@@ -512,6 +533,20 @@ describe("Daily Story policy service", () => {
     );
     expect(reviewSystemPrompt).toContain("Never return rubric: null");
     expect(reviewSystemPrompt).toContain("Never return only overallFeedback or suggestions");
+    expect(
+      reviewUserPrompt({
+        storyZh: "今天开会。",
+        conversation: [{ id: "a1", role: "assistant", text: "How did it go?" }],
+        scoringHistory: [{ id: "u1", role: "user", text: "It was long." }],
+      }),
+    ).toContain("<FULL_ROLE_AWARE_CONVERSATION_FOR_INTENT_AND_OVERALL_FEEDBACK>");
+    expect(
+      reviewUserPrompt({
+        storyZh: "今天开会。",
+        conversation: [],
+        scoringHistory: [],
+      }),
+    ).not.toContain("FULL_ROLE_AWARE_CONVERSATION_FOR_OVERALL_FEEDBACK_ONLY");
   });
 
   test("defines native spoken-English recasts instead of mandatory corrections", () => {
@@ -793,6 +828,27 @@ describe("Daily Story policy service", () => {
           score: 91,
           evidence: [{ sourceTurnId: "u1", quote: "meeting was long" }],
         },
+      },
+    });
+  });
+
+  test("keeps a usable rubric when provider score or feedback metadata is malformed", async () => {
+    const service = serviceFor([
+      {
+        rubric: rubric({ fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 }),
+        overallFeedback: { malformed: true },
+        suggestions: [],
+      },
+    ]);
+
+    await expect(service.review(reviewInput())).resolves.toMatchObject({
+      score: 75,
+      overallFeedback: null,
+      rubric: {
+        fluency: { score: 91 },
+        grammar: { score: 80 },
+        vocabulary: { score: 70 },
+        naturalness: { score: 60 },
       },
     });
   });

@@ -175,7 +175,10 @@ export const reviewSuggestionCandidateSchema = z
 // Keep this opaque at the scoring boundary. The domain normalizer validates
 // each candidate and skips malformed optional suggestions independently.
 const reviewSuggestionsSchema = z.unknown().optional();
-const reviewOverallFeedbackSchema = z.string().min(1).max(600).nullable();
+// Overall feedback is optional enrichment. Keep it opaque at the structured
+// boundary and let the application layer accept only a bounded string; a
+// malformed feedback field must not discard a usable rubric.
+const reviewOverallFeedbackSchema = z.unknown();
 
 /**
  * The review response has two accepted wire formats:
@@ -202,7 +205,7 @@ const reviewResultValidator = z
     title: z.unknown().optional(),
     titleBasis: z.unknown().optional(),
   })
-  .strict()
+  .strip()
   .superRefine((value, context) => {
     const hasRubricField = Object.prototype.hasOwnProperty.call(value, "rubric");
     if (hasRubricField) {
@@ -216,16 +219,9 @@ const reviewResultValidator = z
             "Canonical review output must include fluency, grammar, vocabulary, and naturalness with integer scores from 0 to 100.",
         });
       }
-      if (!hasCanonicalScoreSignal(value.score)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["score"],
-          message: "Canonical review output must include a top-level integer score from 0 to 100.",
-        });
-      }
       // The application calculates the persisted score from rubric scores.
-      // Accept a provider's independently rounded total so a harmless
-      // mismatch does not force a second model call and another 503.
+      // A provider may omit or misformat its redundant top-level score without
+      // making an otherwise usable rubric invalid.
       return;
     }
 
@@ -252,10 +248,6 @@ function hasScoreSignal(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const score = (value as Record<string, unknown>).score;
   return typeof score === "number" && Number.isInteger(score) && score >= 0 && score <= 100;
-}
-
-function hasCanonicalScoreSignal(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100;
 }
 
 export const conversationSystemPrompt = `You are a warm English-speaking friend having a casual Daily Story Conversation.
@@ -325,12 +317,12 @@ export function reviewUserPrompt(input: {
     "<STORY_ZH_UNTRUSTED>",
     input.storyZh,
     "</STORY_ZH_UNTRUSTED>",
-    "<FULL_ROLE_AWARE_CONVERSATION_FOR_OVERALL_FEEDBACK_ONLY>",
+    "<FULL_ROLE_AWARE_CONVERSATION_FOR_INTENT_AND_OVERALL_FEEDBACK>",
     JSON.stringify(input.conversation),
-    "</FULL_ROLE_AWARE_CONVERSATION_FOR_OVERALL_FEEDBACK_ONLY>",
-    "<LEARNER_USER_TURNS_FOR_SCORING_ONLY>",
+    "</FULL_ROLE_AWARE_CONVERSATION_FOR_INTENT_AND_OVERALL_FEEDBACK>",
+    "<LEARNER_USER_TURNS_FOR_EVALUATION_AND_EVIDENCE>",
     JSON.stringify(input.scoringHistory),
-    "</LEARNER_USER_TURNS_FOR_SCORING_ONLY>",
+    "</LEARNER_USER_TURNS_FOR_EVALUATION_AND_EVIDENCE>",
     ...(input.includeTitle
       ? [
           "Also return an optional short Chinese title based only on STORY_ZH and titleBasis as an exact source phrase from STORY_ZH. Do not use conversation details. If uncertain, omit title.",

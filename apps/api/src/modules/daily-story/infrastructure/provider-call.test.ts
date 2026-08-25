@@ -67,4 +67,18 @@ describe("Daily Story provider error adapter", () => {
     expect(result.details[0]!).toContain("first suggestions.0.explanationZh: Expected string");
     expect(result.details.join(" ")).not.toContain("raw model output");
   });
+
+  test("reports malformed model output shape when no schema issues are available", async () => {
+    const result = await safeCall(async () => {
+      throw new StructuredGenerationError("raw model output must not escape", {
+        first: { error: new SyntaxError("unexpected end"), shape: { type: "undefined" } },
+        repair: { error: new SyntaxError("unexpected end"), shape: { type: "undefined" } },
+      });
+    }).catch((error: unknown) => error as { details: string[] });
+
+    expect(result.details).toEqual([
+      "first: model output shape was invalid.",
+      "repair: model output shape was invalid.",
+    ]);
+  });
 });

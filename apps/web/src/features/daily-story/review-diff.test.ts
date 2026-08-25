@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { reviewOriginalDiffSegments } from "./review-diff";
 
 describe("Daily Story review diff display", () => {
-  test("renders server diff operations as kept and deleted segments", () => {
+  test("keeps valid stored diffs backward-compatible", () => {
     expect(
       reviewOriginalDiffSegments({
         original: "I go home.",
@@ -20,35 +20,76 @@ describe("Daily Story review diff display", () => {
     ]);
   });
 
-  test("uses a deterministic fallback for old suggestions without diff", () => {
-    const segments = reviewOriginalDiffSegments({
+  test.each([
+    {
+      label: "missing diff",
       original: "I go home.",
-      improved: "I went home.",
-    });
-    expect(segments.some((segment) => segment.deleted && segment.text.includes("go"))).toBe(true);
-    expect(segments.some((segment) => !segment.deleted && segment.text.includes("I"))).toBe(true);
-  });
-
-  test("does not mark an unreliable whole-sentence fallback as deleted", () => {
-    expect(
-      reviewOriginalDiffSegments({ original: "Completely unrelated.", improved: "Another idea." }),
-    ).toEqual([{ key: "ordinary-0", text: "Completely unrelated.", deleted: false }]);
-  });
-
-  test("falls back when a stored diff is malformed", () => {
-    const segments = reviewOriginalDiffSegments({
+      diff: undefined,
+    },
+    {
+      label: "malformed diff",
       original: "I go home.",
-      improved: "I went home.",
       diff: [["=", "not the original"]],
-    });
-    expect(segments.some((segment) => segment.deleted)).toBe(true);
+    },
+    {
+      label: "diff without a minus segment",
+      original: "I go home.",
+      diff: [["=", "I go home."]],
+    },
+    {
+      label: "deletion-only full recast",
+      original: "I go home.",
+      diff: [["-", "I go home."]],
+    },
+    {
+      label: "negligible kept word",
+      original: "I went home.",
+      diff: [
+        ["=", "I"],
+        ["-", " went home."],
+      ],
+    },
+    {
+      label: "whitespace-only kept span",
+      original: " I went home.",
+      diff: [
+        ["=", " "],
+        ["-", "I went home."],
+      ],
+    },
+    {
+      label: "non-reconstructing diff",
+      original: "I go home.",
+      diff: [["-", "wrong"]],
+    },
+  ])("returns exactly the original without strike-through for $label", ({ original, diff }) => {
+    expect(
+      reviewOriginalDiffSegments({
+        original,
+        improved: "A substantially different natural recast.",
+        diff: diff as never,
+      }),
+    ).toEqual([{ key: "ordinary-0", text: original, deleted: false }]);
   });
 
-  test("marks changed punctuation when old data has no server diff", () => {
-    const segments = reviewOriginalDiffSegments({
-      original: "Hello.",
-      improved: "Hello!",
+  test("keeps explicit legacy diffs readable without heuristic fallback", () => {
+    const adjacent = reviewOriginalDiffSegments({
+      original: "I go home.",
+      improved: "I went home.",
+      diff: [
+        ["=", "I"],
+        ["=", " go"],
+        ["-", " home."],
+      ],
     });
-    expect(segments).toContainEqual({ key: "segment-1", text: ".", deleted: true });
+    expect(adjacent.some((segment) => segment.deleted)).toBe(true);
+
+    const overLimitOriginal = "a".repeat(33);
+    const overLimit = reviewOriginalDiffSegments({
+      original: overLimitOriginal,
+      improved: "A recast.",
+      diff: Array.from({ length: 33 }, (_, index) => [index % 2 ? "=" : "-", "a"]),
+    });
+    expect(overLimit.some((segment) => segment.deleted)).toBe(true);
   });
 });

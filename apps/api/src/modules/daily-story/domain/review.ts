@@ -153,8 +153,22 @@ export function normalizeReviewDiff(
 ): DailyStoryReviewDiffSegment[] | null {
   const parsed = dailyStoryReviewDiffSchema.safeParse(diff);
   if (!parsed.success) return null;
+  // A deletion-only diff is source-reconstructing but cannot show a
+  // trustworthy local change for a full recast. Keep original readable.
+  if (!hasReliableKeptSpan(original, parsed.data)) return null;
   const reconstructed = parsed.data.map(([, text]) => text).join("");
   return reconstructed === original ? parsed.data : null;
+}
+
+function hasReliableKeptSpan(original: string, diff: DailyStoryReviewDiffSegment[]) {
+  const keptText = diff
+    .filter(([operation]) => operation === "=")
+    .map(([, text]) => text)
+    .join("");
+  return (
+    keptText.length >= Math.max(1, Math.ceil(original.length * 0.2)) &&
+    /[\p{L}\p{N}]/u.test(keptText)
+  );
 }
 
 export function normalizeReviewSuggestions(
@@ -166,7 +180,8 @@ export function normalizeReviewSuggestions(
   const seenSourceIds = new Set<string>();
   const normalized: DailyStoryReviewSuggestion[] = [];
 
-  for (const suggestion of suggestions.slice(0, DAILY_STORY_REVIEW_MAX_SUGGESTIONS)) {
+  for (const suggestion of suggestions) {
+    if (normalized.length >= DAILY_STORY_REVIEW_MAX_SUGGESTIONS) break;
     const original = sourceTurns.get(suggestion.sourceTurnId);
     if (original === undefined) {
       skippedSuggestions.push({

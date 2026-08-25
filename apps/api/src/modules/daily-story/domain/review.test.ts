@@ -82,14 +82,20 @@ describe("daily story review domain", () => {
       [
         {
           sourceTurnId: "u1",
-          diff: [["-", "The meeting was long."]],
+          diff: [
+            ["=", "The meeting "],
+            ["-", "was long."],
+          ],
           improved: "The meeting took too long.",
           category: "naturalness",
           explanationZh: "更自然。",
         },
         {
           sourceTurnId: "u1",
-          diff: [["-", "The meeting was long."]],
+          diff: [
+            ["=", "The "],
+            ["-", "meeting was long."],
+          ],
           improved: "It was a long meeting.",
           category: "clarity",
           explanationZh: "更清楚。",
@@ -101,7 +107,10 @@ describe("daily story review domain", () => {
       {
         sourceTurnId: "u1",
         original: "The meeting was long.",
-        diff: [["-", "The meeting was long."]],
+        diff: [
+          ["=", "The meeting "],
+          ["-", "was long."],
+        ],
         improved: "The meeting took too long.",
         category: "naturalness",
         explanationZh: "更自然。",
@@ -109,6 +118,65 @@ describe("daily story review domain", () => {
     ]);
     expect(result.skippedSuggestions).toEqual([
       { sourceTurnId: "u1", reason: "duplicate_source_turn" },
+    ]);
+    expect(
+      normalizeReviewDiff("The meeting was long.", [["-", "The meeting was long."]]),
+    ).toBeNull();
+    expect(
+      normalizeReviewDiff("I went home.", [
+        ["=", "I"],
+        ["-", " went home."],
+      ]),
+    ).toBeNull();
+  });
+
+  test("keeps substantial no-diff recasts, restores originals, and skips bad candidates", () => {
+    const sourceTurns = new Map([
+      ["u1", "I went to the store yesterday."],
+      ["u2", "The weather was really nice."],
+    ]);
+    const result = normalizeReviewSuggestions(
+      [
+        {
+          sourceTurnId: "unknown",
+          improved: "This source turn does not exist.",
+          category: "clarity",
+          explanationZh: "无效来源。",
+        },
+        {
+          sourceTurnId: "u1",
+          improved: "Yesterday, I stopped by the store.",
+          category: "naturalness",
+          explanationZh: "更像自然口语。",
+        },
+        {
+          sourceTurnId: "u2",
+          improved: "It was such a lovely day.",
+          category: "naturalness",
+          explanationZh: "更自然。",
+        },
+      ],
+      sourceTurns,
+    );
+
+    expect(result.suggestions).toEqual([
+      {
+        sourceTurnId: "u1",
+        original: "I went to the store yesterday.",
+        improved: "Yesterday, I stopped by the store.",
+        category: "naturalness",
+        explanationZh: "更像自然口语。",
+      },
+      {
+        sourceTurnId: "u2",
+        original: "The weather was really nice.",
+        improved: "It was such a lovely day.",
+        category: "naturalness",
+        explanationZh: "更自然。",
+      },
+    ]);
+    expect(result.skippedSuggestions).toEqual([
+      { sourceTurnId: "unknown", reason: "unknown_source_turn" },
     ]);
   });
 

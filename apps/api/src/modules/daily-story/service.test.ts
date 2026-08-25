@@ -514,6 +514,37 @@ describe("Daily Story policy service", () => {
     expect(reviewSystemPrompt).toContain("Never return only overallFeedback or suggestions");
   });
 
+  test("defines native spoken-English recasts instead of mandatory corrections", () => {
+    expect(reviewSystemPrompt).toMatch(/native.*spoken[- ]English.*(?:reformulation|coach)/i);
+    expect(reviewSystemPrompt).toMatch(
+      /(?:similarity.*(?:not|isn't).*goal|(?:not|isn't).*goal.*similarity)/i,
+    );
+    expect(reviewSystemPrompt).toMatch(/structural rewrit/i);
+    expect(reviewSystemPrompt).toMatch(/(?:semantic fidelity|preserve.*intended meaning)/i);
+    expect(reviewSystemPrompt).toMatch(/certainty.*uncertainty/i);
+    expect(reviewSystemPrompt).toContain("Going up a mountain sounds like a much better option");
+    expect(reviewSystemPrompt).toContain("it helps me relax");
+    expect(reviewSystemPrompt).toMatch(/spoken.*conversational.*(?:English|register)/i);
+    expect(reviewSystemPrompt).toMatch(
+      /(?:already natural|natural sentence).{0,100}(?:do not|don't|no).{0,40}rewrite/i,
+    );
+    expect(reviewSystemPrompt).toMatch(/(?:optional.{0,80}diff|diff.{0,80}optional)/i);
+    expect(reviewSystemPrompt).toMatch(/server.{0,100}(?:calculat|determin).{0,100}score/i);
+    expect(reviewSystemPrompt).toMatch(
+      /full role-aware conversation.*(?:understand|disambiguate).*learner intent/i,
+    );
+    expect(reviewSystemPrompt).toMatch(/evidence.*learner.*turn/i);
+    expect(reviewSystemPrompt).not.toContain(
+      "Full role-aware conversation is context for overallFeedback only",
+    );
+    expect(reviewSystemPrompt).not.toMatch(
+      /Each suggestion object must contain exactly these five fields:.*diff/i,
+    );
+    expect(reviewSystemPrompt).not.toMatch(/minus operation/i);
+    expect(reviewSystemPrompt).not.toContain("do not change original wording");
+    expect(reviewSystemPrompt).not.toContain("score MUST equal Math.round");
+  });
+
   test("keeps an empty-suggestion review on the first model call", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor([{ score: 70, rubric: rubric(), suggestions: [] }], requests);
@@ -551,6 +582,58 @@ describe("Daily Story policy service", () => {
     expect(requests).toHaveLength(1);
   });
 
+  test("skips an unknown candidate before retaining two valid recasts", async () => {
+    const service = serviceFor([
+      {
+        score: 70,
+        rubric: rubric(),
+        suggestions: [
+          {
+            sourceTurnId: "unknown",
+            improved: "This source does not exist.",
+            category: "clarity",
+            explanationZh: "无效来源。",
+          },
+          {
+            sourceTurnId: "u1",
+            improved: "Yesterday, I stopped by the store.",
+            category: "naturalness",
+            explanationZh: "更像自然口语。",
+          },
+          {
+            sourceTurnId: "u2",
+            improved: "It was such a lovely day.",
+            category: "naturalness",
+            explanationZh: "更自然。",
+          },
+        ],
+      },
+    ]);
+
+    const result = await service.review({
+      ...reviewInput(),
+      history: [
+        {
+          id: "u1",
+          role: "user" as const,
+          source: "typed" as const,
+          text: "I went to the store yesterday.",
+        },
+        {
+          id: "u2",
+          role: "user" as const,
+          source: "typed" as const,
+          text: "The weather was really nice.",
+        },
+      ],
+    });
+
+    expect(result.suggestions).toEqual([
+      expect.objectContaining({ sourceTurnId: "u1", original: "I went to the store yesterday." }),
+      expect.objectContaining({ sourceTurnId: "u2", original: "The weather was really nice." }),
+    ]);
+  });
+
   test("repairs malformed rubric instead of salvaging feedback or overall", async () => {
     const requests: TextModelRequest[] = [];
     const service = serviceFor(
@@ -575,6 +658,10 @@ describe("Daily Story policy service", () => {
     });
     expect(requests).toHaveLength(2);
     expect(requests[1]?.messages.at(-1)?.content).toContain("Never return rubric: null");
+    expect(requests[1]?.messages.at(-1)?.content).toContain(
+      "native spoken-English reformulation coach",
+    );
+    expect(requests[1]?.messages.at(-1)?.content).toContain("diff is optional");
   });
 
   test("fills a missing title in the same structured review request", async () => {
@@ -685,7 +772,7 @@ describe("Daily Story policy service", () => {
   test("calculates the overall score server-side and preserves valid evidence", async () => {
     const service = serviceFor([
       {
-        score: 75,
+        score: 88,
         rubric: {
           ...rubric({ fluency: 91, grammar: 80, vocabulary: 70, naturalness: 60 }),
           fluency: {

@@ -347,7 +347,7 @@ export const dailyStoryReviewSchema = z
     comment: boundedText(300),
     overallFeedback: z.string().min(1).max(600).nullable().optional(),
     rubric: dailyStoryReviewRubricSchema,
-    suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
+    suggestions: z.array(dailyStoryReviewSuggestionSchema).max(2),
   })
   .strict();
 export type DailyStoryReview = z.infer<typeof dailyStoryReviewSchema>;
@@ -375,7 +375,7 @@ export type DailyStoryReviewRequest = z.infer<typeof dailyStoryReviewRequestSche
 
 export const dailyStoryReviewResponseSchema = z
   .object({
-    suggestions: z.array(dailyStoryReviewSuggestionSchema).max(3),
+    suggestions: z.array(dailyStoryReviewSuggestionSchema).max(2),
     // A successful review response is never scoreless. Historical local
     // sessions may still contain nullable review snapshots, but the API wire
     // contract requires the newly generated score and rubric.

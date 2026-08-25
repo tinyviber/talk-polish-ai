@@ -76,7 +76,7 @@ export function ReviewTabs({
           原始对话
         </TabsTrigger>
         <TabsTrigger value="suggestions" className="rounded-xl py-2.5">
-          修改建议
+          更自然的表达
         </TabsTrigger>
         <TabsTrigger value="score" className="rounded-xl py-2.5">
           水平评分
@@ -197,6 +197,9 @@ export function Review({
       <p className="text-sm font-semibold text-primary">本次复盘</p>
       <h1 className="mt-2 font-display text-3xl">值得记住的表达</h1>
       <p className="mt-2 text-sm text-muted-foreground">只保留高价值改进；没有也完全正常。</p>
+      <p className="mt-2 text-sm text-muted-foreground">
+        原句不一定是错的；下面的改写保留原意，只提供一种更自然的说法。
+      </p>
       <div className="mt-6 space-y-3">
         {suggestions.length ? (
           suggestions.map((item, index) => (
@@ -204,11 +207,12 @@ export function Review({
               key={`${item.sourceTurnId}:${item.original}:${item.improved}:${index}`}
               className="rounded-3xl border border-border bg-card p-5 shadow-lift"
             >
+              <p className="text-xs font-semibold text-primary">你的表达</p>
               <p className="text-sm text-muted-foreground">
-                <span className="sr-only">原句，需要修改的部分已标记：</span>
+                <span className="sr-only">原表达片段，原句中标记的变化：</span>
                 {reviewOriginalDiffSegments(item).map((segment) =>
                   segment.deleted ? (
-                    <del key={segment.key} aria-label={`需修改：${segment.text}`}>
+                    <del key={segment.key} aria-label={`原句中标记的变化：${segment.text}`}>
                       {segment.text}
                     </del>
                   ) : (
@@ -216,6 +220,7 @@ export function Review({
                   ),
                 )}
               </p>
+              <p className="mt-3 text-xs font-semibold text-primary">更自然的说法</p>
               <p className="mt-2 text-lg font-medium">{item.improved}</p>
               <p className="mt-2 text-xs font-medium text-primary">
                 {categoryLabel[item.category]}
@@ -250,7 +255,7 @@ export function Review({
           ))
         ) : (
           <p className="rounded-3xl border border-dashed border-border p-6 text-center text-muted-foreground">
-            这次没有必须修改的表达。继续自然地说下去。
+            这次没有特别值得改写的表达。继续自然地说下去。
           </p>
         )}
       </div>

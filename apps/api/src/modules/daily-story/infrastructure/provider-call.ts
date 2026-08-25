@@ -81,7 +81,11 @@ function providerErrorDetails(error: unknown) {
   });
 }
 
-function structuredSchemaIssues(cause: unknown) {
+type StructuredSchemaIssue =
+  | { attempt: string; path: Array<string | number>; code: string; message?: string }
+  | { attempt: string; shape: unknown };
+
+function structuredSchemaIssues(cause: unknown): StructuredSchemaIssue[] {
   if (!cause || typeof cause !== "object") return [];
   const record = cause as { first?: unknown; repair?: unknown };
   return ["first", "repair"].flatMap((attempt) => {
@@ -89,14 +93,23 @@ function structuredSchemaIssues(cause: unknown) {
     if (!value || typeof value !== "object") return [];
     const item = value as { error?: { issues?: unknown }; shape?: unknown };
     const issues = item.error?.issues;
-    if (!Array.isArray(issues)) return [];
-    const result = issues.slice(0, 8).flatMap((issue) => {
+    if (!Array.isArray(issues)) {
+      return item.shape ? [{ attempt, shape: item.shape }] : [];
+    }
+    const result = issues.slice(0, 8).flatMap((issue: unknown): StructuredSchemaIssue[] => {
       if (!issue || typeof issue !== "object") return [];
       const issueRecord = issue as { path?: unknown; code?: unknown; message?: unknown };
       return [
         {
           attempt,
-          path: Array.isArray(issueRecord.path) ? issueRecord.path.slice(0, 6) : [],
+          path: Array.isArray(issueRecord.path)
+            ? issueRecord.path
+                .slice(0, 6)
+                .filter(
+                  (part): part is string | number =>
+                    typeof part === "string" || typeof part === "number",
+                )
+            : [],
           code: typeof issueRecord.code === "string" ? issueRecord.code : "unknown",
           message:
             typeof issueRecord.message === "string"
@@ -105,6 +118,6 @@ function structuredSchemaIssues(cause: unknown) {
         },
       ];
     });
-    return item.shape ? [...result, { attempt, shape: item.shape }] : result;
+    return result.length > 0 ? result : item.shape ? [{ attempt, shape: item.shape }] : result;
   });
 }
